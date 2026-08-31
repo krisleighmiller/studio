@@ -1,0 +1,1 @@
+When opening a directory in the explorer the UI returns to the top of the screen.

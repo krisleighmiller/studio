@@ -1,0 +1,27 @@
+{
+  "name": "video-workbench",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "dev": "vite",
+    "dev:host": "cargo build --manifest-path host/Cargo.toml",
+    "dev:app": "npm run dev:host && concurrently -k \"vite\" \"npx wait-on http://127.0.0.1:1420 && electron .\"",
+    "build": "tsc && vite build",
+    "build:host": "cargo build --release --manifest-path host/Cargo.toml",
+    "preview": "vite preview",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "dompurify": "^3.4.12",
+    "marked": "^18.0.7"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0",
+    "electron": "^43.2.0",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "wait-on": "^8.0.4"
+  }
+}

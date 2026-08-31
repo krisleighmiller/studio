@@ -1,0 +1,19 @@
+[package]
+name = "workbench-host"
+version = "0.1.0"
+description = "Video Workbench job/host sidecar (stdio JSON-RPC)"
+authors = ["Kris"]
+edition = "2021"
+
+[[bin]]
+name = "workbench-host"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+regex = "1.13.1"
+base64 = "0.23.0"
+hmac = "0.13.0"
+sha2 = "0.11.0"

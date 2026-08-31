@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Workbench</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div id="app" class="app">
+      <div class="workspace">
+        <aside id="explorer-panel" class="panel explorer-panel" aria-label="File browser">
+          <header class="panel-header explorer-header">
+            <span id="project-name" class="panel-meta">No project</span>
+            <div class="explorer-actions">
+              <button
+                type="button"
+                id="new-file-btn"
+                class="icon-button"
+                title="New File"
+                aria-label="New file at project root"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M3.5 1.5h6l3 3V14.5h-9z"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                  />
+                  <path d="M9.5 1.5v3h3" fill="none" stroke="currentColor" stroke-width="1.2" />
+                  <path d="M8 7v5M5.5 9.5H10.5" stroke="currentColor" stroke-width="1.2" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                id="new-folder-btn"
+                class="icon-button"
+                title="New Folder"
+                aria-label="New folder at project root"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M1.5 4.5h4l1.5 1.5H14.5v7.5H1.5z"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                  />
+                  <path d="M8 8v4M6 10h4" stroke="currentColor" stroke-width="1.2" />
+                </svg>
+              </button>
+            </div>
+          </header>
+          <div id="file-tree" class="file-tree" tabindex="0">
+            <p class="empty-state">
+              Open a project folder from <strong>File → Open Project…</strong>
+            </p>
+          </div>
+        </aside>
+
+        <div
+          class="splitter"
+          data-splitter="explorer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize explorer"
+          tabindex="0"
+        ></div>
+
+        <section id="editor-panel" class="panel editor-panel" aria-label="Editor">
+          <div id="editor-tabs" class="tab-bar" role="tablist" aria-label="Editor tabs"></div>
+
+          <div id="find-bar" class="find-bar hidden" role="search" aria-label="Find and replace">
+            <label class="find-field">
+              <span>Find</span>
+              <input id="find-input" type="text" autocomplete="off" />
+            </label>
+            <div class="find-actions">
+              <button type="button" id="find-prev" class="ghost-button" title="Previous match">
+                Prev
+              </button>
+              <button type="button" id="find-next" class="ghost-button" title="Next match">
+                Next
+              </button>
+            </div>
+            <label id="replace-field" class="find-field replace-field hidden">
+              <span>Replace</span>
+              <input id="replace-input" type="text" autocomplete="off" />
+            </label>
+            <div id="replace-actions" class="find-actions replace-field hidden">
+              <button type="button" id="replace-one" class="ghost-button">Replace</button>
+              <button type="button" id="replace-all" class="ghost-button">All</button>
+            </div>
+            <span id="find-count" class="find-count"></span>
+            <button type="button" id="find-close" class="ghost-button find-close" title="Close">
+              Close
+            </button>
+          </div>
+
+          <div id="editor-toolbar" class="editor-toolbar hidden">
+            <button type="button" id="save-btn" class="ghost-button">Save</button>
+            <button type="button" id="save-as-btn" class="ghost-button">Save As</button>
+            <button type="button" id="rename-file-btn" class="ghost-button hidden" title="Rename (F2)">
+              Rename
+            </button>
+            <button type="button" id="delete-file-btn" class="ghost-button hidden" title="Delete (Del)">
+              Delete
+            </button>
+            <button type="button" id="toggle-preview-btn" class="ghost-button hidden">
+              Preview
+            </button>
+          </div>
+
+          <div id="editor-body" class="editor-body">
+            <div id="editor-empty" class="empty-state center">
+              Open a text or media file from the explorer to view it here.
+            </div>
+            <textarea
+              id="editor"
+              class="editor hidden"
+              spellcheck="false"
+              aria-label="File editor"
+            ></textarea>
+            <article
+              id="markdown-preview"
+              class="markdown-preview hidden"
+              aria-label="Markdown preview"
+            ></article>
+            <div id="settings-view" class="settings-view hidden" aria-label="Settings"></div>
+            <div id="voice-view" class="voice-view hidden" aria-label="Character Voice"></div>
+            <article
+              id="docs-view"
+              class="docs-view markdown-preview hidden"
+              aria-label="Documentation"
+            ></article>
+            <div id="media-view" class="media-view hidden" aria-label="Media viewer">
+              <div id="image-stage" class="image-stage hidden">
+                <img id="media-image" alt="Image preview" />
+              </div>
+              <div id="av-stage" class="av-stage hidden">
+                <div id="video-title" class="media-title-bar hidden"></div>
+                <video id="media-video" class="media-video hidden" playsinline preload="metadata"></video>
+                <div id="audio-stage" class="audio-stage hidden">
+                  <div class="audio-glyph" aria-hidden="true">Audio</div>
+                  <div id="audio-title" class="audio-title"></div>
+                  <audio id="media-audio" preload="metadata"></audio>
+                </div>
+                <div class="media-controls">
+                  <div class="media-controls-row">
+                    <button type="button" id="media-play-pause" class="ghost-button">Play</button>
+                    <div class="rate-group" role="group" aria-label="Playback speed">
+                      <button type="button" class="ghost-button rate-btn" data-rate="0.25">
+                        0.25x
+                      </button>
+                      <button type="button" class="ghost-button rate-btn" data-rate="0.5">
+                        0.5x
+                      </button>
+                      <button type="button" class="ghost-button rate-btn" data-rate="0.75">
+                        0.75x
+                      </button>
+                      <button type="button" class="ghost-button rate-btn" data-rate="1">
+                        1x
+                      </button>
+                    </div>
+                    <label class="volume-control" title="Volume">
+                      <span>Vol</span>
+                      <input
+                        id="media-volume"
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value="1"
+                        aria-label="Volume"
+                      />
+                    </label>
+                    <span id="media-time" class="media-time">0:00 / 0:00</span>
+                  </div>
+                  <div class="media-controls-row seek-row">
+                    <input
+                      id="media-seek"
+                      class="media-seek"
+                      type="range"
+                      min="0"
+                      max="0"
+                      step="0.01"
+                      value="0"
+                      aria-label="Playback position"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div
+          class="splitter"
+          data-splitter="chat"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize chat"
+          tabindex="0"
+        ></div>
+
+        <aside id="chat-panel" class="panel chat-panel" aria-label="Chat">
+          <div id="chat-tabs" class="tab-bar" role="tablist" aria-label="Chat tabs"></div>
+          <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+          <form id="chat-form" class="chat-compose">
+            <div
+              id="chat-attachments"
+              class="chat-attachments hidden"
+              aria-label="Files attached to chat"
+            ></div>
+            <textarea
+              id="chat-input"
+              rows="3"
+              placeholder="Ask the Director — drag files here or right-click Add to Chat…"
+              aria-label="Chat message"
+            ></textarea>
+            <div class="chat-compose-actions">
+              <label class="chat-model-picker">
+                <span>Model</span>
+                <select id="chat-model-select" aria-label="Chat LLM"></select>
+              </label>
+              <div class="chat-compose-buttons">
+                <button type="button" id="new-chat-tab" class="ghost-button">New chat</button>
+                <button type="submit" id="chat-send-btn" class="primary-button">Send</button>
+              </div>
+            </div>
+          </form>
+        </aside>
+      </div>
+
+      <footer class="status-bar">
+        <span id="status-left">Ready</span>
+        <span id="status-right"></span>
+      </footer>
+
+      <div id="context-menu" class="context-menu hidden" role="menu"></div>
+    </div>
+  </body>
+</html>

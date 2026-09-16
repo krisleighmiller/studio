@@ -173,7 +173,10 @@ const els = {
   chatAttachments: document.querySelector<HTMLElement>("#chat-attachments")!,
   chatInput: document.querySelector<HTMLTextAreaElement>("#chat-input")!,
   chatSendBtn: document.querySelector<HTMLButtonElement>("#chat-send-btn")!,
+  chatStopBtn: document.querySelector<HTMLButtonElement>("#chat-stop-btn")!,
   newChatTab: document.querySelector<HTMLButtonElement>("#new-chat-tab")!,
+  copyChatBtn: document.querySelector<HTMLButtonElement>("#copy-chat-btn")!,
+  saveChatBtn: document.querySelector<HTMLButtonElement>("#save-chat-btn")!,
   statusLeft: document.querySelector<HTMLElement>("#status-left")!,
   statusRight: document.querySelector<HTMLElement>("#status-right")!,
   explorerPanel: document.querySelector<HTMLElement>("#explorer-panel")!,
@@ -201,6 +204,8 @@ let mediaLoadToken = 0;
 let mediaSeekDragging = false;
 let mediaVolume = 1;
 const expandedDirs = new Set<string>();
+/** Drops in-flight full tree rebuilds that would clobber a newer render. */
+let explorerRenderSeq = 0;
 /** Explorer file clipboard (Cut/Copy → Paste into a folder). */
 let explorerClipboard: { paths: string[]; mode: "cut" | "copy" } | null = null;
 function uid(prefix: string): string {
@@ -1167,7 +1172,13 @@ async function renderTreeNode(
     const item = document.createElement("li");
     const row = document.createElement("button");
     row.type = "button";
-    row.className = `tree-item${selectedPath === entry.path ? " selected" : ""}`;
+    row.className = `tree-item${
+      selectedPath && normalizePath(selectedPath) === normalizePath(entry.path)
+        ? " selected"
+        : ""
+    }`;
+    row.dataset.path = entry.path;
+    row.dataset.depth = String(depth);
     row.style.paddingLeft = `${8 + depth * 12}px`;
 
     const chevron = document.createElement("span");
@@ -1211,7 +1222,7 @@ async function renderTreeNode(
     // Drop onto a folder (or a file's parent) to move; hold Ctrl/Alt to copy.
     bindExplorerDropTarget(row, entry.isDir ? entry.path : dirname(entry.path));
     row.addEventListener("click", () => {
-      void onTreeActivate(entry);
+      void onTreeActivate(entry, row);
     });
     bindTreeItemContext(row, entry, entry.isDir ? entry.path : dirname(entry.path));
     item.append(row);
@@ -1228,8 +1239,35 @@ async function renderTreeNode(
   parent.append(list);
 }
 
+function explorerRowByPath(path: string | null): HTMLElement | null {
+  if (!path) return null;
+  const want = normalizePath(path);
+  for (const row of els.fileTree.querySelectorAll<HTMLElement>(".tree-item[data-path]")) {
+    if (normalizePath(row.dataset.path ?? "") === want) {
+      return row;
+    }
+  }
+  return null;
+}
+
+function syncExplorerSelection(path: string | null): void {
+  for (const node of els.fileTree.querySelectorAll(".tree-item.selected")) {
+    node.classList.remove("selected");
+  }
+  explorerRowByPath(path)?.classList.add("selected");
+}
+
+function restoreExplorerViewport(scrollTop: number, scrollLeft: number): void {
+  els.fileTree.scrollTop = scrollTop;
+  els.fileTree.scrollLeft = scrollLeft;
+  if (pendingCreate || pendingRename) return;
+  explorerRowByPath(selectedPath)?.focus({ preventScroll: true });
+}
+
 async function renderExplorer(): Promise<void> {
-  els.fileTree.innerHTML = "";
+  const seq = ++explorerRenderSeq;
+  const scrollTop = els.fileTree.scrollTop;
+  const scrollLeft = els.fileTree.scrollLeft;
   updateExplorerActionState();
   if (!projectRoot) {
     pendingCreate = null;
@@ -1243,23 +1281,49 @@ async function renderExplorer(): Promise<void> {
 
   els.projectName.textContent = basename(projectRoot);
   els.projectName.title = projectRoot;
-  await renderTreeNode(els.fileTree, projectRoot, 0);
+
+  const next = document.createElement("div");
+  await renderTreeNode(next, projectRoot, 0);
+  if (seq !== explorerRenderSeq) return;
+
+  els.fileTree.replaceChildren(...next.childNodes);
+  restoreExplorerViewport(scrollTop, scrollLeft);
 }
 
-async function onTreeActivate(entry: DirEntry): Promise<void> {
+async function onTreeActivate(
+  entry: DirEntry,
+  row: HTMLButtonElement,
+): Promise<void> {
   selectedPath = entry.path;
+  syncExplorerSelection(entry.path);
+
   if (entry.isDir) {
-    if (expandedDirs.has(entry.path)) {
-      expandedDirs.delete(entry.path);
-    } else {
+    const expanding = !expandedDirs.has(entry.path);
+    if (expanding) {
       expandedDirs.add(entry.path);
+    } else {
+      expandedDirs.delete(entry.path);
     }
-    await renderExplorer();
+    const chevron = row.querySelector(".chevron");
+    if (chevron) {
+      chevron.textContent = expanding ? "▼" : "▶";
+    }
+    const item = row.parentElement;
+    if (!item) return;
+    if (expanding) {
+      const childHost = document.createElement("div");
+      item.append(childHost);
+      const depth = Number(row.dataset.depth ?? "0");
+      await renderTreeNode(childHost, entry.path, depth + 1);
+    } else {
+      row.nextElementSibling?.remove();
+    }
+    row.focus({ preventScroll: true });
+    row.scrollIntoView({ block: "nearest", inline: "nearest" });
     return;
   }
 
   await openFile(entry.path);
-  await renderExplorer();
 }
 
 async function copyPath(absolute: boolean): Promise<void> {
@@ -2533,6 +2597,169 @@ function directorHistory(tab: ChatTab): Array<{ role: string; content: string }>
     .map((message) => ({ role: message.role, content: message.text }));
 }
 
+function chatRoleLabel(role: ChatMessage["role"]): string {
+  if (role === "user") return "You";
+  if (role === "assistant") return "Director";
+  return "Workbench";
+}
+
+function chatTranscriptFilename(tab: ChatTab): string {
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  const slug =
+    tab.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "chat";
+  return `director-${slug}-${stamp}.md`;
+}
+
+function formatChatTranscript(tab: ChatTab): string {
+  const settings = getSettings();
+  const model = settings.selectedChatModel;
+  const modelLine = model?.modelId
+    ? `${model.modelId}${model.apiId ? ` (${model.apiId})` : ""}`
+    : "(none selected)";
+  const otherTabs = chatTabs
+    .filter((item) => item.id !== tab.id)
+    .map((item) => item.title);
+  const busy = tab.busy || chatSendInFlight;
+  const draft = els.chatInput.value.trim();
+  const status = [els.statusLeft.textContent, els.statusRight.textContent]
+    .map((part) => (part ?? "").trim())
+    .filter(Boolean)
+    .join(" — ");
+
+  const lines: string[] = [
+    `# Director chat — ${tab.title}`,
+    "",
+    `Captured: ${new Date().toISOString()}`,
+    `Project: ${projectRoot ?? "(none open)"}`,
+    `Selected path: ${selectedPath ?? "(none)"}`,
+    `Chat model: ${modelLine}`,
+    `Status bar: ${status || "(empty)"}`,
+    `Director: ${busy ? "working" : directorStopping ? "stopping" : "idle"}`,
+  ];
+  if (tab.attachments.length > 0) {
+    lines.push("Attachments:");
+    for (const path of tab.attachments) {
+      lines.push(`- ${path}`);
+    }
+  } else {
+    lines.push("Attachments: (none)");
+  }
+  if (otherTabs.length > 0) {
+    lines.push(`Other open chats: ${otherTabs.join(", ")}`);
+  }
+  lines.push("", "---", "");
+
+  if (tab.messages.length === 0) {
+    lines.push("_(No messages in this chat yet.)_", "");
+  } else {
+    for (const message of tab.messages) {
+      lines.push(`## ${chatRoleLabel(message.role)}`, "", message.text.trim() || "_(empty)_", "");
+    }
+  }
+
+  if (draft) {
+    lines.push("## Draft (not sent)", "", draft, "");
+  }
+
+  return ensureTrailingNewline(lines.join("\n"));
+}
+
+function ensureTrailingNewline(text: string): string {
+  return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+async function copyChatTranscript(): Promise<void> {
+  const tab = activeChat();
+  if (!tab) {
+    setStatus("No chat to copy");
+    return;
+  }
+  const text = formatChatTranscript(tab);
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus(
+      "Chat transcript copied",
+      `${tab.messages.length} message${tab.messages.length === 1 ? "" : "s"}`,
+    );
+  } catch (error) {
+    setStatus(`Could not copy chat: ${error}`);
+  }
+}
+
+async function saveChatTranscript(): Promise<void> {
+  const tab = activeChat();
+  if (!tab) {
+    setStatus("No chat to save");
+    return;
+  }
+  const filename = chatTranscriptFilename(tab);
+  const defaultPath = projectRoot ? joinPath(projectRoot, filename) : filename;
+  const selected = await saveDialog({
+    title: "Save chat transcript",
+    defaultPath,
+    filters: [
+      { name: "Markdown", extensions: ["md"] },
+      { name: "Text", extensions: ["txt"] },
+      { name: "All Files", extensions: ["*"] },
+    ],
+  });
+  if (!selected) return;
+  try {
+    await invoke("write_text_file", {
+      path: selected,
+      contents: formatChatTranscript(tab),
+    });
+    if (projectRoot) {
+      const parent = dirname(selected);
+      if (normalizePath(parent).startsWith(normalizePath(projectRoot))) {
+        expandedDirs.add(parent);
+        await renderExplorer();
+      }
+    }
+    setStatus("Chat transcript saved", selected);
+  } catch (error) {
+    setStatus(`Could not save chat: ${error}`);
+  }
+}
+
+function showChatContextMenu(clientX: number, clientY: number): void {
+  const selection = window.getSelection()?.toString() ?? "";
+  const items: ContextMenuItem[] = [];
+  if (selection.trim()) {
+    items.push({
+      type: "item",
+      label: "Copy Selection",
+      action: () => {
+        void navigator.clipboard.writeText(selection).then(
+          () => setStatus("Copied selection"),
+          (error: unknown) => setStatus(`Could not copy: ${error}`),
+        );
+      },
+    });
+  }
+  items.push(
+    {
+      type: "item",
+      label: "Copy Chat Transcript",
+      action: () => {
+        void copyChatTranscript();
+      },
+    },
+    {
+      type: "item",
+      label: "Save Chat Transcript…",
+      action: () => {
+        void saveChatTranscript();
+      },
+    },
+  );
+  showContextMenu(clientX, clientY, items);
+}
+
 function focusedEditorExcerpt(tab: EditorTab | undefined): string | null {
   if (!isTextTab(tab) || !tab.contents.trim()) return null;
   return tab.contents;
@@ -2555,19 +2782,47 @@ function setChatWorkingChrome(busy: boolean): void {
     els.chatPanel.removeAttribute("aria-busy");
   }
   els.chatInput.disabled = false;
-  els.chatInput.placeholder = busy
-    ? "Director is working — hang tight…"
-    : "Ask the Director — drag files here or right-click Add to Chat…";
+  els.chatInput.placeholder = directorStopping
+    ? "Stopping the Director…"
+    : busy
+      ? "Director is working — Stop or Esc to cancel"
+      : "Ask the Director — drag files here or right-click Add to Chat…";
   els.chatSendBtn.disabled = busy;
-  els.chatSendBtn.classList.toggle("is-working", busy);
+  els.chatSendBtn.classList.toggle("is-working", busy && !directorStopping);
   els.chatSendBtn.textContent = busy ? "Working…" : "Send";
+  els.chatStopBtn.classList.toggle("hidden", !busy);
+  els.chatStopBtn.disabled = directorStopping;
+  els.chatStopBtn.textContent = directorStopping ? "Stopping…" : "Stop";
 }
 
 /** Live progress line shown in chat while a Director turn is running. */
 let directorProgressMessageId: string | null = null;
-/** Caps host-driven "continue" loops for long model-sheet packs. */
+/** Caps host-driven resume hops for planner yields and long model-sheet packs. */
 let autoContinueDepth = 0;
-const MAX_AUTO_CONTINUE = 16;
+const MAX_AUTO_CONTINUE = 48;
+/** User asked to halt the current Director turn / auto-continue chain. */
+let directorStopRequested = false;
+let directorStopping = false;
+
+async function stopDirector(): Promise<void> {
+  if (directorStopping) return;
+  directorStopRequested = true;
+  directorStopping = true;
+  autoContinueDepth = MAX_AUTO_CONTINUE;
+  setChatWorkingChrome(chatSendInFlight || Boolean(activeChat()?.busy));
+  setStatus("Stopping Director…");
+  upsertDirectorProgressMessage("Stopping Director…");
+  try {
+    await invoke("director_cancel");
+  } catch (error) {
+    setStatus(`Stop request failed: ${error}`);
+  }
+}
+
+function looksLikeStoppedError(error: unknown): boolean {
+  const text = String(error);
+  return /stopped by user/i.test(text);
+}
 
 function upsertDirectorProgressMessage(text: string): void {
   const tab = activeChat();
@@ -2599,14 +2854,29 @@ function clearDirectorProgressMessage(): void {
 
 async function sendChatMessage(
   text: string,
-  options?: { autoContinue?: boolean },
+  options?: { autoContinue?: boolean; resume?: boolean },
 ): Promise<void> {
   const tab = activeChat();
-  if (!tab || !text.trim() || tab.busy || chatSendInFlight) return;
+  const isResume = Boolean(options?.resume);
+  if (!tab || tab.busy || chatSendInFlight) return;
+  if (options?.autoContinue && directorStopRequested) {
+    directorStopping = false;
+    tab.messages.push({
+      id: uid("msg"),
+      role: "system",
+      text: "Stopped. The Director will not continue this turn.",
+    });
+    renderChat();
+    setStatus("Director stopped");
+    return;
+  }
+  if (!isResume && !text.trim()) return;
 
   const userText = text.trim();
-  if (!options?.autoContinue) {
+  if (!options?.autoContinue && !isResume) {
     autoContinueDepth = 0;
+    directorStopRequested = false;
+    directorStopping = false;
   }
   // Clear immediately so Send never looks like it failed to take the message.
   els.chatInput.value = "";
@@ -2614,7 +2884,9 @@ async function sendChatMessage(
   const settings = getSettings();
   const selected = settings.selectedChatModel;
   if (!selected?.modelId) {
-    tab.messages.push({ id: uid("msg"), role: "user", text: userText });
+    if (!isResume) {
+      tab.messages.push({ id: uid("msg"), role: "user", text: userText });
+    }
     tab.messages.push({
       id: uid("msg"),
       role: "system",
@@ -2624,15 +2896,26 @@ async function sendChatMessage(
     return;
   }
 
-  tab.messages.push({ id: uid("msg"), role: "user", text: userText });
+  if (!isResume) {
+    tab.messages.push({ id: uid("msg"), role: "user", text: userText });
+  }
   tab.busy = true;
   chatSendInFlight = true;
-  directorProgressMessageId = null;
+  if (!isResume) {
+    directorProgressMessageId = null;
+  }
   // Apply chrome immediately (before full rebuild) so Send never stays "Send".
   setChatWorkingChrome(true);
   renderChat();
-  setStatus("Director working…", selected.modelId);
-  upsertDirectorProgressMessage("Director working…");
+  setStatus(
+    isResume ? "Director resuming…" : "Director working…",
+    selected.modelId,
+  );
+  upsertDirectorProgressMessage(
+    isResume
+      ? "Director resuming the same turn…"
+      : "Director working…",
+  );
   await paintSoon();
 
   const editor = activeEditor();
@@ -2642,11 +2925,14 @@ async function sendChatMessage(
       model: string;
       toolEvents: string[];
       continueSuggested?: boolean;
+      plannerPaused?: boolean;
+      stopped?: boolean;
     }>("director_turn", {
       request: {
         model: selected.modelId,
         apiId: selected.apiId,
         messages: directorHistory(tab),
+        resume: isResume,
         context: {
           projectRoot,
           selectedPath,
@@ -2667,12 +2953,35 @@ async function sendChatMessage(
       clearDirectorProgressMessage();
     }
 
+    const halted = directorStopRequested || Boolean(result.stopped);
+
+    // Planner yielded so the desk could paint — resume the same host loop.
+    // Do not add a pause bubble or a fake "continue" user turn.
+    if (!halted && result.plannerPaused && autoContinueDepth < MAX_AUTO_CONTINUE) {
+      autoContinueDepth += 1;
+      upsertDirectorProgressMessage(
+        "Director still working — resuming the same turn…",
+      );
+      tab.busy = false;
+      chatSendInFlight = false;
+      renderChat();
+      await paintSoon();
+      await sendChatMessage("", { autoContinue: true, resume: true });
+      return;
+    }
+
     tab.messages.push({
       id: uid("msg"),
-      role: "assistant",
-      text: result.reply,
+      role: halted ? "system" : "assistant",
+      text: halted
+        ? result.stopped
+          ? result.reply
+          : "Stopped. The Director will not continue this turn."
+        : result.reply,
     });
-    if (result.toolEvents.length > 0) {
+    if (halted) {
+      setStatus("Director stopped");
+    } else if (result.toolEvents.length > 0) {
       setStatus(
         "Director reply",
         `${result.model} · ${result.toolEvents.length} tool call(s)`,
@@ -2684,10 +2993,12 @@ async function sendChatMessage(
       await renderExplorer();
     }
 
-    // Host paused a long pack so the UI could breathe — resume next shot.
-    // Budget-summary turns often have tools earlier in the same turn; even when
-    // they don't, continueSuggested alone means the host wants another hop.
-    if (result.continueSuggested && autoContinueDepth < MAX_AUTO_CONTINUE) {
+    // Specialist hop (model sheet / collect) with a pending action in the reply.
+    if (
+      !halted &&
+      result.continueSuggested &&
+      autoContinueDepth < MAX_AUTO_CONTINUE
+    ) {
       autoContinueDepth += 1;
       tab.busy = false;
       chatSendInFlight = false;
@@ -2703,15 +3014,25 @@ async function sendChatMessage(
       );
       clearDirectorProgressMessage();
     }
-    tab.messages.push({
-      id: uid("msg"),
-      role: "system",
-      text: `Director turn failed: ${error}`,
-    });
-    setStatus(`Director error: ${error}`);
+    if (directorStopRequested || looksLikeStoppedError(error)) {
+      tab.messages.push({
+        id: uid("msg"),
+        role: "system",
+        text: "Stopped. The Director will not continue this turn.",
+      });
+      setStatus("Director stopped");
+    } else {
+      tab.messages.push({
+        id: uid("msg"),
+        role: "system",
+        text: `Director turn failed: ${error}`,
+      });
+      setStatus(`Director error: ${error}`);
+    }
   } finally {
     tab.busy = false;
     chatSendInFlight = false;
+    directorStopping = false;
     renderChat();
   }
 }
@@ -3251,6 +3572,12 @@ function handleMenuAction(action: string): void {
     case "open-docs":
       openDocsTab();
       break;
+    case "copy-chat":
+      void copyChatTranscript();
+      break;
+    case "save-chat":
+      void saveChatTranscript();
+      break;
     default:
       break;
   }
@@ -3350,6 +3677,10 @@ function bindUi(): void {
     void sendChatMessage(text);
   });
 
+  els.chatStopBtn.addEventListener("click", () => {
+    void stopDirector();
+  });
+
   els.chatInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -3361,6 +3692,18 @@ function bindUi(): void {
   els.newChatTab.addEventListener("click", () => {
     createChatTab();
     renderChat();
+  });
+
+  els.copyChatBtn.addEventListener("click", () => {
+    void copyChatTranscript();
+  });
+  els.saveChatBtn.addEventListener("click", () => {
+    void saveChatTranscript();
+  });
+  els.chatPanel.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    showChatContextMenu(event.clientX, event.clientY);
   });
 
   const setChatDragOver = (active: boolean) => {
@@ -3549,6 +3892,11 @@ function bindUi(): void {
         closeFindBar();
         return;
       }
+      if (chatSendInFlight || activeChat()?.busy) {
+        event.preventDefault();
+        void stopDirector();
+        return;
+      }
     }
 
     if (!mod && !event.altKey && event.key === "F2") {
@@ -3611,9 +3959,19 @@ function bindUi(): void {
       void copyPath(false);
       return;
     }
+    if (key === "c" && event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      handleMenuAction("copy-chat");
+      return;
+    }
     if (key === "c" && event.altKey) {
       event.preventDefault();
       void copyPath(true);
+      return;
+    }
+    if (key === "e" && event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      handleMenuAction("save-chat");
       return;
     }
 

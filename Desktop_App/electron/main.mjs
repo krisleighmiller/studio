@@ -340,6 +340,17 @@ function createMenu(recentProjects = loadRecentProjects()) {
       label: "Help",
       submenu: [
         {
+          label: "Copy Chat Transcript",
+          accelerator: "CmdOrCtrl+Shift+C",
+          click: () => send("copy-chat"),
+        },
+        {
+          label: "Save Chat Transcript…",
+          accelerator: "CmdOrCtrl+Shift+E",
+          click: () => send("save-chat"),
+        },
+        { type: "separator" },
+        {
           label: "Documentation",
           accelerator: "F1",
           click: () => send("open-docs"),
@@ -394,6 +405,8 @@ function wireAppShortcuts(win) {
     } else if (key === "," && !input.shift && !input.alt) action = "open-settings";
     else if (key === "r" && !input.shift && !input.alt) action = "refresh-explorer";
     else if (key === "v" && input.alt) action = "open-voice";
+    else if (key === "c" && input.shift && !input.alt) action = "copy-chat";
+    else if (key === "e" && input.shift && !input.alt) action = "save-chat";
 
     if (!action) return;
     event.preventDefault();

@@ -144,10 +144,29 @@ button {
   white-space: nowrap;
 }
 
-.explorer-actions {
+.explorer-actions,
+.chat-actions {
   display: flex;
   flex: 0 0 auto;
   gap: 2px;
+}
+
+.chat-header {
+  gap: 0;
+  padding: 0;
+  min-height: 36px;
+}
+
+.chat-header .tab-bar {
+  flex: 1;
+  min-width: 0;
+  border-bottom: 0;
+}
+
+.chat-actions {
+  align-items: center;
+  padding: 0 8px;
+  border-left: 1px solid var(--border);
 }
 
 .icon-button {
@@ -852,7 +871,8 @@ button {
 .tree-item:focus-visible,
 .tab:focus-visible,
 .primary-button:focus-visible,
-.ghost-button:focus-visible {
+.ghost-button:focus-visible,
+.stop-button:focus-visible {
   border-color: var(--focus);
   box-shadow: 0 0 0 2px rgba(63, 122, 105, 0.2);
   outline: none;
@@ -894,6 +914,30 @@ button {
 
 .primary-button.is-working {
   animation: chat-send-pulse 1.2s ease-in-out infinite;
+}
+
+.stop-button {
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 12px;
+  min-width: 5.5rem;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff8f6;
+  background: #a33b2b;
+}
+
+.stop-button:hover:not(:disabled) {
+  background: #8a2f22;
+}
+
+.stop-button:disabled {
+  cursor: progress;
+  opacity: 0.85;
+}
+
+.stop-button.hidden {
+  display: none;
 }
 
 @keyframes chat-send-pulse {

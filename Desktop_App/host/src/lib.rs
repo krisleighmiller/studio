@@ -7,7 +7,6 @@ pub mod ctx;
 pub mod director;
 pub mod director_actions;
 pub mod elevenlabs;
-pub mod specialists;
 pub mod fal;
 pub mod fs_ops;
 pub mod gemini_images;
@@ -20,7 +19,9 @@ pub mod openai_images;
 pub mod prompts;
 pub mod replicate;
 pub mod runway;
+pub mod scene_plan;
 pub mod settings;
+pub mod specialists;
 pub mod stability;
 pub mod sync_labs;
 pub mod voice;
@@ -114,7 +115,10 @@ pub fn dispatch(
         "elevenlabs_list_voices" => {
             let search = opt_string(args, "search");
             let voice_type = opt_string(args, "voiceType");
-            let page_size = args.get("pageSize").and_then(|v| v.as_u64()).map(|v| v as u32);
+            let page_size = args
+                .get("pageSize")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
             let next_page_token = opt_string(args, "nextPageToken");
             to_value(elevenlabs::elevenlabs_list_voices(
                 app.clone(),

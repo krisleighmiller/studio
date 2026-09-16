@@ -204,7 +204,54 @@
         ></div>
 
         <aside id="chat-panel" class="panel chat-panel" aria-label="Chat">
-          <div id="chat-tabs" class="tab-bar" role="tablist" aria-label="Chat tabs"></div>
+          <header class="panel-header chat-header">
+            <div id="chat-tabs" class="tab-bar" role="tablist" aria-label="Chat tabs"></div>
+            <div class="chat-actions">
+              <button
+                type="button"
+                id="copy-chat-btn"
+                class="icon-button"
+                title="Copy chat transcript (Ctrl+Shift+C)"
+                aria-label="Copy chat transcript"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <rect
+                    x="5.5"
+                    y="1.5"
+                    width="8"
+                    height="10"
+                    rx="1"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                  />
+                  <path
+                    d="M3.5 4.5h-1v10h8v-1"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                  />
+                </svg>
+              </button>
+              <button
+                type="button"
+                id="save-chat-btn"
+                class="icon-button"
+                title="Save chat transcript… (Ctrl+Shift+E)"
+                aria-label="Save chat transcript"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M2.5 2.5h9l2 2V13.5h-11z"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                  />
+                  <path d="M5 13.5v-4h6v4M5 2.5V6h5.5" fill="none" stroke="currentColor" stroke-width="1.2" />
+                </svg>
+              </button>
+            </div>
+          </header>
           <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
           <form id="chat-form" class="chat-compose">
             <div
@@ -225,6 +272,9 @@
               </label>
               <div class="chat-compose-buttons">
                 <button type="button" id="new-chat-tab" class="ghost-button">New chat</button>
+                <button type="button" id="chat-stop-btn" class="stop-button hidden" title="Stop the Director (Esc)">
+                  Stop
+                </button>
                 <button type="submit" id="chat-send-btn" class="primary-button">Send</button>
               </div>
             </div>

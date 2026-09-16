@@ -25,6 +25,14 @@ Each turn includes project root, selected explorer path, focused editor file (an
 
 **Approval words:** After a scoped paid/local plan, **Approved** / “go ahead” / “run it” means run that plan — do not re-describe it.
 
+**Stop:** While Director is working, click **Stop** (or press **Esc**) to halt the current turn and cancel auto-continue. In-flight image polls abort; a chat completion that already started may finish that one HTTP call, then the host stops.
+
+**Capture chat:** Copy the current transcript with the clipboard button in the chat header, **Help → Copy Chat Transcript** (`Ctrl+Shift+C`), or right-click the chat panel. Save a markdown file with the save button or **Help → Save Chat Transcript…** (`Ctrl+Shift+E`). The dump includes model, attachments, status bar, and every You / Director / Workbench message so you can paste it into a bug report.
+
+**Judgement override:** If you are in a hurry, want a basic pack, or do not know how to answer a style/character/runtime menu, say **stop asking**, **you decide**, or **use your best judgement**. Director picks remaining brief items from the script, records them in Creative Direction, and writes files. It should not keep offering menus.
+
+**Long scripts:** A full production plan is written in steps (brief, then one script section at a time). After you answer any brief questions, leave the desk running — it continues until `prod.md` and `Scene_Prompts/` are complete.
+
 Say **`adult`** / **`nsfw`** on a generate turn to use **Settings → Adult content** slots (see Settings tips).
 
 ## Specialists — required inputs & basic prompts
@@ -93,12 +101,19 @@ Use this section function by function. Attach files when noted; give exact proje
 - Character sheets or reference paths when known
 - Master path + sidecar folder (or accept defaults `prod.md` + `Scene_Prompts/`)
 - Mode: **create**, **revise** scene(s), or batch **Update** (refs/voices/outputs)
+- Optional: **you decide** / **stop asking** if you want Director to pick style, character look, and runtime fill from the script
 
 **Settings:** Chat model only (planning; no media spend).
 
 **Basic prompt (create)**
 
 > Attach `Scripts/Black_Hole_draft.md` and `Characters/Mom.md` / `Characters/Sam.md`. Build `prod.md` and `Scene_Prompts/` for this project (9:16 clay-animation comedy).
+
+**Judgement-override example**
+
+> Attach the script. Build `prod.md` and `Scene_Prompts/`. Leave character refs and voices blank. Stop asking and use your best judgement.
+
+New creates are written **script-section by script-section**. Each script scene becomes as many generation clips as it needs (usually one talking shot per speaker turn). Asking for “scene 1 only” still expands that scene into every remaining cut. Sidecars go in `Scene_Prompts/SceneN.txt` next to pack-root `prod.md` — not under `Scene_Prompts/Scene1/`. Delete a stale `scene_plan_state.json` before retrying a broken pack.
 
 **Update example**
 
@@ -128,7 +143,7 @@ You may rename files (`FlightPt1.md`, `Scene1.md`) but keep the handoff shape. E
 
 > Attach `Characters/Mom.md` and her face ref. Build a hyperrealistic model sheet for Mom into `Characters/Mom/model_sheet`.
 
-Approve each described paid batch when asked. Text-only identity uses a one-shot approval image first, then the rest of the pack.
+Approve each described paid batch when asked. A plain-text request is enough: the host generates a single `closeup_front` plate, you approve that face, then the remaining 11 shots run one at a time. Do not expect a collage or contact sheet in one file.
 
 ---
 
@@ -412,4 +427,6 @@ Still coming: more specialists, scene board, richer job UI. Per-function prompts
 | `F2` | Rename selected / active file |
 | `Del` | Delete selected (when not typing in an editor field) |
 | `Ctrl+Shift+P` | Toggle markdown preview |
+| `Ctrl+Shift+C` | Copy chat transcript |
+| `Ctrl+Shift+E` | Save chat transcript… |
 | `Ctrl+Alt+V` | Character Voice |

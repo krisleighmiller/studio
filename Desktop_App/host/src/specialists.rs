@@ -11,6 +11,7 @@ use crate::director_actions::{
 };
 use crate::media;
 use crate::prompts;
+use crate::scene_plan::{RenderLane, RenderRequest};
 use crate::settings::{self, ApiEntry};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -33,14 +34,14 @@ pub struct SpecialistResult {
 }
 
 impl SpecialistResult {
-    fn done(message: impl Into<String>) -> Self {
+    pub(crate) fn done(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             continue_suggested: false,
         }
     }
 
-    fn cont(message: impl Into<String>) -> Self {
+    pub(crate) fn cont(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             continue_suggested: true,
@@ -48,7 +49,7 @@ impl SpecialistResult {
     }
 }
 
-fn input_str<'a>(inputs: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
+pub(crate) fn input_str<'a>(inputs: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     for key in keys {
         if let Some(s) = inputs.get(*key).and_then(|v| v.as_str()) {
             let t = s.trim();
@@ -80,7 +81,7 @@ fn input_path_list(inputs: &Map<String, Value>, keys: &[&str]) -> Vec<String> {
     out
 }
 
-fn capability_model(context: &DirectorContext, slot: &str) -> Option<ModelRef> {
+pub(crate) fn capability_model(context: &DirectorContext, slot: &str) -> Option<ModelRef> {
     // Adult spicy slots only when this turn requested adult/nsfw routing (user keywords).
     if context.adult_routing_requested {
         if let Some(model) = context
@@ -143,9 +144,8 @@ fn run_media_generate(
 fn require_media_saved(raw: &str, save_path: &str) -> Result<String, String> {
     let parsed: Value = serde_json::from_str(raw).unwrap_or(json!({ "raw": raw }));
     let saved = parsed.get("saved");
-    let file_nonempty = |p: &str| {
-        Path::new(p).is_file() && fs::metadata(p).map(|m| m.len()).unwrap_or(0) > 0
-    };
+    let file_nonempty =
+        |p: &str| Path::new(p).is_file() && fs::metadata(p).map(|m| m.len()).unwrap_or(0) > 0;
     // Never treat a media-layer error payload as success, even if an older file
     // already sits at save_path from a previous run.
     let has_error = parsed
@@ -167,9 +167,7 @@ fn require_media_saved(raw: &str, save_path: &str) -> Result<String, String> {
         let bytes = saved
             .and_then(|s| s.get("bytes"))
             .and_then(|v| v.as_u64())
-            .or_else(|| {
-                fs::metadata(save_path).ok().map(|m| m.len())
-            })
+            .or_else(|| fs::metadata(save_path).ok().map(|m| m.len()))
             .unwrap_or(0);
         let prediction_id = saved
             .and_then(|s| s.get("prediction_id"))
@@ -245,16 +243,12 @@ fn resume_media_collect(
         "path": save_path.to_string_lossy(),
         "wait_seconds": 240,
     });
-    let result = match media::run_media_tool(
-        "atlas_collect_media",
-        &collect_args,
-        project_root,
-        app,
-    ) {
-        Some(Ok(text)) => text,
-        Some(Err(error)) => return Err(error),
-        None => return Err("Media router ignored atlas_collect_media".into()),
-    };
+    let result =
+        match media::run_media_tool("atlas_collect_media", &collect_args, project_root, app) {
+            Some(Ok(text)) => text,
+            Some(Err(error)) => return Err(error),
+            None => return Err("Media router ignored atlas_collect_media".into()),
+        };
     match require_media_saved(&result, &save_path.to_string_lossy()) {
         Ok(summary) => Ok(SpecialistResult::done(format!(
             "{done_label} download finished.\n{summary}"
@@ -302,9 +296,7 @@ fn finish_media_or_resume(
             pending
                 .inputs
                 .insert("collect_prediction_id".into(), json!(prediction_id));
-            pending
-                .inputs
-                .insert(output_key.into(), json!(save_path));
+            pending.inputs.insert(output_key.into(), json!(save_path));
             Ok(SpecialistResult::cont(format!(
                 "{error}\n\n{}",
                 encode_pending_action(&pending)
@@ -330,11 +322,7 @@ fn extract_upload_url(raw: &str) -> Option<String> {
         .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
 }
 
-fn upload_local(
-    app: &HostCtx,
-    project_root: Option<&str>,
-    path: &str,
-) -> Result<String, String> {
+fn upload_local(app: &HostCtx, project_root: Option<&str>, path: &str) -> Result<String, String> {
     let api = settings::find_api_by_kind(app, "atlas-cloud").or_else(|_| {
         settings::list_apis(app)?
             .into_iter()
@@ -363,11 +351,7 @@ fn parse_handoff_headers_and_yaml(text: &str) -> (HashMap<String, String>, Optio
             let key = k.trim().to_ascii_lowercase().replace(' ', "_");
             if matches!(
                 key.as_str(),
-                "output"
-                    | "filenames"
-                    | "character_reference"
-                    | "voice"
-                    | "style"
+                "output" | "filenames" | "character_reference" | "voice" | "style"
             ) {
                 headers.insert(key, v.trim().trim_matches('"').to_string());
             }
@@ -416,10 +400,7 @@ fn extract_handoff_yaml_as_json(text: &str) -> Option<Value> {
                 in_prompt = true;
                 current_prompt = Some(String::new());
             } else {
-                map.insert(
-                    "prompt".into(),
-                    json!(rest.trim_matches('"').to_string()),
-                );
+                map.insert("prompt".into(), json!(rest.trim_matches('"').to_string()));
             }
             continue;
         }
@@ -489,7 +470,10 @@ fn parse_yaml_string_list(inline: &str, body: &str, _key: &str) -> Vec<String> {
     out
 }
 
-fn join_output(headers: &HashMap<String, String>, project_root: Option<&str>) -> Result<PathBuf, String> {
+fn join_output(
+    headers: &HashMap<String, String>,
+    project_root: Option<&str>,
+) -> Result<PathBuf, String> {
     let output = headers
         .get("output")
         .ok_or_else(|| "Handoff missing Output header".to_string())?;
@@ -582,8 +566,9 @@ pub fn run_specialist(
         "still_image" => run_still_image(app, context, validated, project_root),
         "text_sync" => run_text_sync(app, context, validated, project_root),
         "lip_sync" => run_lip_sync(app, context, validated, project_root),
-        "assemble" => crate::assemble::run(app, validated, project_root)
-            .map(SpecialistResult::done),
+        "assemble" => {
+            crate::assemble::run(app, validated, project_root).map(SpecialistResult::done)
+        }
         "model_sheet" => run_model_sheet(app, context, validated, project_root),
         "production_helper" => {
             let llm = llm.ok_or_else(|| {
@@ -592,7 +577,14 @@ pub fn run_specialist(
             })?;
             run_production_helper(app, context, validated, project_root, llm)
         }
-        "script" | "character_creation" | "scene_plan" => {
+        "scene_plan" => {
+            let llm = llm.ok_or_else(|| {
+                "`scene_plan` needs the Director chat model (pick one in the chat dropdown)."
+                    .to_string()
+            })?;
+            crate::scene_plan::run(app, context, validated, project_root, llm)
+        }
+        "script" | "character_creation" => {
             let llm = llm.ok_or_else(|| {
                 format!(
                     "`{specialist}` needs the Director chat model (pick one in the chat dropdown)."
@@ -613,7 +605,7 @@ const TEXT_SPECIALIST_MAX_CHARS_PER_FILE: usize = 60_000;
 const TEXT_SPECIALIST_MAX_TOTAL_CHARS: usize = 160_000;
 
 /// Host wrapper so text specialists write via tagged blocks (no tool_call loop).
-const TEXT_RUNNER_HOST_PREAMBLE: &str = r#"## Workbench host text runner
+pub(crate) const TEXT_RUNNER_HOST_PREAMBLE: &str = r#"## Workbench host text runner
 
 You are running inside the Video Production Workbench desktop host under the Director.
 You do **not** have MCP, shell, or `<tool_call>` tools. The host reads sources for you and writes files you emit.
@@ -664,13 +656,13 @@ fn text_specialist_label(specialist: &str) -> &'static str {
 }
 
 #[derive(Debug, Default)]
-struct TextSpecialistEmit {
-    ask: Option<String>,
-    files: Vec<(String, String)>,
-    summary: Option<String>,
+pub(crate) struct TextSpecialistEmit {
+    pub(crate) ask: Option<String>,
+    pub(crate) files: Vec<(String, String)>,
+    pub(crate) summary: Option<String>,
 }
 
-fn parse_text_specialist_emit(reply: &str) -> TextSpecialistEmit {
+pub(crate) fn parse_text_specialist_emit(reply: &str) -> TextSpecialistEmit {
     let mut out = TextSpecialistEmit::default();
     if let Some(ask) = extract_tagged_block(reply, "workbench_ask") {
         let t = ask.trim().to_string();
@@ -760,7 +752,7 @@ fn parse_workbench_file_path(header: &str) -> Option<String> {
     None
 }
 
-fn collect_text_specialist_paths(
+pub(crate) fn collect_text_specialist_paths(
     context: &DirectorContext,
     inputs: &Map<String, Value>,
 ) -> Vec<String> {
@@ -802,7 +794,7 @@ fn collect_text_specialist_paths(
     paths
 }
 
-fn build_text_specialist_dossier(
+pub(crate) fn build_text_specialist_dossier(
     paths: &[String],
     project_root: Option<&str>,
     context: &DirectorContext,
@@ -913,10 +905,18 @@ fn run_text_specialist(
     let (dossier, read_labels, missing) =
         build_text_specialist_dossier(&paths, project_root, context);
 
-    let output_path = input_str(inputs, &["output_path", "save_path", "production_path", "production"]);
+    let output_path = input_str(
+        inputs,
+        &["output_path", "save_path", "production_path", "production"],
+    );
     let sidecar_dir = input_str(
         inputs,
-        &["sidecar_dir", "sidecar_folder", "scene_prompts_dir", "prompts_dir"],
+        &[
+            "sidecar_dir",
+            "sidecar_folder",
+            "scene_prompts_dir",
+            "prompts_dir",
+        ],
     );
     let aspect = input_str(inputs, &["aspect_ratio", "format"]);
 
@@ -969,10 +969,7 @@ fn run_text_specialist(
         json!({ "role": "user", "content": user_block }),
     ];
 
-    app.emit(
-        "director-progress",
-        format!("{label} thinking…"),
-    );
+    app.emit("director-progress", format!("{label} thinking…"));
     let mut reply = chat::chat_completion(llm.api, llm.api_key, llm.model, &messages)?;
     let mut emit = parse_text_specialist_emit(&reply);
 
@@ -1010,9 +1007,8 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
     for (raw_path, contents) in &emit.files {
         let dest = resolve_under_project(raw_path, project_root).map_err(|e| e.to_string())?;
         if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!("Could not create directory {}: {e}", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Could not create directory {}: {e}", parent.display()))?;
         }
         app.emit(
             "director-progress",
@@ -1024,17 +1020,13 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
         } else {
             format!("{contents}\n")
         };
-        fs::write(&dest, body)
-            .map_err(|e| format!("Could not write {}: {e}", dest.display()))?;
+        fs::write(&dest, body).map_err(|e| format!("Could not write {}: {e}", dest.display()))?;
         written.push(dest.display().to_string());
     }
 
-    let mut message = emit.summary.unwrap_or_else(|| {
-        format!(
-            "{label} wrote {} file(s).",
-            written.len()
-        )
-    });
+    let mut message = emit
+        .summary
+        .unwrap_or_else(|| format!("{label} wrote {} file(s).", written.len()));
     if !written.is_empty() {
         message.push_str("\n\n---\nSaved:\n");
         for path in &written {
@@ -1112,10 +1104,7 @@ fn run_production_helper(
 
     app.emit(
         "director-progress",
-        format!(
-            "Production Helper reading {} file(s)…",
-            paths.len()
-        ),
+        format!("Production Helper reading {} file(s)…", paths.len()),
     );
 
     let mut dossier = String::new();
@@ -1252,16 +1241,15 @@ fn run_production_helper(
         let dest = resolve_under_project(out, project_root).map_err(|e| e.to_string())?;
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|e| {
-                format!("Could not create digest directory {}: {e}", parent.display())
+                format!(
+                    "Could not create digest directory {}: {e}",
+                    parent.display()
+                )
             })?;
         }
-        fs::write(&dest, format!("{reply}\n")).map_err(|e| {
-            format!("Could not write digest to {}: {e}", dest.display())
-        })?;
-        message.push_str(&format!(
-            "\n\n---\nSaved digest to `{}`.",
-            dest.display()
-        ));
+        fs::write(&dest, format!("{reply}\n"))
+            .map_err(|e| format!("Could not write digest to {}: {e}", dest.display()))?;
+        message.push_str(&format!("\n\n---\nSaved digest to `{}`.", dest.display()));
         app.emit(
             "director-progress",
             format!("Production Helper saved digest → {}", dest.display()),
@@ -1322,8 +1310,8 @@ fn run_freeform_video(
         fs::create_dir_all(parent).map_err(|e| format!("Could not create output dir: {e}"))?;
     }
 
-    let explicit_start = input_str(inputs, &["source_frame", "source_image", "start_frame"])
-        .map(|s| s.to_string());
+    let explicit_start =
+        input_str(inputs, &["source_frame", "source_image", "start_frame"]).map(|s| s.to_string());
     let mut ref_paths = input_path_list(inputs, &["reference_images", "reference_assets"]);
     if let Some(frame) = explicit_start.clone() {
         if !ref_paths.iter().any(|p| p == &frame) {
@@ -1408,8 +1396,7 @@ fn run_freeform_video(
             uploaded_urls.len()
         ))),
         Err(error) => {
-            let parsed: Value =
-                serde_json::from_str(&result).unwrap_or(json!({ "raw": result }));
+            let parsed: Value = serde_json::from_str(&result).unwrap_or(json!({ "raw": result }));
             let prediction_id = parsed
                 .pointer("/submitted/prediction_id")
                 .and_then(|v| v.as_str())
@@ -1483,14 +1470,7 @@ fn run_scene_generation(
     {
         if let Some(prompt) = input_str(inputs, &["prompt", "brief", "edit_brief"]) {
             if let Some(save) = input_str(inputs, &["output_path", "save_path"]) {
-                return run_freeform_video(
-                    app,
-                    context,
-                    validated,
-                    project_root,
-                    prompt,
-                    save,
-                );
+                return run_freeform_video(app, context, validated, project_root, prompt, save);
             }
         }
     }
@@ -1509,16 +1489,12 @@ fn run_scene_generation(
             "path": save_path.to_string_lossy(),
             "wait_seconds": 240,
         });
-        let result = match media::run_media_tool(
-            "atlas_collect_media",
-            &collect_args,
-            project_root,
-            app,
-        ) {
-            Some(Ok(text)) => text,
-            Some(Err(error)) => return Err(error),
-            None => return Err("Media router ignored atlas_collect_media".into()),
-        };
+        let result =
+            match media::run_media_tool("atlas_collect_media", &collect_args, project_root, app) {
+                Some(Ok(text)) => text,
+                Some(Err(error)) => return Err(error),
+                None => return Err("Media router ignored atlas_collect_media".into()),
+            };
         match require_media_saved(&result, &save_path.to_string_lossy()) {
             Ok(summary) => {
                 return Ok(SpecialistResult::done(format!(
@@ -1569,7 +1545,7 @@ fn run_scene_generation(
         })?
     };
 
-    let (headers, yaml) = parse_handoff_headers_and_yaml(&handoff_text);
+    let (headers, _) = parse_handoff_headers_and_yaml(&handoff_text);
     let save_path = if let Some(p) = input_str(inputs, &["output_path", "save_path"]) {
         resolve_under_project(p, project_root).map_err(|e| e.to_string())?
     } else {
@@ -1579,67 +1555,39 @@ fn run_scene_generation(
         fs::create_dir_all(parent).map_err(|e| format!("Could not create output dir: {e}"))?;
     }
 
-    let yaml = yaml.unwrap_or(json!({}));
-    let prompt = yaml
-        .get("prompt")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if prompt.trim().is_empty() {
-        return Err("Handoff YAML missing prompt".into());
-    }
-    let duration = yaml
-        .get("target_duration_seconds")
-        .and_then(|v| v.as_u64())
-        .or_else(|| {
-            input_str(inputs, &["duration"]).and_then(|s| s.parse().ok())
-        })
-        .unwrap_or(8);
-    let aspect = yaml
-        .get("aspect_ratio")
-        .and_then(|v| v.as_str())
-        .unwrap_or("16:9");
-    let negative = yaml
-        .get("negative_prompt")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let source_mode = yaml
-        .get("source_mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("text_to_video");
+    let request = RenderRequest::from_document(&handoff_text)
+        .map_err(|e| format!("Handoff is not a validated scene-plan cut: {e}"))?;
+    let prompt = request.prompt.clone();
+    let duration = request.duration_seconds;
+    let aspect = request.aspect_ratio.as_str();
+    let negative = request.negative_prompt.clone().unwrap_or_default();
 
     let mut ref_paths = input_path_list(inputs, &["reference_assets", "reference_images"]);
     if ref_paths.is_empty() {
-        if let Some(Value::Array(items)) = yaml.get("reference_assets") {
-            for item in items {
-                if let Some(s) = item.as_str() {
-                    ref_paths.push(s.to_string());
-                }
-            }
-        }
+        ref_paths = request.reference_images.clone();
     }
 
+    let lane = request.lane;
     let model = if let Some(m) = input_str(inputs, &["model"]) {
         ModelRef {
             api_id: String::new(),
             model_id: m.to_string(),
         }
-    } else if !ref_paths.is_empty() {
-        capability_model(context, "video.location_prop_other_reference")
-            .or_else(|| capability_model(context, "video.character_reference"))
-            .or_else(|| capability_model(context, "video.text_only"))
-            .ok_or_else(|| {
-                "Set a Video generation default (location/prop reference or text only) in Settings."
-                    .to_string()
-            })?
-    } else if source_mode.contains("image") {
-        capability_model(context, "video.start_frame")
-            .or_else(|| capability_model(context, "video.text_only"))
-            .ok_or_else(|| "Set Settings → Video → Start frame (or Text only).".to_string())?
     } else {
-        capability_model(context, "video.text_only").ok_or_else(|| {
-            "Set Settings → Video → Text only before text-to-video scene generation.".to_string()
-        })?
+        match lane {
+            RenderLane::AudioDrivenI2v => {
+                capability_model(context, "video.lip_sync_text_narration").ok_or_else(|| {
+                    "Set Settings → Video → Lip sync for audio-driven cuts.".to_string()
+                })?
+            }
+            RenderLane::ImageToVideo => capability_model(context, "video.start_frame")
+                .ok_or_else(|| "Set Settings → Video → Start frame.".to_string())?,
+            RenderLane::ReferenceToVideo => capability_model(context, "video.character_reference")
+                .or_else(|| capability_model(context, "video.location_prop_other_reference"))
+                .ok_or_else(|| "Set Settings → Video → Character reference.".to_string())?,
+            RenderLane::TextToVideo => capability_model(context, "video.text_only")
+                .ok_or_else(|| "Set Settings → Video → Text only.".to_string())?,
+        }
     };
 
     let mut uploaded_urls = Vec::new();
@@ -1705,8 +1653,7 @@ fn run_scene_generation(
         ))),
         Err(error) => {
             // Keep a resumable collect pending so "continue" polls the same prediction.
-            let parsed: Value =
-                serde_json::from_str(&result).unwrap_or(json!({ "raw": result }));
+            let parsed: Value = serde_json::from_str(&result).unwrap_or(json!({ "raw": result }));
             let prediction_id = parsed
                 .pointer("/submitted/prediction_id")
                 .and_then(|v| v.as_str())
@@ -1716,10 +1663,9 @@ fn run_scene_generation(
             }
             let mut pending = validated.action.clone();
             pending.requires_approval = false;
-            pending.inputs.insert(
-                "collect_prediction_id".into(),
-                json!(prediction_id),
-            );
+            pending
+                .inputs
+                .insert("collect_prediction_id".into(), json!(prediction_id));
             pending.inputs.insert(
                 "output_path".into(),
                 json!(save_path.to_string_lossy().to_string()),
@@ -1795,7 +1741,11 @@ fn resolve_still_image_model(
             .or_else(|| capability_model(context, "image.image_to_image"))
             .or_else(|| capability_model(context, "image.text_to_image"))
             .ok_or_else(|| "Set an Image generation default in Settings.".to_string())?;
-        return Ok((model, "reference-conditioned still", "image.character_reference"));
+        return Ok((
+            model,
+            "reference-conditioned still",
+            "image.character_reference",
+        ));
     }
     let model = capability_model(context, "image.text_to_image").ok_or_else(|| {
         "Set Settings → Image → Text to image before generating stills.".to_string()
@@ -1815,9 +1765,7 @@ pub fn still_image_approval_notes(
     let (model, lane, slot) = match resolve_still_image_model(context, inputs) {
         Ok(v) => v,
         Err(e) => {
-            return format!(
-                "### Still image plan\n- model: **unset** ({e})\n- output: `{out}`"
-            );
+            return format!("### Still image plan\n- model: **unset** ({e})\n- output: `{out}`");
         }
     };
     let routing = if context.adult_routing_requested {
@@ -2145,8 +2093,11 @@ fn rewrite_talking_prompt(prompt: &str, head_s: f64, tail_s: f64) -> String {
     out
 }
 
-fn load_voice_profile_fields(path: &Path) -> Result<(String, String, String, Map<String, Value>), String> {
-    let text = fs::read_to_string(path).map_err(|e| format!("Could not read voice profile: {e}"))?;
+fn load_voice_profile_fields(
+    path: &Path,
+) -> Result<(String, String, String, Map<String, Value>), String> {
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("Could not read voice profile: {e}"))?;
     let model_id = yaml_string_field(&text, "model_id").unwrap_or_default();
     let voice_id = yaml_string_field(&text, "voice_id")
         .or_else(|| yaml_string_field(&text, "voice_name"))
@@ -2170,9 +2121,7 @@ fn build_seed_tts_text(cue_text: &str, delivery: &str) -> String {
     if delivery.is_empty() {
         format!("Use the voice and delivery of @audio1 and say: {cue_text}")
     } else {
-        format!(
-            "Use the voice and delivery of @audio1 and say in a {delivery} tone: {cue_text}"
-        )
+        format!("Use the voice and delivery of @audio1 and say in a {delivery} tone: {cue_text}")
     }
 }
 
@@ -2202,16 +2151,12 @@ fn run_text_sync(
             "path": save_path.to_string_lossy(),
             "wait_seconds": 240,
         });
-        let result = match media::run_media_tool(
-            "atlas_collect_media",
-            &collect_args,
-            project_root,
-            app,
-        ) {
-            Some(Ok(text)) => text,
-            Some(Err(error)) => return Err(error),
-            None => return Err("Media router ignored atlas_collect_media".into()),
-        };
+        let result =
+            match media::run_media_tool("atlas_collect_media", &collect_args, project_root, app) {
+                Some(Ok(text)) => text,
+                Some(Err(error)) => return Err(error),
+                None => return Err("Media router ignored atlas_collect_media".into()),
+            };
         match require_media_saved(&result, &save_path.to_string_lossy()) {
             Ok(summary) => {
                 return Ok(SpecialistResult::done(format!(
@@ -2288,14 +2233,15 @@ fn run_text_sync(
     let prompt = rewrite_talking_prompt(&prompt_raw, head_s, tail_s);
 
     let (header_video, header_audio) = join_output_pair(&headers, project_root)?;
-    let output_video = if let Some(p) = input_str(inputs, &["output_video", "output_path", "save_path"])
-    {
-        resolve_under_project(p, project_root).map_err(|e| e.to_string())?
-    } else {
-        header_video.ok_or_else(|| {
-            "text_sync needs output_video/output_path or a Filenames *.mp4 in the handoff".to_string()
-        })?
-    };
+    let output_video =
+        if let Some(p) = input_str(inputs, &["output_video", "output_path", "save_path"]) {
+            resolve_under_project(p, project_root).map_err(|e| e.to_string())?
+        } else {
+            header_video.ok_or_else(|| {
+                "text_sync needs output_video/output_path or a Filenames *.mp4 in the handoff"
+                    .to_string()
+            })?
+        };
     let output_audio = if let Some(p) = input_str(inputs, &["output_audio"]) {
         resolve_under_project(p, project_root).map_err(|e| e.to_string())?
     } else if let Some(p) = header_audio {
@@ -2318,11 +2264,9 @@ fn run_text_sync(
     }
 
     // Character / start image
-    let mut character_image = input_str(
-        inputs,
-        &["character_image", "source_frame", "source_image"],
-    )
-    .map(|s| s.to_string());
+    let mut character_image =
+        input_str(inputs, &["character_image", "source_frame", "source_image"])
+            .map(|s| s.to_string());
     if character_image.is_none() {
         if let Some(cr) = headers.get("character_reference") {
             if cr != "none" && !cr.trim().is_empty() {
@@ -2356,21 +2300,18 @@ fn run_text_sync(
 
     // Voice mode
     let reuse_wav = input_str(inputs, &["performance_wav", "reuse_audio"]);
-    let clone_wav = input_str(
-        inputs,
-        &["voice_clone", "voice_clone_path", "clone_wav"],
-    )
-    .map(|s| s.to_string())
-    .or_else(|| {
-        headers.get("voice").and_then(|v| {
-            let lower = v.to_ascii_lowercase();
-            if lower.ends_with(".wav") || lower.ends_with(".mp3") {
-                Some(v.clone())
-            } else {
-                None
-            }
-        })
-    });
+    let clone_wav = input_str(inputs, &["voice_clone", "voice_clone_path", "clone_wav"])
+        .map(|s| s.to_string())
+        .or_else(|| {
+            headers.get("voice").and_then(|v| {
+                let lower = v.to_ascii_lowercase();
+                if lower.ends_with(".wav") || lower.ends_with(".mp3") {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            })
+        });
     let profile_yaml = input_str(inputs, &["voice_profile", "voice_profile_path"])
         .map(|s| s.to_string())
         .or_else(|| {
@@ -2412,13 +2353,13 @@ fn run_text_sync(
             format!("Reusing performance WAV → {}", output_audio.display()),
         );
     } else if audio_mode == "voice_clone" {
-        let clone_path = resolve_under_project(
-            clone_wav.as_deref().unwrap(),
-            project_root,
-        )
-        .map_err(|e| e.to_string())?;
+        let clone_path = resolve_under_project(clone_wav.as_deref().unwrap(), project_root)
+            .map_err(|e| e.to_string())?;
         if !clone_path.is_file() {
-            return Err(format!("voice_clone WAV not found: {}", clone_path.display()));
+            return Err(format!(
+                "voice_clone WAV not found: {}",
+                clone_path.display()
+            ));
         }
         let audio_model = if let Some(m) = input_str(inputs, &["audio_model"]) {
             ModelRef {
@@ -2468,11 +2409,8 @@ fn run_text_sync(
         )?;
         require_media_saved(&result, &output_audio.to_string_lossy())?;
     } else {
-        let profile_path = resolve_under_project(
-            profile_yaml.as_deref().unwrap(),
-            project_root,
-        )
-        .map_err(|e| e.to_string())?;
+        let profile_path = resolve_under_project(profile_yaml.as_deref().unwrap(), project_root)
+            .map_err(|e| e.to_string())?;
         if !profile_path.is_file() {
             return Err(format!(
                 "voice_profile YAML not found: {}",
@@ -2717,8 +2655,7 @@ Standalone talking shot — not a continuity out-frame link.",
             output_video.display(),
         ))),
         Err(error) => {
-            let parsed: Value =
-                serde_json::from_str(&result).unwrap_or(json!({ "raw": result }));
+            let parsed: Value = serde_json::from_str(&result).unwrap_or(json!({ "raw": result }));
             let prediction_id = parsed
                 .pointer("/submitted/prediction_id")
                 .and_then(|v| v.as_str())
@@ -2771,8 +2708,7 @@ fn run_lip_sync(
 
     let video = input_str(inputs, &["video", "source_video"])
         .ok_or_else(|| "lip_sync needs video".to_string())?;
-    let audio =
-        input_str(inputs, &["audio"]).ok_or_else(|| "lip_sync needs audio".to_string())?;
+    let audio = input_str(inputs, &["audio"]).ok_or_else(|| "lip_sync needs audio".to_string())?;
     let save = input_str(inputs, &["output_path", "save_path"])
         .ok_or_else(|| "lip_sync needs output_path".to_string())?;
     let save_path = resolve_under_project(save, project_root).map_err(|e| e.to_string())?;
@@ -2788,9 +2724,7 @@ fn run_lip_sync(
     } else {
         capability_model(context, "video.lip_sync_audio_included")
             .or_else(|| capability_model(context, "video.lip_sync_text_narration"))
-            .ok_or_else(|| {
-                "Set Settings → Video → Lip sync before running lip_sync.".to_string()
-            })?
+            .ok_or_else(|| "Set Settings → Video → Lip sync before running lip_sync.".to_string())?
     };
 
     let video_path = resolve_under_project(video, project_root).map_err(|e| e.to_string())?;
@@ -2824,18 +2758,48 @@ fn run_lip_sync(
 }
 
 const DEFAULT_MODEL_SHEET_SHOTS: &[(&str, &str)] = &[
-    ("closeup_front", "Head and shoulders, neutral expression, eyes to camera"),
-    ("closeup_left", "Head and shoulders, neutral, about 45 degrees left turn"),
-    ("closeup_right", "Head and shoulders, neutral, about 45 degrees right turn"),
-    ("standing_front", "Full body, standing front, relaxed neutral stance"),
+    (
+        "closeup_front",
+        "Head and shoulders, neutral expression, eyes to camera",
+    ),
+    (
+        "closeup_left",
+        "Head and shoulders, neutral, about 45 degrees left turn",
+    ),
+    (
+        "closeup_right",
+        "Head and shoulders, neutral, about 45 degrees right turn",
+    ),
+    (
+        "standing_front",
+        "Full body, standing front, relaxed neutral stance",
+    ),
     ("standing_left", "Full body, standing about 45 degrees left"),
-    ("standing_right", "Full body, standing about 45 degrees right"),
-    ("standing_back", "Full body, standing back view, head neutral"),
-    ("t_pose_front", "Full body, front T-pose, palms down, feet shoulder-width"),
-    ("expression_happy", "Head and shoulders, clear happy expression"),
+    (
+        "standing_right",
+        "Full body, standing about 45 degrees right",
+    ),
+    (
+        "standing_back",
+        "Full body, standing back view, head neutral",
+    ),
+    (
+        "t_pose_front",
+        "Full body, front T-pose, palms down, feet shoulder-width",
+    ),
+    (
+        "expression_happy",
+        "Head and shoulders, clear happy expression",
+    ),
     ("expression_sad", "Head and shoulders, clear sad expression"),
-    ("expression_excited", "Head and shoulders, clear excited expression"),
-    ("expression_surprised", "Head and shoulders, clear surprised expression"),
+    (
+        "expression_excited",
+        "Head and shoulders, clear excited expression",
+    ),
+    (
+        "expression_surprised",
+        "Head and shoulders, clear surprised expression",
+    ),
 ];
 
 #[derive(Debug, Clone)]
@@ -3094,12 +3058,7 @@ fn next_pending_shot(manifest: &ModelSheetManifest) -> Option<usize> {
         .position(|s| s.status == "pending" || s.status == "submitted")
 }
 
-fn build_shot_prompt(
-    identity: &str,
-    style: &str,
-    wardrobe: &str,
-    framing: &str,
-) -> String {
+fn build_shot_prompt(identity: &str, style: &str, wardrobe: &str, framing: &str) -> String {
     format!(
         "{identity}\n\nStyle: {style}.\nWardrobe: {wardrobe}.\n\
 Shot: {framing}.\n\
@@ -3279,16 +3238,19 @@ fn run_model_sheet(
         }
         let m = ModelSheetManifest {
             character: slug,
-            style: style.lines().next().unwrap_or("hyperrealistic").trim().into(),
+            style: style
+                .lines()
+                .next()
+                .unwrap_or("hyperrealistic")
+                .trim()
+                .into(),
             model_id: String::new(),
             mode: if text_only_gate {
                 "text_to_image".into()
             } else {
                 "image_conditioned".into()
             },
-            aspect_ratio: input_str(inputs, &["aspect_ratio"])
-                .unwrap_or("3:4")
-                .into(),
+            aspect_ratio: input_str(inputs, &["aspect_ratio"]).unwrap_or("3:4").into(),
             resolution: input_str(inputs, &["resolution"]).unwrap_or("2k").into(),
             output_directory: output_dir.to_string_lossy().to_string(),
             character_sheet: sheet_path,
@@ -3313,11 +3275,7 @@ fn run_model_sheet(
     // Identity gate: user approved the first plate — unlock the rest.
     if identity_gate == "rest" || identity_gate == "generate_rest" {
         if manifest.text_only_gate && !manifest.identity_locked {
-            let first_saved = manifest
-                .shots
-                .iter()
-                .find(|s| s.status == "saved")
-                .cloned();
+            let first_saved = manifest.shots.iter().find(|s| s.status == "saved").cloned();
             if let Some(saved) = first_saved {
                 manifest.approval_shot = saved.id.clone();
                 manifest.approval_shot_path = saved.path.clone();
@@ -3336,9 +3294,8 @@ fn run_model_sheet(
     }
 
     let identity = load_identity_text(inputs, project_root)?;
-    let wardrobe = input_str(inputs, &["wardrobe"]).unwrap_or(
-        "simple solid-color form-fitting top and pants suitable for turnarounds",
-    );
+    let wardrobe = input_str(inputs, &["wardrobe"])
+        .unwrap_or("simple solid-color form-fitting top and pants suitable for turnarounds");
 
     let Some(idx) = next_pending_shot(&manifest) else {
         let saved = manifest
@@ -3366,23 +3323,14 @@ fn run_model_sheet(
             "director-progress",
             format!("Collecting model-sheet shot `{}`…", shot.id),
         );
-        match media::run_media_tool(
-            "atlas_collect_media",
-            &collect_args,
-            project_root,
-            app,
-        ) {
+        match media::run_media_tool("atlas_collect_media", &collect_args, project_root, app) {
             Some(Ok(text)) => {
                 manifest.shots[idx].status = "saved".into();
                 write_manifest(&manifest)?;
-                let _ = update_character_sheet_refs(&manifest.character_sheet, &manifest, project_root);
+                let _ =
+                    update_character_sheet_refs(&manifest.character_sheet, &manifest, project_root);
                 return finish_model_sheet_shot(
-                    validated,
-                    &manifest,
-                    &shot.id,
-                    &shot.path,
-                    &text,
-                    true,
+                    validated, &manifest, &shot.id, &shot.path, &text, true,
                 );
             }
             Some(Err(error)) => {
@@ -3611,16 +3559,10 @@ pub fn text_sync_approval_notes(
                 .or_else(|| capability_model(context, "video.start_frame"))
                 .map(|m| m.model_id)
         })
-        .unwrap_or_else(|| {
-            "(set Settings → Video → Lip sync (talking shot) / Start frame)".into()
-        });
+        .unwrap_or_else(|| "(set Settings → Video → Lip sync (talking shot) / Start frame)".into());
     let audio_hint = if input_str(inputs, &["performance_wav", "reuse_audio"]).is_some() {
         "reuse existing performance WAV (skip TTS)".into()
-    } else if input_str(
-        inputs,
-        &["voice_clone", "voice_clone_path", "clone_wav"],
-    )
-    .is_some()
+    } else if input_str(inputs, &["voice_clone", "voice_clone_path", "clone_wav"]).is_some()
         || headers
             .get("voice")
             .is_some_and(|v| v.to_ascii_lowercase().ends_with(".wav"))
@@ -3679,9 +3621,7 @@ pub fn model_sheet_approval_notes(
         .collect::<Vec<_>>()
         .join("\n");
     let _ = project_root;
-    format!(
-        "### Model sheet plan\n{gate}\n\nOutput directory: `{out}`\n\nDefault shots:\n{shots}"
-    )
+    format!("### Model sheet plan\n{gate}\n\nOutput directory: `{out}`\n\nDefault shots:\n{shots}")
 }
 
 /// Extra approval detail for scene generation (model, refs, prompt excerpt).
@@ -3773,49 +3713,56 @@ Prompt:\n```\n{prompt}\n```"
         None
     };
 
-    let (headers, yaml) = handoff_text
+    let (headers, _) = handoff_text
         .as_deref()
         .map(parse_handoff_headers_and_yaml)
         .unwrap_or_default();
-    let yaml = yaml.unwrap_or(json!({}));
-    let prompt = yaml
-        .get("prompt")
-        .and_then(|v| v.as_str())
-        .unwrap_or("(missing prompt in handoff YAML)")
+    let request = handoff_text
+        .as_deref()
+        .and_then(|text| RenderRequest::from_document(text).ok());
+    let prompt = request
+        .as_ref()
+        .map(|r| r.prompt.as_str())
+        .unwrap_or("(missing or invalid scene-plan handoff)")
         .chars()
         .take(420)
         .collect::<String>();
-    let duration = yaml
-        .get("target_duration_seconds")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(8);
-    let aspect = yaml
-        .get("aspect_ratio")
-        .and_then(|v| v.as_str())
-        .unwrap_or("16:9");
+    let duration = request.as_ref().map(|r| r.duration_seconds).unwrap_or(0);
+    let aspect = request
+        .as_ref()
+        .map(|r| r.aspect_ratio.as_str())
+        .unwrap_or("(unknown)");
 
     let mut refs = input_path_list(inputs, &["reference_assets", "reference_images"]);
     if refs.is_empty() {
-        if let Some(Value::Array(items)) = yaml.get("reference_assets") {
-            for item in items {
-                if let Some(s) = item.as_str() {
-                    refs.push(s.to_string());
-                }
-            }
+        if let Some(request) = request.as_ref() {
+            refs = request.reference_images.clone();
         }
     }
+    let lane = request.as_ref().map(|r| r.lane);
     let model = if let Some(m) = input_str(inputs, &["model"]) {
         m.to_string()
-    } else if !refs.is_empty() {
-        capability_model(context, "video.location_prop_other_reference")
-            .or_else(|| capability_model(context, "video.character_reference"))
-            .or_else(|| capability_model(context, "video.text_only"))
-            .map(|m| m.model_id)
-            .unwrap_or_else(|| "(set Video reference / text-only default)".into())
     } else {
-        capability_model(context, "video.text_only")
-            .map(|m| m.model_id)
-            .unwrap_or_else(|| "(set Settings → Video → Text only)".into())
+        match lane {
+            Some(RenderLane::AudioDrivenI2v) => {
+                capability_model(context, "video.lip_sync_text_narration")
+                    .map(|m| m.model_id)
+                    .unwrap_or_else(|| "(set Settings → Video → Lip sync)".into())
+            }
+            Some(RenderLane::ImageToVideo) => capability_model(context, "video.start_frame")
+                .map(|m| m.model_id)
+                .unwrap_or_else(|| "(set Settings → Video → Start frame)".into()),
+            Some(RenderLane::ReferenceToVideo) => {
+                capability_model(context, "video.character_reference")
+                    .or_else(|| capability_model(context, "video.location_prop_other_reference"))
+                    .map(|m| m.model_id)
+                    .unwrap_or_else(|| "(set Settings → Video → Character reference)".into())
+            }
+            Some(RenderLane::TextToVideo) => capability_model(context, "video.text_only")
+                .map(|m| m.model_id)
+                .unwrap_or_else(|| "(set Settings → Video → Text only)".into()),
+            None => "(missing or invalid scene-plan handoff)".into(),
+        }
     };
 
     let out = if let Some(p) = input_str(inputs, &["output_path", "save_path"]) {
@@ -3853,7 +3800,6 @@ Reply **Approved** only if this model + refs + output path look right."
     )
 }
 
-
 #[cfg(test)]
 mod text_runner_tests {
     use super::*;
@@ -3878,10 +3824,7 @@ Wrote master + 1 sidecar.
         assert_eq!(emit.files[0].0, "prod.md");
         assert!(emit.files[0].1.contains("# Production Notes"));
         assert_eq!(emit.files[1].0, "Scene_Prompts/Scene1.txt");
-        assert_eq!(
-            emit.summary.as_deref(),
-            Some("Wrote master + 1 sidecar.")
-        );
+        assert_eq!(emit.summary.as_deref(), Some("Wrote master + 1 sidecar."));
     }
 
     #[test]

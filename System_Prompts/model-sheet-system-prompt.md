@@ -115,9 +115,9 @@ Build each generator prompt from:
 2. The style line
 3. The shot-specific framing, pose, and expression
 4. The shared studio/backdrop constraints
-5. A concise negative constraint set: extra people, background scenery, harsh beauty filters that change identity, deformed hands, cropped limbs on full-body shots, watermark, text overlays
+5. A concise negative constraint set: extra people, background scenery, harsh beauty filters that change identity, deformed hands, cropped limbs on full-body shots, watermark, text overlays, collage / contact sheet / multiple views
 
-Keep prompts production-direct. Do not wrap them in lore or personality essays.
+Keep prompts production-direct. Do not wrap them in lore or personality essays. Do not ask the generator to show more than one framing in a single image.
 
 ## Defaults for technical settings
 
@@ -126,7 +126,7 @@ Unless the user overrides them or the selected model schema forbids them:
 - Aspect ratio: `3:4`
 - Resolution: `2k`
 - Output format: `png`
-- One image per shot
+- One image per shot — **exactly one person and one pose per paid call**. Never a contact sheet, collage, grid, or multiple views in one file. Pack-wide language (front / three-quarter / profile / rear / full-body) belongs in the host plan, not in the generator prompt for a single shot.
 - Same model family for the entire pack, except the documented text-only identity approval-shot handoff, where the approval shot uses the text-to-image model and the remaining shots switch to the reference-image-capable model once that shot is approved
 
 If the schema lacks a requested setting, choose the closest supported value, disclose it in the approval plan, and keep that substitution for every shot in the pack.

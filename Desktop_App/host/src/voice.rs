@@ -1,5 +1,6 @@
 //! Character voice tab: local recording + profile save helpers.
 
+use crate::ctx::HostCtx;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,6 @@ use std::{
     sync::{Arc, Mutex},
     thread::JoinHandle,
 };
-use crate::ctx::HostCtx;
 
 use crate::elevenlabs;
 
@@ -115,7 +115,8 @@ fn write_wav_from_pcm(raw_path: &Path, wav_path: &Path) -> Result<(), String> {
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_length.to_le_bytes());
     wav.extend_from_slice(&pcm);
-    std::fs::write(wav_path, wav).map_err(|error| format!("Could not finalize the WAV file: {error}"))
+    std::fs::write(wav_path, wav)
+        .map_err(|error| format!("Could not finalize the WAV file: {error}"))
 }
 
 fn voice_dir(character_directory: &Path) -> Result<PathBuf, String> {
@@ -131,8 +132,7 @@ fn voice_dir(character_directory: &Path) -> Result<PathBuf, String> {
 fn next_audio_path(voice_directory: &Path, stem: &str, extension: &str) -> PathBuf {
     let mut index = 1;
     loop {
-        let candidate =
-            voice_directory.join(format!("{stem}_voice_sample_{index:02}.{extension}"));
+        let candidate = voice_directory.join(format!("{stem}_voice_sample_{index:02}.{extension}"));
         if !candidate.exists() {
             return candidate;
         }
@@ -151,7 +151,9 @@ fn write_profile_files(
     let profile_path = character_directory
         .join("voice")
         .join(format!("{stem}_voice_profile.yaml"));
-    let metadata_path = if let Some(reference) = character_reference_path.map(str::trim).filter(|value| !value.is_empty())
+    let metadata_path = if let Some(reference) = character_reference_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
         let reference_path = PathBuf::from(reference);
         if !reference_path.is_file() {
@@ -334,7 +336,13 @@ pub fn voice_recording_level(state: &RecorderState) -> Result<Vec<f32>, String> 
     }
     Ok(active_process
         .as_ref()
-        .and_then(|recording| recording.spectrum.lock().ok().map(|spectrum| spectrum.clone()))
+        .and_then(|recording| {
+            recording
+                .spectrum
+                .lock()
+                .ok()
+                .map(|spectrum| spectrum.clone())
+        })
         .unwrap_or_else(|| vec![0.0; 48]))
 }
 
@@ -356,7 +364,10 @@ pub fn voice_stop_recording(state: &RecorderState) -> Result<String, String> {
         let signal_result = Command::new("kill")
             .args(["-INT", &recording.child.id().to_string()])
             .status();
-        if signal_result.is_err() || !signal_result.map(|status| status.success()).unwrap_or(false)
+        if signal_result.is_err()
+            || !signal_result
+                .map(|status| status.success())
+                .unwrap_or(false)
         {
             recording
                 .child
@@ -463,7 +474,9 @@ pub struct SaveLibraryVoiceRequest {
     pub media_type: Option<String>,
 }
 
-pub fn voice_save_library_voice(request: SaveLibraryVoiceRequest) -> Result<SavedVoiceProfile, String> {
+pub fn voice_save_library_voice(
+    request: SaveLibraryVoiceRequest,
+) -> Result<SavedVoiceProfile, String> {
     let character_directory = PathBuf::from(&request.character_directory);
     let voice_directory = voice_dir(&character_directory)?;
     let stem = safe_character_name(&request.character_name);

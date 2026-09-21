@@ -3,20 +3,18 @@ use crate::scene_plan::assets::AssetRegistry;
 use crate::scene_plan::config::HostConfig;
 use crate::scene_plan::error::{Issue, IssueKind};
 use crate::scene_plan::handoff::{
-    label, AssetRole, CastBinding, CutId, DerivedTiming, GenerationPath, RenderLane, SceneHandoff,
-    SourceMode, SpeechMode,
+    label, CastBinding, CutId, DerivedTiming, GenerationPath, RenderLane, SceneHandoff, SourceMode,
+    SpeechMode,
 };
 use crate::scene_plan::render::canonical_yaml;
+use crate::scene_plan::resolve::{
+    apply_duration, apply_generation, apply_host_defaults, assign_cue_ids, resolve_duration,
+    resolve_generation,
+};
 use crate::scene_plan::timing::{cue_timing, normalized_words, round2, CueTiming, SceneTiming};
 use regex::Regex;
 use std::collections::{BTreeSet, HashSet};
-use std::path::Path;
 use std::sync::OnceLock;
-
-fn aspect_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\d{1,4}:\d{1,4}$").unwrap())
-}
 
 fn cue_id_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -62,6 +60,9 @@ pub fn validate_scene(
         ($($arg:tt)*) => { issues.push(Issue::new(IssueKind::NotReady, Some(id), format!($($arg)*))) };
     }
 
+    apply_host_defaults(&mut handoff, config, expected_aspect_ratio);
+    assign_cue_ids(id, &mut handoff.speech.cues);
+
     // --- identity / text -------------------------------------------------
     if handoff.source_scene == 0 {
         fail!("source_scene must be 1 or greater");
@@ -69,40 +70,11 @@ pub fn validate_scene(
     if handoff.cut == 0 {
         fail!("cut must be 1 or greater");
     }
-    if handoff.provider.trim().is_empty() {
-        fail!("provider must not be empty");
-    }
     if handoff.prompt.trim().is_empty() {
         fail!("prompt must not be empty");
     }
     if handoff.continuity.group.trim().is_empty() {
         fail!("continuity.group must not be empty; use `standalone` for a cut that stands alone");
-    }
-
-    // --- editing durations ------------------------------------------------
-    let screen = handoff.editing.estimated_screen_duration_seconds;
-    let head = handoff.editing.head_handle_seconds;
-    let tail = handoff.editing.tail_handle_seconds;
-    if !(screen.is_finite() && screen > 0.0) {
-        fail!("editing.estimated_screen_duration_seconds must be a finite number greater than 0, got {screen}");
-    }
-    for (name, value) in [("head_handle_seconds", head), ("tail_handle_seconds", tail)] {
-        if !(value.is_finite() && value >= 0.0) {
-            fail!("editing.{name} must be a finite number >= 0, got {value}");
-        }
-    }
-
-    // --- aspect ratio -----------------------------------------------------
-    let aspect = handoff.generation_requirements.aspect_ratio.trim();
-    if !aspect_re().is_match(aspect) {
-        fail!("generation_requirements.aspect_ratio must look like `9:16`, got `{aspect}`");
-    } else if let Some(expected) = expected_aspect_ratio {
-        if expected.trim() != aspect {
-            fail!(
-                "generation_requirements.aspect_ratio is `{aspect}` but this production is `{}`",
-                expected.trim()
-            );
-        }
     }
 
     // --- speech -----------------------------------------------------------
@@ -126,11 +98,6 @@ pub fn validate_scene(
         } else {
             format!("cue `{}`", cue.id.trim())
         };
-        match parse_cue_id(&cue.id) {
-            Some(cid) if cid == id => {}
-            Some(cid) => fail!("{label_} is numbered {} but sits in {} (cue ids must start with {})", cid.code(), id.code(), id.cue_prefix()),
-            None => fail!("{label_} has a malformed id; expected {}<letters or digits> (source scene + cut + suffix)", id.cue_prefix()),
-        }
         if !seen_ids.insert(cue.id.trim().to_string()) {
             fail!("{label_} has a duplicate id");
         }
@@ -179,9 +146,6 @@ pub fn validate_scene(
             .fold(0.0, |a, b| a + b),
     );
     let words_total: usize = cue_timings.iter().map(|t| t.word_count).sum();
-    if screen.is_finite() && speech_total > screen + 1e-6 {
-        fail!("speech needs {speech_total:.2}s ({words_total} words at {wpm} WPM plus {pauses_total:.2}s of pauses) but editing.estimated_screen_duration_seconds is {screen}; raise it to at least {speech_total:.2} or move cues to another cut");
-    }
 
     // --- cast: speaker -> discovered character (host-owned) --------------
     let speakers = handoff.distinct_speakers();
@@ -206,77 +170,9 @@ pub fn validate_scene(
         });
     }
 
-    // --- generation path --------------------------------------------------
+    // --- generation: invert the old rejection matrix ----------------------
     let lipsync = mode == Some(SpeechMode::SourceVideoLipsync);
-    let requested_path = handoff.generation_requirements.generation_path;
-    let resolved_path = match (lipsync, requested_path) {
-        (true, None) => {
-            not_ready!("source_video_lipsync requires generation_requirements.generation_path: audio_driven_i2v but it is missing; the host will not fall back to text_to_video");
-            None
-        }
-        (true, Some(GenerationPath::PromptDriven)) => {
-            fail!(
-                "source_video_lipsync requires generation_path audio_driven_i2v, not prompt_driven"
-            );
-            Some(GenerationPath::PromptDriven)
-        }
-        (true, Some(GenerationPath::AudioDrivenI2v)) => Some(GenerationPath::AudioDrivenI2v),
-        (false, None) => {
-            warnings.push(format!(
-                "{id}: generation_path not given for a non-lip-sync cut; recorded as prompt_driven"
-            ));
-            Some(GenerationPath::PromptDriven)
-        }
-        (false, Some(GenerationPath::AudioDrivenI2v)) => {
-            fail!("generation_path audio_driven_i2v is only valid with speech.mode source_video_lipsync (speech.mode is {})", mode.map(|m| label(&m)).unwrap_or_else(|| "missing".to_string()));
-            Some(GenerationPath::AudioDrivenI2v)
-        }
-        (false, Some(GenerationPath::PromptDriven)) => Some(GenerationPath::PromptDriven),
-    };
-
-    // --- source mode vs. assets -----------------------------------------
-    let source_mode = handoff.generation_requirements.source_mode;
-    let assets = &handoff.reference_assets;
-    for (i, asset) in assets.iter().enumerate() {
-        let path = asset.path.trim();
-        if path.is_empty() {
-            fail!("reference_assets[{i}] has an empty path");
-        } else if registry.is_some() && !Path::new(path).is_file() {
-            fail!("reference_assets[{i}] path `{path}` does not exist on disk; use one of the host-discovered asset paths");
-        }
-    }
-    let start_frames = assets
-        .iter()
-        .filter(|a| a.role == AssetRole::StartFrame)
-        .count();
-    if start_frames > 1 {
-        fail!("only one reference asset may have role start_frame, found {start_frames}");
-    }
-    match source_mode {
-        SourceMode::TextToVideo => {
-            if !assets.is_empty() {
-                fail!("source_mode text_to_video cannot carry reference images, but {} reference_assets were given; switch to image_to_video / reference_to_video or remove them", assets.len());
-            }
-        }
-        SourceMode::ReferenceToVideo => {
-            if assets.is_empty() {
-                fail!("source_mode reference_to_video requires at least one entry in reference_assets");
-            }
-        }
-        SourceMode::ImageToVideo => {
-            if start_frames == 0 {
-                fail!(
-                    "source_mode image_to_video requires a reference asset with role start_frame"
-                );
-            }
-        }
-    }
-
-    // --- lip-sync rules ---------------------------------------------------
     if lipsync {
-        if source_mode == SourceMode::TextToVideo {
-            fail!("speech.mode source_video_lipsync cannot use source_mode text_to_video; the lip-sync pass needs a source performance from image_to_video or reference_to_video");
-        }
         match on_camera_speakers.len() {
             0 => fail!("source_video_lipsync requires exactly one on-camera speaker, but every cue is off-camera"),
             1 => {}
@@ -285,35 +181,31 @@ pub fn validate_scene(
                 on_camera_speakers.iter().cloned().collect::<Vec<_>>().join(", ")
             ),
         }
-        let usable_image = assets.iter().any(|a| {
-            matches!(
-                a.role,
-                AssetRole::StartFrame | AssetRole::CharacterReference
-            ) && !a.path.trim().is_empty()
-        });
-        if !usable_image {
-            not_ready!("source_video_lipsync needs a usable start_frame or character_reference image in reference_assets; none is present");
-        }
         if let (Some(reg), 1) = (registry, on_camera_speakers.len()) {
             let speaker = on_camera_speakers.iter().next().expect("one speaker");
             match reg.find_character(speaker) {
-                Some(c) if c.lipsync_ready() => {
-                    let uses_own_shot = assets
-                        .iter()
-                        .any(|a| matches!(a.role, AssetRole::StartFrame | AssetRole::CharacterReference) && c.owns_image(&a.path));
-                    if !uses_own_shot {
-                        fail!(
-                            "on-camera speaker `{speaker}` resolves to `{}` but none of the reference_assets is one of that character's saved shots; use `{}`",
-                            c.name,
-                            c.best_reference_image().map(|p| p.display().to_string()).unwrap_or_default()
-                        );
-                    }
-                }
+                Some(c) if c.lipsync_ready() => {}
                 Some(c) => not_ready!("on-camera speaker `{speaker}` resolves to `{}` which has no usable reference image on disk; generate its model sheet first or take the speaker off camera", c.name),
                 None => not_ready!("on-camera speaker `{speaker}` matches no character under Characters/; lip-sync needs a discovered reference image"),
             }
         }
     }
+
+    let resolved_gen = resolve_generation(
+        mode,
+        &on_camera_speakers,
+        &cast,
+        registry,
+        &handoff.reference_assets,
+    );
+    if lipsync
+        && resolved_gen.source_mode == SourceMode::TextToVideo
+        && on_camera_speakers.len() == 1
+        && registry.is_none()
+    {
+        not_ready!("source_video_lipsync needs a usable start_frame or character_reference image; none is present");
+    }
+    apply_generation(&mut handoff, resolved_gen);
 
     // --- voice-over with a visible lip-sync-ready speaker ------------------
     // Allowed: the line plays over a face that is not performing it. The host
@@ -348,23 +240,47 @@ pub fn validate_scene(
         }
     }
 
-    // --- render lane + provider bucket ------------------------------------
+    // --- render lane + host-snapped duration ------------------------------
     let lane = RenderLane::for_request(
-        resolved_path.unwrap_or(GenerationPath::PromptDriven),
-        source_mode,
+        handoff
+            .generation_requirements
+            .generation_path
+            .unwrap_or(GenerationPath::PromptDriven),
+        handoff.generation_requirements.source_mode,
     );
-    let minimum_source = screen + head + tail;
-    let render_duration = if minimum_source.is_finite() {
-        match config.policy_for(lane).choose(minimum_source) {
-            Ok(seconds) => seconds,
-            Err(e) => {
-                fail!("{e} on the {} lane; shorten editing.estimated_screen_duration_seconds or the handles, or split the cut", label(&lane));
-                f64::NAN
-            }
+    let resolved_timing = match resolve_duration(speech_total, handoff.editing.pace, lane, config) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            fail!(
+                "{e} on the {} lane ({words_total} words at {wpm} WPM plus {pauses_total:.2}s of pauses); split the cut",
+                label(&lane)
+            );
+            None
         }
-    } else {
-        f64::NAN
     };
+    if let Some(t) = &resolved_timing {
+        apply_duration(&mut handoff, t);
+    }
+    let screen = resolved_timing
+        .as_ref()
+        .map(|t| t.screen_seconds)
+        .unwrap_or(f64::NAN);
+    let head = resolved_timing
+        .as_ref()
+        .map(|t| t.head_handle_seconds)
+        .unwrap_or(0.0);
+    let tail = resolved_timing
+        .as_ref()
+        .map(|t| t.tail_handle_seconds)
+        .unwrap_or(0.0);
+    let minimum_source = resolved_timing
+        .as_ref()
+        .map(|t| t.minimum_source_seconds)
+        .unwrap_or(f64::NAN);
+    let render_duration = resolved_timing
+        .as_ref()
+        .map(|t| t.render_duration_seconds)
+        .unwrap_or(f64::NAN);
 
     if !issues.is_empty() {
         return Err(issues);
@@ -372,7 +288,6 @@ pub fn validate_scene(
 
     // --- normalize: the handoff becomes the single truth -------------------
     handoff.speech.mode = Some(mode.unwrap_or(SpeechMode::Silent));
-    handoff.generation_requirements.generation_path = resolved_path;
     for (cue, timing) in handoff.speech.cues.iter_mut().zip(&cue_timings) {
         cue.estimated_duration_seconds = Some(timing.speech_seconds);
     }
@@ -424,8 +339,9 @@ mod tests {
     use crate::scene_plan::extract::parse_handoff_yaml;
     use crate::scene_plan::fixtures::{
         broll_scene_yaml, lipsync_cut_yaml, lipsync_scene_yaml, lipsync_scene_yaml_with_cues,
-        voiceover_cut_yaml, write_fixture_project,
+        slim_broll_yaml, slim_lipsync_yaml, voiceover_cut_yaml, write_fixture_project,
     };
+    use crate::scene_plan::handoff::Pace;
 
     const TEXT: &str = "This is a twelve word sentence that needs a reliable duration estimate.";
 
@@ -475,8 +391,11 @@ mod tests {
             Some(4.36)
         );
         let d = v.handoff.derived.as_ref().unwrap();
-        assert_eq!(d.minimum_source_duration_seconds, 8.0);
+        assert_eq!(d.minimum_source_duration_seconds, 10.0);
         assert_eq!(d.render_duration_seconds, 10.0);
+        assert_eq!(v.handoff.editing.pace, Pace::Natural);
+        assert_eq!(v.handoff.provider, "atlascloud");
+        assert_eq!(v.handoff.generation_requirements.aspect_ratio, "9:16");
         assert_eq!(d.render_lane, RenderLane::AudioDrivenI2v);
         assert_eq!(v.handoff.cast.len(), 1);
         assert_eq!(v.handoff.cast[0].character, "Sam");
@@ -494,12 +413,6 @@ mod tests {
 
     #[test]
     fn text_to_video_cut_uses_buckets_not_continuous() {
-        // 10 + 1 + 1 = 12 s minimum source: the v2 run rendered this as 12 s.
-        let yaml = broll_scene_yaml(1).replace(
-            "estimated_screen_duration_seconds: 4.0",
-            "estimated_screen_duration_seconds: 10.0",
-        );
-        expect_issue(&yaml, IssueKind::Validation, "exceeds the largest provider render bucket 10.00s (buckets: [5.0, 10.0]) on the text_to_video lane");
         let v = validate_yaml(&broll_scene_yaml(1)).unwrap();
         assert_eq!(
             v.handoff.derived.as_ref().unwrap().render_duration_seconds,
@@ -509,51 +422,62 @@ mod tests {
             v.handoff.derived.as_ref().unwrap().render_lane,
             RenderLane::TextToVideo
         );
+        assert_eq!(v.handoff.editing.estimated_screen_duration_seconds, 4.0);
     }
 
     #[test]
-    fn speech_longer_than_screen_duration_fails_with_numbers() {
+    fn speech_longer_than_largest_bucket_fails_with_numbers() {
         let long = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five twenty-six tw-seven tw-eight tw-nine thirty";
         let issues = expect_issue(
             &lipsync_scene_yaml(1, long),
             IssueKind::Validation,
-            "speech needs 10.91s",
+            "exceeds the largest provider render bucket 10.00s",
         );
-        assert!(issues[0]
-            .message
-            .contains("estimated_screen_duration_seconds is 6"));
+        assert!(issues[0].message.contains("plus 0.00s of pauses"));
+        assert!(issues[0].message.contains("split the cut"));
     }
 
     #[test]
-    fn pauses_count_against_screen_duration() {
-        let yaml = lipsync_scene_yaml(1, TEXT).replace("      on_camera: true\n", "      on_camera: true\n      pause_before_seconds: 1.0\n      pause_after_seconds: 0.7\n");
-        expect_issue(&yaml, IssueKind::Validation, "plus 1.70s of pauses");
+    fn pauses_count_against_the_bucket() {
+        let yaml = lipsync_scene_yaml(1, TEXT).replace(
+            "      on_camera: true\n",
+            "      on_camera: true\n      pause_before_seconds: 4.0\n      pause_after_seconds: 3.0\n",
+        );
+        expect_issue(&yaml, IssueKind::Validation, "plus 7.00s of pauses");
     }
 
     #[test]
-    fn lipsync_path_and_mode_rules() {
-        expect_issue(
-            &lipsync_scene_yaml(1, TEXT).replace(
-                "source_mode: reference_to_video",
-                "source_mode: text_to_video",
-            ),
-            IssueKind::Validation,
-            "cannot use source_mode text_to_video",
+    fn host_overwrites_illegal_generation_fields() {
+        let flipped = validate_yaml(&lipsync_scene_yaml(1, TEXT).replace(
+            "source_mode: reference_to_video",
+            "source_mode: text_to_video",
+        ))
+        .unwrap();
+        assert_eq!(
+            flipped.handoff.generation_requirements.source_mode,
+            SourceMode::ReferenceToVideo
         );
-        expect_issue(
-            &lipsync_scene_yaml(1, TEXT).replace(
-                "generation_path: audio_driven_i2v",
-                "generation_path: prompt_driven",
-            ),
-            IssueKind::Validation,
-            "requires generation_path audio_driven_i2v",
+        assert_eq!(
+            flipped.handoff.generation_requirements.generation_path,
+            Some(GenerationPath::AudioDrivenI2v)
         );
-        let issues = expect_issue(
+        let path = validate_yaml(&lipsync_scene_yaml(1, TEXT).replace(
+            "generation_path: audio_driven_i2v",
+            "generation_path: prompt_driven",
+        ))
+        .unwrap();
+        assert_eq!(
+            path.handoff.generation_requirements.generation_path,
+            Some(GenerationPath::AudioDrivenI2v)
+        );
+        let missing_path = validate_yaml(
             &lipsync_scene_yaml(1, TEXT).replace("  generation_path: audio_driven_i2v\n", ""),
-            IssueKind::NotReady,
-            "will not fall back to text_to_video",
+        )
+        .unwrap();
+        assert_eq!(
+            missing_path.handoff.generation_requirements.generation_path,
+            Some(GenerationPath::AudioDrivenI2v)
         );
-        assert!(issues.iter().all(|i| i.kind == IssueKind::NotReady));
         expect_issue(
             &lipsync_scene_yaml(1, TEXT).replace("  mode: source_video_lipsync\n", ""),
             IssueKind::NotReady,
@@ -575,13 +499,14 @@ mod tests {
             IssueKind::Validation,
             "speech.cues is empty",
         );
-        expect_issue(
-            &broll_scene_yaml(1).replace(
-                "generation_path: prompt_driven",
-                "generation_path: audio_driven_i2v",
-            ),
-            IssueKind::Validation,
-            "only valid with speech.mode source_video_lipsync",
+        let broll = validate_yaml(&broll_scene_yaml(1).replace(
+            "generation_path: prompt_driven",
+            "generation_path: audio_driven_i2v",
+        ))
+        .unwrap();
+        assert_eq!(
+            broll.handoff.generation_requirements.generation_path,
+            Some(GenerationPath::PromptDriven)
         );
     }
 
@@ -627,30 +552,27 @@ mod tests {
     }
 
     #[test]
-    fn source_mode_asset_rules() {
-        expect_issue(
-            &format!(
-                "{}reference_assets:\n  - path: \"/x.png\"\n    role: style_reference\n",
-                broll_scene_yaml(1)
-            ),
-            IssueKind::Validation,
-            "text_to_video cannot carry reference images",
+    fn host_resolves_source_mode_from_assets() {
+        let with_style = validate_yaml(&format!(
+            "{}reference_assets:\n  - path: \"/x.png\"\n    role: style_reference\n",
+            broll_scene_yaml(1)
+        ))
+        .unwrap();
+        assert_eq!(
+            with_style.handoff.generation_requirements.source_mode,
+            SourceMode::ReferenceToVideo
         );
-        expect_issue(
-            &broll_scene_yaml(1).replace(
-                "source_mode: text_to_video",
-                "source_mode: reference_to_video",
-            ),
-            IssueKind::Validation,
-            "reference_to_video requires at least one",
+        let no_assets = validate_yaml(&broll_scene_yaml(1).replace(
+            "source_mode: text_to_video",
+            "source_mode: reference_to_video",
+        ))
+        .unwrap();
+        assert_eq!(
+            no_assets.handoff.generation_requirements.source_mode,
+            SourceMode::TextToVideo
         );
         let i2v = broll_scene_yaml(1)
             .replace("source_mode: text_to_video", "source_mode: image_to_video");
-        expect_issue(
-            &format!("{i2v}reference_assets:\n  - path: \"/x.png\"\n    role: style_reference\n"),
-            IssueKind::Validation,
-            "requires a reference asset with role start_frame",
-        );
         let v = validate_yaml(&format!(
             "{i2v}reference_assets:\n  - path: \"/x.png\"\n    role: start_frame\n"
         ))
@@ -659,41 +581,35 @@ mod tests {
             v.handoff.derived.as_ref().unwrap().render_lane,
             RenderLane::ImageToVideo
         );
+        assert_eq!(
+            v.handoff.generation_requirements.source_mode,
+            SourceMode::ImageToVideo
+        );
     }
 
     #[test]
-    fn aspect_ratio_must_match_production() {
+    fn host_overwrites_aspect_ratio_from_production() {
         let handoff = parse_handoff_yaml(&lipsync_scene_yaml(1, TEXT)).unwrap();
-        let issues =
-            validate_scene(handoff, &HostConfig::default(), Some("16:9"), None).unwrap_err();
-        assert!(issues[0]
-            .message
-            .contains("`9:16` but this production is `16:9`"));
-        expect_issue(
+        let v = validate_scene(handoff, &HostConfig::default(), Some("16:9"), None).unwrap();
+        assert_eq!(v.handoff.generation_requirements.aspect_ratio, "16:9");
+        let garbled = validate_yaml(
             &lipsync_scene_yaml(1, TEXT)
                 .replace("aspect_ratio: \"9:16\"", "aspect_ratio: vertical"),
-            IssueKind::Validation,
-            "must look like `9:16`",
-        );
+        )
+        .unwrap();
+        assert_eq!(garbled.handoff.generation_requirements.aspect_ratio, "9:16");
     }
 
     #[test]
-    fn cue_ids_carry_source_scene_and_cut() {
-        expect_issue(
-            &lipsync_scene_yaml(1, TEXT).replace("S01C01_a", "S01C02_a"),
-            IssueKind::Validation,
-            "numbered S01C02 but sits in S01C01",
-        );
-        expect_issue(
-            &lipsync_scene_yaml(1, TEXT).replace("S01C01_a", "S02C01_a"),
-            IssueKind::Validation,
-            "numbered S02C01 but sits in S01C01",
-        );
-        expect_issue(
-            &lipsync_scene_yaml(1, TEXT).replace("S01C01_a", "S01_a"),
-            IssueKind::Validation,
-            "malformed id; expected S01C01_<letters or digits>",
-        );
+    fn host_rewrites_cue_ids() {
+        let v =
+            validate_yaml(&lipsync_scene_yaml(1, TEXT).replace("S01C01_a", "S01C02_a")).unwrap();
+        assert_eq!(v.handoff.speech.cues[0].id, "S01C01_a");
+        let v =
+            validate_yaml(&lipsync_scene_yaml(1, TEXT).replace("S01C01_a", "S02C01_a")).unwrap();
+        assert_eq!(v.handoff.speech.cues[0].id, "S01C01_a");
+        let v = validate_yaml(&lipsync_scene_yaml(1, TEXT).replace("S01C01_a", "S01_a")).unwrap();
+        assert_eq!(v.handoff.speech.cues[0].id, "S01C01_a");
         expect_issue(
             &lipsync_scene_yaml_with_cues(
                 1,
@@ -719,19 +635,23 @@ mod tests {
         assert!(v.handoff.cast.is_empty());
         let v = validate_yaml(&broll_scene_yaml(1).replace("speech:\n  mode: none\n", "")).unwrap();
         assert_eq!(v.handoff.speech.mode, Some(SpeechMode::Silent));
-        expect_issue(
-            &broll_scene_yaml(1).replace(
-                "estimated_screen_duration_seconds: 4.0",
-                "estimated_screen_duration_seconds: 0",
-            ),
-            IssueKind::Validation,
-            "greater than 0",
+        let ignored_zero = validate_yaml(&broll_scene_yaml(1).replace(
+            "estimated_screen_duration_seconds: 4.0",
+            "estimated_screen_duration_seconds: 0",
+        ))
+        .unwrap();
+        assert!(
+            ignored_zero
+                .handoff
+                .editing
+                .estimated_screen_duration_seconds
+                > 0.0
         );
-        expect_issue(
+        let ignored_handle = validate_yaml(
             &broll_scene_yaml(1).replace("head_handle_seconds: 0.5", "head_handle_seconds: -1"),
-            IssueKind::Validation,
-            "head_handle_seconds must be",
-        );
+        )
+        .unwrap();
+        assert_eq!(ignored_handle.handoff.editing.head_handle_seconds, 0.5);
         expect_issue(
             &broll_scene_yaml(1).replace("cut: 1", "cut: 0"),
             IssueKind::Validation,
@@ -742,16 +662,37 @@ mod tests {
     #[test]
     fn all_issues_are_collected_not_just_the_first() {
         let yaml = lipsync_scene_yaml(1, TEXT)
-            .replace("S01C01_a", "S01C09_a")
             .replace(
-                "source_mode: reference_to_video",
-                "source_mode: text_to_video",
+                "prompt: |-\n  Sam faces the camera and speaks naturally. Hold settled before speaking\n  and settle again afterward. Locked-off camera with no zoom.\n",
+                "prompt: \"\"\n",
             )
-            .replace(
-                "generation_path: audio_driven_i2v",
-                "generation_path: prompt_driven",
-            );
-        assert!(validate_yaml(&yaml).unwrap_err().len() >= 4);
+            .replace("      speaker: Sam\n", "      speaker: \"\"\n")
+            .replace("cut: 1", "cut: 0");
+        assert!(validate_yaml(&yaml).unwrap_err().len() >= 3);
+    }
+
+    #[test]
+    fn slim_yaml_is_enough_for_the_host() {
+        let v = validate_yaml(&slim_broll_yaml(1)).unwrap();
+        assert_eq!(v.handoff.provider, "atlascloud");
+        assert_eq!(
+            v.handoff.generation_requirements.generation_path,
+            Some(GenerationPath::PromptDriven)
+        );
+        assert_eq!(
+            v.handoff.generation_requirements.source_mode,
+            SourceMode::TextToVideo
+        );
+        assert_eq!(v.handoff.generation_requirements.aspect_ratio, "9:16");
+        assert_eq!(
+            v.handoff.derived.as_ref().unwrap().render_duration_seconds,
+            5.0
+        );
+        expect_issue(
+            &slim_lipsync_yaml(1, TEXT),
+            IssueKind::NotReady,
+            "needs a usable start_frame or character_reference image",
+        );
     }
 
     #[test]
@@ -816,20 +757,31 @@ mod tests {
     }
 
     #[test]
-    fn reference_paths_must_exist_and_belong_to_the_speaker() {
+    fn host_attaches_the_speakers_reference_and_ignores_model_paths() {
         let dir = tempfile::tempdir().unwrap();
         let fx = write_fixture_project(dir.path());
         let reg = AssetRegistry::discover(dir.path());
+        let slim = slim_lipsync_yaml(1, "We shall be there before supper.")
+            .replace("speaker: Sam", "speaker: Tom");
+        let v = validate_with(&slim, &reg).unwrap();
+        assert_eq!(
+            v.handoff.reference_assets[0].path,
+            fx.tom_closeup.to_string_lossy()
+        );
+        assert_eq!(
+            v.handoff.generation_requirements.source_mode,
+            SourceMode::ReferenceToVideo
+        );
         let ghost = lipsync_cut_yaml(
             1,
             1,
             &[("a", "Tom", "We shall be there before supper.", true)],
             "/project/Characters/Tom_9x16.png",
         );
-        assert_issue(
-            validate_with(&ghost, &reg),
-            IssueKind::Validation,
-            "does not exist on disk",
+        let v = validate_with(&ghost, &reg).unwrap();
+        assert_eq!(
+            v.handoff.reference_assets[0].path,
+            fx.tom_closeup.to_string_lossy()
         );
         let wrong = lipsync_cut_yaml(
             1,
@@ -837,10 +789,10 @@ mod tests {
             &[("a", "Tom", "We shall be there before supper.", true)],
             &fx.nell_closeup.to_string_lossy(),
         );
-        assert_issue(
-            validate_with(&wrong, &reg),
-            IssueKind::Validation,
-            "none of the reference_assets is one of that character's saved shots",
+        let v = validate_with(&wrong, &reg).unwrap();
+        assert_eq!(
+            v.handoff.reference_assets[0].path,
+            fx.tom_closeup.to_string_lossy()
         );
     }
 

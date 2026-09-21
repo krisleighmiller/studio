@@ -91,7 +91,8 @@ pub fn write_bytes(dest: &str, project_root: Option<&str>, data: &[u8]) -> Resul
                 .map_err(|error| format!("Could not create parent dirs: {error}"))?;
         }
     }
-    fs::write(&path, data).map_err(|error| format!("Could not write {}: {error}", path.display()))?;
+    fs::write(&path, data)
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))?;
     Ok(serde_json::json!({
         "saved": true,
         "path": path.to_string_lossy(),

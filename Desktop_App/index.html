@@ -127,6 +127,7 @@
               aria-label="Markdown preview"
             ></article>
             <div id="settings-view" class="settings-view hidden" aria-label="Settings"></div>
+            <div id="workflow-view" class="workflow-view hidden" aria-label="Production desk"></div>
             <div id="voice-view" class="voice-view hidden" aria-label="Character Voice"></div>
             <article
               id="docs-view"
@@ -235,6 +236,23 @@
               </button>
               <button
                 type="button"
+                id="toggle-chat-btn"
+                class="icon-button"
+                title="Hide chat (Ctrl+Alt+H)"
+                aria-label="Hide chat"
+                aria-pressed="false"
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M6.5 3.5 11 8l-4.5 4.5"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.2"
+                  />
+                </svg>
+              </button>
+              <button
+                type="button"
                 id="save-chat-btn"
                 class="icon-button"
                 title="Save chat transcript… (Ctrl+Shift+E)"
@@ -280,6 +298,15 @@
             </div>
           </form>
         </aside>
+        <button
+          type="button"
+          id="chat-rail"
+          class="chat-rail hidden"
+          title="Show chat (Ctrl+Alt+H)"
+          aria-label="Show chat"
+        >
+          Chat
+        </button>
       </div>
 
       <footer class="status-bar">

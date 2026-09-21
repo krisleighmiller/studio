@@ -2,12 +2,12 @@
 //! Atlas is the near-term test provider; tool names are adapter-local, not a product MCP dependency.
 //! Model IDs should come from Settings `capabilityDefaults`, not marketplace discovery.
 
+use crate::ctx::HostCtx;
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
-use crate::ctx::HostCtx;
 
 const API_BASE: &str = "https://api.atlascloud.ai/api/v1";
 const BALANCE_URL: &str = "https://api.atlascloud.ai/public/v1/balance";
@@ -32,23 +32,18 @@ fn client(timeout_secs: u64) -> Result<reqwest::blocking::Client, String> {
 }
 
 fn auth_get(api_key: &str, url: &str, timeout_secs: u64) -> Result<Value, String> {
-    let response = crate::http_util::get_with_retry(
-        &client(timeout_secs)?,
-        url,
-        Some(api_key),
-        3,
-    )?;
+    let response = crate::http_util::get_with_retry(&client(timeout_secs)?, url, Some(api_key), 3)?;
     parse_json_response(response)
 }
 
-fn auth_post_json(api_key: &str, url: &str, body: &Value, timeout_secs: u64) -> Result<Value, String> {
-    let response = crate::http_util::post_json_with_retry(
-        &client(timeout_secs)?,
-        url,
-        api_key,
-        body,
-        3,
-    )?;
+fn auth_post_json(
+    api_key: &str,
+    url: &str,
+    body: &Value,
+    timeout_secs: u64,
+) -> Result<Value, String> {
+    let response =
+        crate::http_util::post_json_with_retry(&client(timeout_secs)?, url, api_key, body, 3)?;
     parse_json_response(response)
 }
 
@@ -73,7 +68,11 @@ fn fetch_models_catalog() -> Result<Vec<Value>, String> {
         .ok_or_else(|| "Unexpected models catalog shape.".to_string())?;
     Ok(items
         .iter()
-        .filter(|item| item.get("display_console").and_then(|v| v.as_bool()).unwrap_or(true))
+        .filter(|item| {
+            item.get("display_console")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
+        })
         .cloned()
         .collect())
 }
@@ -96,11 +95,19 @@ fn format_model_line(item: &Value) -> String {
     let price = item
         .pointer("/price/actual/base_price")
         .and_then(|v| v.as_str())
-        .or_else(|| item.pointer("/price/actual/base_price").and_then(|v| v.as_str()));
-    let price_bit = price
-        .map(|p| format!(" · ${p}"))
-        .unwrap_or_default();
-    format!("- `{id}` — {name} ({model_type}{org_bit}){price_bit}", org_bit = if org.is_empty() { String::new() } else { format!(" · {org}") })
+        .or_else(|| {
+            item.pointer("/price/actual/base_price")
+                .and_then(|v| v.as_str())
+        });
+    let price_bit = price.map(|p| format!(" · ${p}")).unwrap_or_default();
+    format!(
+        "- `{id}` — {name} ({model_type}{org_bit}){price_bit}",
+        org_bit = if org.is_empty() {
+            String::new()
+        } else {
+            format!(" · {org}")
+        }
+    )
 }
 
 pub fn list_models(type_filter: Option<&str>) -> Result<String, String> {
@@ -124,7 +131,9 @@ pub fn list_models(type_filter: Option<&str>) -> Result<String, String> {
         lines.push(format_model_line(item));
         count += 1;
         if count >= 200 {
-            lines.push("\n…truncated at 200 models. Narrow with type=Image or atlas_search_docs.".into());
+            lines.push(
+                "\n…truncated at 200 models. Narrow with type=Image or atlas_search_docs.".into(),
+            );
             break;
         }
     }
@@ -147,10 +156,16 @@ pub fn search_docs(query: &str) -> Result<String, String> {
     for item in catalog {
         let hay = [
             model_id(&item),
-            item.get("displayName").and_then(|v| v.as_str()).unwrap_or(""),
+            item.get("displayName")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
             item.get("profile").and_then(|v| v.as_str()).unwrap_or(""),
-            item.get("organization").and_then(|v| v.as_str()).unwrap_or(""),
-            item.get("familyName").and_then(|v| v.as_str()).unwrap_or(""),
+            item.get("organization")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            item.get("familyName")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
             item.get("familyDisplayName")
                 .and_then(|v| v.as_str())
                 .unwrap_or(""),
@@ -191,7 +206,10 @@ pub fn search_docs(query: &str) -> Result<String, String> {
         }
     }
     if matches.len() > 40 {
-        lines.push(format!("\n…truncated; {} more matches.", matches.len() - 40));
+        lines.push(format!(
+            "\n…truncated; {} more matches.",
+            matches.len() - 40
+        ));
     }
     Ok(lines.join("\n"))
 }
@@ -203,7 +221,9 @@ fn find_model_entry(model: &str) -> Result<Value, String> {
         .into_iter()
         .find(|item| model_id(item) == wanted)
         .ok_or_else(|| {
-            format!("Model not found in catalog: {wanted}. Use atlas_list_models / atlas_search_docs.")
+            format!(
+                "Model not found in catalog: {wanted}. Use atlas_list_models / atlas_search_docs."
+            )
         })
 }
 
@@ -242,9 +262,7 @@ pub fn get_model_info(model: &str) -> Result<String, String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("?")
         ),
-        format!(
-            "- Playground: https://www.atlascloud.ai/models/{id}"
-        ),
+        format!("- Playground: https://www.atlascloud.ai/models/{id}"),
     ];
     if let Some(price) = entry.get("price") {
         sections.push(format!(
@@ -306,10 +324,7 @@ fn summarize_input_schema(schema: &Value) -> String {
     let mut lines = vec![format!("Required fields: {required}"), String::new()];
     if let Some(props) = props {
         for (name, prop) in props {
-            let ty = prop
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("any");
+            let ty = prop.get("type").and_then(|v| v.as_str()).unwrap_or("any");
             let desc = prop
                 .get("description")
                 .and_then(|v| v.as_str())
@@ -383,12 +398,7 @@ fn coerce_media_url(raw: &str) -> Option<String> {
     }
     if trimmed.starts_with('{') {
         if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-            for pointer in [
-                "/download_url",
-                "/url",
-                "/data/download_url",
-                "/data/url",
-            ] {
+            for pointer in ["/download_url", "/url", "/data/download_url", "/data/url"] {
                 if let Some(url) = parsed.pointer(pointer).and_then(|v| v.as_str()) {
                     let u = url.trim();
                     if u.starts_with("http://") || u.starts_with("https://") {
@@ -820,7 +830,9 @@ pub fn get_prediction(
                         format!("Prediction {prediction_id}: {status} (poll {polls})"),
                     );
                 }
-                if is_terminal_status(&status) || wait_seconds == 0 || std::time::Instant::now() >= deadline
+                if is_terminal_status(&status)
+                    || wait_seconds == 0
+                    || std::time::Instant::now() >= deadline
                 {
                     return Ok(serde_json::to_string_pretty(&shape_prediction(
                         prediction_id,
@@ -958,8 +970,8 @@ pub fn collect_media(
 
     emit_progress(app, format!("Downloading {prediction_id} → {dest}"));
     let saved = download_atlas_media(&url, &dest, project_root, app)?;
-    let mut saved_value: Value = serde_json::from_str(&saved)
-        .unwrap_or_else(|_| json!({ "saved": true, "path": dest }));
+    let mut saved_value: Value =
+        serde_json::from_str(&saved).unwrap_or_else(|_| json!({ "saved": true, "path": dest }));
     if let Some(obj) = saved_value.as_object_mut() {
         obj.insert("prediction_id".into(), Value::String(prediction_id.into()));
         obj.insert("output_url".into(), Value::String(url));
@@ -977,10 +989,21 @@ pub fn collect_image(
     wait_seconds: u64,
     app: Option<&HostCtx>,
 ) -> Result<String, String> {
-    collect_media(api_key, prediction_id, dest, project_root, wait_seconds, app)
+    collect_media(
+        api_key,
+        prediction_id,
+        dest,
+        project_root,
+        wait_seconds,
+        app,
+    )
 }
 
-pub fn upload_media(api_key: &str, file_path: &str, project_root: Option<&str>) -> Result<String, String> {
+pub fn upload_media(
+    api_key: &str,
+    file_path: &str,
+    project_root: Option<&str>,
+) -> Result<String, String> {
     let path = resolve_existing_file(file_path, project_root)?;
     let file_name = path
         .file_name()
@@ -988,7 +1011,8 @@ pub fn upload_media(api_key: &str, file_path: &str, project_root: Option<&str>) 
         .unwrap_or("upload.bin")
         .to_string();
     let mime = mime_for_path(&path);
-    let bytes = fs::read(&path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let bytes =
+        fs::read(&path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     if bytes.is_empty() {
         return Err(format!("File is empty: {}", path.display()));
     }
@@ -1050,8 +1074,20 @@ pub fn download_atlas_media(
         .to_ascii_lowercase();
     if !matches!(
         ext.as_str(),
-        "png" | "jpg" | "jpeg" | "webp" | "mp4" | "webm" | "mov" | "mkv" | "wav" | "mp3" | "m4a"
-            | "ogg" | "flac" | "aac"
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "mp4"
+            | "webm"
+            | "mov"
+            | "mkv"
+            | "wav"
+            | "mp3"
+            | "m4a"
+            | "ogg"
+            | "flac"
+            | "aac"
     ) {
         return Err(
             "Allowed extensions: .png, .jpg, .jpeg, .webp, .mp4, .webm, .mov, .mkv, .wav, .mp3, .m4a, .ogg, .flac, .aac"
@@ -1101,9 +1137,7 @@ pub fn download_atlas_media(
     // Write via temp file then rename so a crash mid-write does not leave a "saved" stub.
     let tmp = path.with_extension(format!(
         "{}.partial",
-        path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("bin")
+        path.extension().and_then(|e| e.to_str()).unwrap_or("bin")
     ));
     fs::write(&tmp, &data).map_err(|error| format!("Could not write temp file: {error}"))?;
     fs::rename(&tmp, &path).map_err(|error| {

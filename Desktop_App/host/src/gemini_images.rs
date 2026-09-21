@@ -1,9 +1,7 @@
 //! Google Gemini / Imagen image generation on the existing `gemini` protocol kind.
 
 use crate::ctx::HostCtx;
-use crate::media_util::{
-    emit_progress, file_to_data_uri, http_client, param_str, write_b64,
-};
+use crate::media_util::{emit_progress, file_to_data_uri, http_client, param_str, write_b64};
 use crate::settings::ApiEntry;
 use base64::Engine;
 use serde_json::{json, Value};
@@ -167,10 +165,7 @@ pub fn generate_image(
             "responseModalities": ["TEXT", "IMAGE"]
         }
     });
-    let url = format!(
-        "{}/models/{model_id}:generateContent?key={key}",
-        base(api)
-    );
+    let url = format!("{}/models/{model_id}:generateContent?key={key}", base(api));
     let response = http_client(180)?
         .post(url)
         .header("Content-Type", "application/json")

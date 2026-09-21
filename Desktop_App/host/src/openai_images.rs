@@ -202,10 +202,7 @@ pub fn generate_image(
     );
 
     // Prefer URL when present (some proxies); otherwise b64_json (gpt-image-*).
-    if let Some(url) = parsed
-        .pointer("/data/0/url")
-        .and_then(|v| v.as_str())
-    {
+    if let Some(url) = parsed.pointer("/data/0/url").and_then(|v| v.as_str()) {
         let mut result = json!({
             "prediction_id": prediction_id,
             "provider": "openai",
@@ -220,10 +217,7 @@ pub fn generate_image(
         return Ok(result.to_string());
     }
 
-    let Some(b64) = parsed
-        .pointer("/data/0/b64_json")
-        .and_then(|v| v.as_str())
-    else {
+    let Some(b64) = parsed.pointer("/data/0/b64_json").and_then(|v| v.as_str()) else {
         return Err(format!(
             "OpenAI image response missing url/b64_json: {}",
             parsed.to_string().chars().take(400).collect::<String>()

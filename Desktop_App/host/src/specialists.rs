@@ -61,6 +61,20 @@ pub(crate) fn input_str<'a>(inputs: &'a Map<String, Value>, keys: &[&str]) -> Op
     None
 }
 
+fn input_u32(inputs: &Map<String, Value>, keys: &[&str]) -> Option<u32> {
+    for key in keys {
+        if let Some(value) = inputs.get(*key) {
+            if let Some(n) = value.as_u64() {
+                return Some(n as u32);
+            }
+            if let Some(n) = value.as_str().and_then(|s| s.trim().parse().ok()) {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
 fn input_path_list(inputs: &Map<String, Value>, keys: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     for key in keys {
@@ -255,7 +269,6 @@ fn resume_media_collect(
         ))),
         Err(error) => {
             let mut pending = validated.action.clone();
-            pending.requires_approval = false;
             pending
                 .inputs
                 .insert("collect_prediction_id".into(), json!(prediction_id));
@@ -292,7 +305,6 @@ fn finish_media_or_resume(
                 return Err(error);
             }
             let mut pending = validated.action.clone();
-            pending.requires_approval = false;
             pending
                 .inputs
                 .insert("collect_prediction_id".into(), json!(prediction_id));
@@ -577,12 +589,13 @@ pub fn run_specialist(
             })?;
             run_production_helper(app, context, validated, project_root, llm)
         }
-        "scene_plan" => {
+        "scene_plan" | "scene_intent" | "cut_sketches" | "scene_look" => {
             let llm = llm.ok_or_else(|| {
-                "`scene_plan` needs the Director chat model (pick one in the chat dropdown)."
-                    .to_string()
+                format!(
+                    "`{specialist}` needs the Director chat model (pick one in the chat dropdown)."
+                )
             })?;
-            crate::scene_plan::run(app, context, validated, project_root, llm)
+            run_scene_planning(app, context, validated, project_root, llm, specialist)
         }
         "script" | "character_creation" => {
             let llm = llm.ok_or_else(|| {
@@ -644,6 +657,58 @@ fn text_specialist_prompt(specialist: &str) -> Result<&'static str, String> {
         "scene_plan" => Ok(prompts::SCENE_PLAN_PROMPT),
         other => Err(format!("No text prompt bundled for `{other}`")),
     }
+}
+
+fn run_scene_planning(
+    app: &HostCtx,
+    context: &DirectorContext,
+    validated: &ValidatedAction,
+    project_root: Option<&str>,
+    llm: &SpecialistLlm<'_>,
+    specialist: &str,
+) -> Result<SpecialistResult, String> {
+    let brief = input_str(
+        &validated.action.inputs,
+        &["brief", "prompt", "question", "message"],
+    )
+    .unwrap_or(llm.user_question);
+    let combined = format!("{}\n{}", llm.user_question, brief);
+    let kind = match specialist {
+        "scene_intent" => crate::workflow::PlanningKind::SceneIntent,
+        "cut_sketches" => crate::workflow::PlanningKind::CutSketches,
+        "scene_look" => crate::workflow::PlanningKind::SceneLook,
+        _ => crate::workflow::classify_planning(&combined, context.workflow_stage.as_deref()),
+    };
+    if kind == crate::workflow::PlanningKind::ProductionNotes {
+        return crate::scene_plan::run(app, context, validated, project_root, llm);
+    }
+    let root = project_root
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "Open a project before drafting scene intent or cut sketches.".to_string()
+        })?;
+    let input_scene = input_u32(
+        &validated.action.inputs,
+        &["scene", "source_scene", "scene_id", "sceneId"],
+    );
+    let scene_id =
+        crate::workflow::route::resolve_scene_id(&combined, input_scene, context.workflow_scene_id);
+    let strategy = input_str(
+        &validated.action.inputs,
+        &["strategy", "scene_strategy", "shot_strategy"],
+    );
+    let message = crate::workflow::draft_from_director(
+        app,
+        root,
+        scene_id,
+        llm.model,
+        &llm.api.id,
+        brief,
+        kind,
+        strategy,
+    )?;
+    Ok(SpecialistResult::done(message))
 }
 
 fn text_specialist_label(specialist: &str) -> &'static str {
@@ -1262,16 +1327,9 @@ fn run_production_helper(
 /// Pick the Settings video slot for a freeform (non-handoff) prompt job.
 fn freeform_video_model(
     context: &DirectorContext,
-    inputs: &Map<String, Value>,
     has_explicit_start_frame: bool,
     has_refs: bool,
 ) -> Result<ModelRef, String> {
-    if let Some(m) = input_str(inputs, &["model"]) {
-        return Ok(ModelRef {
-            api_id: String::new(),
-            model_id: m.to_string(),
-        });
-    }
     if has_explicit_start_frame {
         return capability_model(context, "video.start_frame")
             .or_else(|| capability_model(context, "video.character_reference"))
@@ -1320,7 +1378,7 @@ fn run_freeform_video(
     }
     let has_explicit_start_frame = explicit_start.is_some();
     let has_refs = !ref_paths.is_empty();
-    let model = freeform_video_model(context, inputs, has_explicit_start_frame, has_refs)?;
+    let model = freeform_video_model(context, has_explicit_start_frame, has_refs)?;
 
     let mut uploaded_urls = Vec::new();
     for path in &ref_paths {
@@ -1405,7 +1463,6 @@ fn run_freeform_video(
                 return Err(error);
             }
             let mut pending = validated.action.clone();
-            pending.requires_approval = false;
             pending
                 .inputs
                 .insert("collect_prediction_id".into(), json!(prediction_id));
@@ -1503,7 +1560,6 @@ fn run_scene_generation(
             }
             Err(error) => {
                 let mut pending = validated.action.clone();
-                pending.requires_approval = false;
                 pending
                     .inputs
                     .insert("collect_prediction_id".into(), json!(prediction_id));
@@ -1568,26 +1624,16 @@ fn run_scene_generation(
     }
 
     let lane = request.lane;
-    let model = if let Some(m) = input_str(inputs, &["model"]) {
-        ModelRef {
-            api_id: String::new(),
-            model_id: m.to_string(),
-        }
-    } else {
-        match lane {
-            RenderLane::AudioDrivenI2v => {
-                capability_model(context, "video.lip_sync_text_narration").ok_or_else(|| {
-                    "Set Settings → Video → Lip sync for audio-driven cuts.".to_string()
-                })?
-            }
-            RenderLane::ImageToVideo => capability_model(context, "video.start_frame")
-                .ok_or_else(|| "Set Settings → Video → Start frame.".to_string())?,
-            RenderLane::ReferenceToVideo => capability_model(context, "video.character_reference")
-                .or_else(|| capability_model(context, "video.location_prop_other_reference"))
-                .ok_or_else(|| "Set Settings → Video → Character reference.".to_string())?,
-            RenderLane::TextToVideo => capability_model(context, "video.text_only")
-                .ok_or_else(|| "Set Settings → Video → Text only.".to_string())?,
-        }
+    let model = match lane {
+        RenderLane::AudioDrivenI2v => capability_model(context, "video.lip_sync_text_narration")
+            .ok_or_else(|| "Set Settings → Video → Lip sync for audio-driven cuts.".to_string())?,
+        RenderLane::ImageToVideo => capability_model(context, "video.start_frame")
+            .ok_or_else(|| "Set Settings → Video → Start frame.".to_string())?,
+        RenderLane::ReferenceToVideo => capability_model(context, "video.character_reference")
+            .or_else(|| capability_model(context, "video.location_prop_other_reference"))
+            .ok_or_else(|| "Set Settings → Video → Character reference.".to_string())?,
+        RenderLane::TextToVideo => capability_model(context, "video.text_only")
+            .ok_or_else(|| "Set Settings → Video → Text only.".to_string())?,
     };
 
     let mut uploaded_urls = Vec::new();
@@ -1662,7 +1708,6 @@ fn run_scene_generation(
                 return Err(error);
             }
             let mut pending = validated.action.clone();
-            pending.requires_approval = false;
             pending
                 .inputs
                 .insert("collect_prediction_id".into(), json!(prediction_id));
@@ -1700,16 +1745,6 @@ fn resolve_still_image_model(
     inputs: &Map<String, Value>,
 ) -> Result<(ModelRef, &'static str, &'static str), String> {
     let (source, refs) = still_image_sources(inputs);
-    if let Some(m) = input_str(inputs, &["model"]) {
-        return Ok((
-            ModelRef {
-                api_id: String::new(),
-                model_id: m.to_string(),
-            },
-            "explicit model override",
-            "model",
-        ));
-    }
     if source.is_some() {
         let model = capability_model(context, "image.edit")
             .or_else(|| capability_model(context, "image.image_to_image"))
@@ -1795,7 +1830,7 @@ pub fn still_image_approval_notes(
     }
     body.push_str(&format!("\nBrief:\n```\n{brief}\n```\n"));
     body.push_str(
-        "\nReply **Approved** to generate with this model, or change Settings / name a different model.",
+        "\nReply **Approved** to generate with this Settings model, or change the slot in Settings.",
     );
     let _ = project_root;
     body
@@ -1814,14 +1849,18 @@ fn run_still_image(
         let save = input_str(inputs, &["output_path", "save_path"])
             .ok_or_else(|| "still_image resume needs output_path".to_string())?;
         let save_path = resolve_under_project(save, project_root).map_err(|e| e.to_string())?;
-        return resume_media_collect(
-            app,
-            validated,
+        return maybe_register_workflow_still(
             project_root,
-            prediction_id,
-            &save_path,
-            "output_path",
-            "Still image",
+            &save_path.to_string_lossy(),
+            resume_media_collect(
+                app,
+                validated,
+                project_root,
+                prediction_id,
+                &save_path,
+                "output_path",
+                "Still image",
+            )?,
         );
     }
 
@@ -1890,14 +1929,36 @@ fn run_still_image(
         params,
         &save_path.to_string_lossy(),
     )?;
-    finish_media_or_resume(
-        validated,
-        "Still image",
-        &model.model_id,
+    maybe_register_workflow_still(
+        project_root,
         &save_path.to_string_lossy(),
-        &result,
-        "output_path",
+        finish_media_or_resume(
+            validated,
+            "Still image",
+            &model.model_id,
+            &save_path.to_string_lossy(),
+            &result,
+            "output_path",
+        )?,
     )
+}
+
+fn maybe_register_workflow_still(
+    project_root: Option<&str>,
+    save_path: &str,
+    mut result: SpecialistResult,
+) -> Result<SpecialistResult, String> {
+    if !result.continue_suggested {
+        if let Some(note) = crate::workflow::look::on_still_saved(project_root, save_path) {
+            result.message.push_str("\n\n");
+            result.message.push_str(&note);
+        }
+        if let Some(note) = crate::workflow::start_frames::on_still_saved(project_root, save_path) {
+            result.message.push_str("\n\n");
+            result.message.push_str(&note);
+        }
+    }
+    Ok(result)
 }
 
 fn extract_yaml_body(text: &str) -> String {
@@ -2165,7 +2226,6 @@ fn run_text_sync(
             }
             Err(error) => {
                 let mut pending = validated.action.clone();
-                pending.requires_approval = false;
                 pending
                     .inputs
                     .insert("collect_prediction_id".into(), json!(prediction_id));
@@ -2361,17 +2421,10 @@ fn run_text_sync(
                 clone_path.display()
             ));
         }
-        let audio_model = if let Some(m) = input_str(inputs, &["audio_model"]) {
-            ModelRef {
-                api_id: String::new(),
-                model_id: m.to_string(),
-            }
-        } else {
-            capability_model(context, "audio.tts_clone").ok_or_else(|| {
-                "Set Settings → Audio → TTS (voice clone) for text_sync (e.g. bytedance/seed-audio-1.0)."
-                    .to_string()
-            })?
-        };
+        let audio_model = capability_model(context, "audio.tts_clone").ok_or_else(|| {
+            "Set Settings → Audio → TTS (voice clone) for text_sync (e.g. bytedance/seed-audio-1.0)."
+                .to_string()
+        })?;
         app.emit(
             "director-progress",
             format!("Uploading clone WAV {}…", clone_path.display()),
@@ -2419,12 +2472,7 @@ fn run_text_sync(
         }
         let (profile_model, voice_id, language, settings) =
             load_voice_profile_fields(&profile_path)?;
-        let audio_model = if let Some(m) = input_str(inputs, &["audio_model"]) {
-            ModelRef {
-                api_id: String::new(),
-                model_id: m.to_string(),
-            }
-        } else if !profile_model.trim().is_empty() {
+        let audio_model = if !profile_model.trim().is_empty() {
             ModelRef {
                 api_id: String::new(),
                 model_id: profile_model,
@@ -2570,19 +2618,12 @@ fn run_text_sync(
     }
 
     // --- Step 3: talking video ---
-    let video_model = if let Some(m) = input_str(inputs, &["model"]) {
-        ModelRef {
-            api_id: String::new(),
-            model_id: m.to_string(),
-        }
-    } else {
-        capability_model(context, "video.lip_sync_text_narration")
-            .or_else(|| capability_model(context, "video.start_frame"))
-            .ok_or_else(|| {
-                "Set Settings → Video → Lip sync (talking shot) to a Van/Wan image-to-video + audio model (fallback: Start frame)."
-                    .to_string()
-            })?
-    };
+    let video_model = capability_model(context, "video.lip_sync_text_narration")
+        .or_else(|| capability_model(context, "video.start_frame"))
+        .ok_or_else(|| {
+            "Set Settings → Video → Lip sync (talking shot) to a Van/Wan image-to-video + audio model (fallback: Start frame)."
+                .to_string()
+        })?;
 
     app.emit(
         "director-progress",
@@ -2664,7 +2705,6 @@ Standalone talking shot — not a continuity out-frame link.",
                 return Err(error);
             }
             let mut pending = validated.action.clone();
-            pending.requires_approval = false;
             pending
                 .inputs
                 .insert("collect_prediction_id".into(), json!(prediction_id));
@@ -2716,16 +2756,9 @@ fn run_lip_sync(
         fs::create_dir_all(parent).map_err(|e| format!("Could not create output dir: {e}"))?;
     }
 
-    let model = if let Some(m) = input_str(inputs, &["model"]) {
-        ModelRef {
-            api_id: String::new(),
-            model_id: m.to_string(),
-        }
-    } else {
-        capability_model(context, "video.lip_sync_audio_included")
-            .or_else(|| capability_model(context, "video.lip_sync_text_narration"))
-            .ok_or_else(|| "Set Settings → Video → Lip sync before running lip_sync.".to_string())?
-    };
+    let model = capability_model(context, "video.lip_sync_audio_included")
+        .or_else(|| capability_model(context, "video.lip_sync_text_narration"))
+        .ok_or_else(|| "Set Settings → Video → Lip sync before running lip_sync.".to_string())?;
 
     let video_path = resolve_under_project(video, project_root).map_err(|e| e.to_string())?;
     let audio_path = resolve_under_project(audio, project_root).map_err(|e| e.to_string())?;
@@ -3154,7 +3187,6 @@ fn chrono_date() -> String {
 
 fn pending_model_sheet_action(validated: &ValidatedAction, identity_gate: &str) -> DirectorAction {
     let mut action = validated.action.clone();
-    action.requires_approval = false;
     action
         .inputs
         .insert("identity_gate".into(), json!(identity_gate));
@@ -3344,12 +3376,7 @@ fn run_model_sheet(
     }
 
     let use_refs = !manifest.reference_images.is_empty() || manifest.identity_locked;
-    let model = if let Some(m) = input_str(inputs, &["model"]) {
-        ModelRef {
-            api_id: String::new(),
-            model_id: m.to_string(),
-        }
-    } else if use_refs {
+    let model = if use_refs {
         capability_model(context, "image.character_reference")
             .or_else(|| capability_model(context, "image.edit"))
             .or_else(|| capability_model(context, "image.image_to_image"))
@@ -3451,8 +3478,7 @@ fn run_model_sheet(
         && manifest.shots.iter().any(|s| s.status == "held");
 
     if waiting_identity && manifest.shots[idx].status == "saved" {
-        let mut pending = pending_model_sheet_action(validated, "rest");
-        pending.requires_approval = true;
+        let pending = pending_model_sheet_action(validated, "rest");
         let msg = format!(
             "Model sheet identity plate saved.\n\
 - shot: `{}`\n\
@@ -3521,6 +3547,11 @@ pub fn specialist_spends(specialist: &str) -> bool {
     )
 }
 
+/// Host-owned approval: any billable provider call, plus assemble (local but plan-gated).
+pub fn specialist_requires_approval(specialist: &str) -> bool {
+    specialist_spends(specialist) || specialist == "assemble"
+}
+
 /// Extra approval detail for text-sync talking shots.
 pub fn text_sync_approval_notes(
     context: &DirectorContext,
@@ -3552,13 +3583,9 @@ pub fn text_sync_approval_notes(
     let sync_ms = input_str(inputs, &["sync_ms"])
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(150);
-    let video_model = input_str(inputs, &["model"])
-        .map(|s| s.to_string())
-        .or_else(|| {
-            capability_model(context, "video.lip_sync_text_narration")
-                .or_else(|| capability_model(context, "video.start_frame"))
-                .map(|m| m.model_id)
-        })
+    let video_model = capability_model(context, "video.lip_sync_text_narration")
+        .or_else(|| capability_model(context, "video.start_frame"))
+        .map(|m| m.model_id)
         .unwrap_or_else(|| "(set Settings → Video → Lip sync (talking shot) / Start frame)".into());
     let audio_hint = if input_str(inputs, &["performance_wav", "reuse_audio"]).is_some() {
         "reuse existing performance WAV (skip TTS)".into()
@@ -3653,7 +3680,7 @@ pub fn scene_generation_approval_notes(
         let explicit_start = input_str(inputs, &["source_frame", "source_image", "start_frame"]);
         let refs = input_path_list(inputs, &["reference_images", "reference_assets"]);
         let has_explicit_start = explicit_start.is_some();
-        let model = freeform_video_model(context, inputs, has_explicit_start, !refs.is_empty())
+        let model = freeform_video_model(context, has_explicit_start, !refs.is_empty())
             .map(|m| m.model_id)
             .unwrap_or_else(|e| format!("({e})"));
         let out = input_str(inputs, &["output_path", "save_path"]).unwrap_or("(output_path)");
@@ -3740,29 +3767,25 @@ Prompt:\n```\n{prompt}\n```"
         }
     }
     let lane = request.as_ref().map(|r| r.lane);
-    let model = if let Some(m) = input_str(inputs, &["model"]) {
-        m.to_string()
-    } else {
-        match lane {
-            Some(RenderLane::AudioDrivenI2v) => {
-                capability_model(context, "video.lip_sync_text_narration")
-                    .map(|m| m.model_id)
-                    .unwrap_or_else(|| "(set Settings → Video → Lip sync)".into())
-            }
-            Some(RenderLane::ImageToVideo) => capability_model(context, "video.start_frame")
+    let model = match lane {
+        Some(RenderLane::AudioDrivenI2v) => {
+            capability_model(context, "video.lip_sync_text_narration")
                 .map(|m| m.model_id)
-                .unwrap_or_else(|| "(set Settings → Video → Start frame)".into()),
-            Some(RenderLane::ReferenceToVideo) => {
-                capability_model(context, "video.character_reference")
-                    .or_else(|| capability_model(context, "video.location_prop_other_reference"))
-                    .map(|m| m.model_id)
-                    .unwrap_or_else(|| "(set Settings → Video → Character reference)".into())
-            }
-            Some(RenderLane::TextToVideo) => capability_model(context, "video.text_only")
-                .map(|m| m.model_id)
-                .unwrap_or_else(|| "(set Settings → Video → Text only)".into()),
-            None => "(missing or invalid scene-plan handoff)".into(),
+                .unwrap_or_else(|| "(set Settings → Video → Lip sync)".into())
         }
+        Some(RenderLane::ImageToVideo) => capability_model(context, "video.start_frame")
+            .map(|m| m.model_id)
+            .unwrap_or_else(|| "(set Settings → Video → Start frame)".into()),
+        Some(RenderLane::ReferenceToVideo) => {
+            capability_model(context, "video.character_reference")
+                .or_else(|| capability_model(context, "video.location_prop_other_reference"))
+                .map(|m| m.model_id)
+                .unwrap_or_else(|| "(set Settings → Video → Character reference)".into())
+        }
+        Some(RenderLane::TextToVideo) => capability_model(context, "video.text_only")
+            .map(|m| m.model_id)
+            .unwrap_or_else(|| "(set Settings → Video → Text only)".into()),
+        None => "(missing or invalid scene-plan handoff)".into(),
     };
 
     let out = if let Some(p) = input_str(inputs, &["output_path", "save_path"]) {

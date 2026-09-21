@@ -325,7 +325,9 @@ pub fn replace_cut_block(text: &str, id: CutId, new_block: &str) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene_plan::fixtures::{cut_markdown, lipsync_scene_yaml, scene_markdown};
+    use crate::scene_plan::fixtures::{
+        cut_markdown, lipsync_scene_yaml, scene_markdown, slim_broll_yaml,
+    };
 
     const TEXT: &str = "This is a twelve word sentence that needs a reliable duration estimate.";
 
@@ -455,6 +457,11 @@ mod tests {
         ))
         .unwrap_err()
         .contains("unknown field `target_duration_seconds`"));
+        let slim = parse_handoff_yaml(&slim_broll_yaml(2)).unwrap();
+        assert_eq!(slim.cut, 2);
+        assert_eq!(slim.provider, "atlascloud");
+        assert!(slim.generation_requirements.aspect_ratio.is_empty());
+        assert!(slim.speech.cues.is_empty());
     }
 
     #[test]

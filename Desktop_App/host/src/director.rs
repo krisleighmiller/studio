@@ -41,6 +41,12 @@ pub struct DirectorContext {
     /// Host-set for this turn when the user asks for adult/nsfw/spicy models (see looks_like_adult_routing_request).
     #[serde(default)]
     pub adult_routing_requested: bool,
+    /// Production desk stage (`scene_intent`, `cut_sketches`, `production_notes`, …).
+    #[serde(default)]
+    pub workflow_stage: Option<String>,
+    /// Production desk selected scene id.
+    #[serde(default)]
+    pub workflow_scene_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -96,7 +102,11 @@ fn looks_like_text_path(path: &PathBuf) -> bool {
         .unwrap_or(false)
 }
 
-fn append_attached_file_context(lines: &mut Vec<String>, path_str: &str, project_root: Option<&str>) {
+fn append_attached_file_context(
+    lines: &mut Vec<String>,
+    path_str: &str,
+    project_root: Option<&str>,
+) {
     let path = resolve_path(path_str, project_root);
     lines.push(format!("### Attached: {}", path.display()));
     if !path.exists() {
@@ -132,7 +142,9 @@ fn append_attached_file_context(lines: &mut Vec<String>, path_str: &str, project
 
 fn looks_like_video_conditioned_image_model(model_id: &str) -> bool {
     let id = model_id.to_ascii_lowercase();
-    id.contains("reference-to-image") || id.contains("video-to-image") || id.contains("video_to_image")
+    id.contains("reference-to-image")
+        || id.contains("video-to-image")
+        || id.contains("video_to_image")
 }
 
 /// Meta questions about whether adult routing is active — not a request to enable it.
@@ -190,10 +202,7 @@ fn adult_routing_from_history(messages: &[ChatMessage]) -> bool {
         .any(|m| looks_like_adult_routing_request(&m.content))
 }
 
-fn resolved_capability_model<'a>(
-    context: &'a DirectorContext,
-    slot: &str,
-) -> Option<&'a ModelRef> {
+fn resolved_capability_model<'a>(context: &'a DirectorContext, slot: &str) -> Option<&'a ModelRef> {
     if context.adult_routing_requested {
         if let Some(Some(model)) = context.adult_capability_defaults.get(slot) {
             if !model.model_id.trim().is_empty() {
@@ -225,15 +234,13 @@ fn format_capability_defaults(context: &DirectorContext) -> Vec<String> {
         "audio.tts_clone",
         "audio.tts_profile",
     ];
-    let mut lines = vec![
-        if context.adult_routing_requested {
-            "- Generation defaults from Settings (adult/nsfw routing ON for this turn — adult slot first, else main default):"
+    let mut lines = vec![if context.adult_routing_requested {
+        "- Generation defaults from Settings (adult/nsfw routing ON for this turn — adult slot first, else main default):"
                 .to_string()
-        } else {
-            "- Generation defaults from Settings (use these model IDs unless the user or handoff overrides):"
+    } else {
+        "- Generation defaults from Settings (use these model IDs unless the user or handoff overrides):"
                 .to_string()
-        },
-    ];
+    }];
     if context.adult_content_enabled && !context.adult_routing_requested {
         lines.push(
             "  Adult content defaults are configured in Settings. The user must say **adult** or **nsfw** (e.g. “generate with adult models”) to use them on a turn."
@@ -348,7 +355,23 @@ fn context_system_message(context: &DirectorContext) -> String {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("(none)")
         ),
-        "- Wired specialists (emit run_specialist; host executes): script, character_creation, scene_plan (chat-model text runners → local files), model_sheet, still_image, scene_generation, text_sync, lip_sync, assemble, production_helper. Route by intent. Text planning uses the selected chat model (commercial or local); generation spend uses Settings / Adult slots when requested.".to_string(),
+        "- Wired specialists (emit run_specialist; host executes): script, character_creation, scene_intent, scene_look, cut_sketches, scene_plan (chat-model text runners → local files), model_sheet, still_image, scene_generation, text_sync, lip_sync, assemble, production_helper. Route by intent. Text planning uses the selected chat model (commercial or local); generation spend uses Settings / Adult slots when requested.".to_string(),
+        format!(
+            "- Workflow stage: {}",
+            context
+                .workflow_stage
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("(none)")
+        ),
+        format!(
+            "- Workflow scene: {}",
+            context
+                .workflow_scene_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "(none)".to_string())
+        ),
+        "- Scene intent is not production notes. Scene look is not character identity. Existing prod.md / Scene_Prompts coverage does not complete those stages. Route “draft the scene intent” to scene_intent and “draft the scene look” to scene_look, never scene_plan.".to_string(),
     ];
     lines.extend(format_capability_defaults(context));
     if !context.attached_paths.is_empty() {
@@ -441,11 +464,9 @@ fn answer_pending_plan_question(
     use crate::director_actions::encode_pending_action;
     let specialist = pending.specialist.as_deref()?;
     let notes = match specialist {
-        "still_image" => crate::specialists::still_image_approval_notes(
-            context,
-            &pending.inputs,
-            project_root,
-        ),
+        "still_image" => {
+            crate::specialists::still_image_approval_notes(context, &pending.inputs, project_root)
+        }
         "scene_generation" => crate::specialists::scene_generation_approval_notes(
             context,
             &pending.inputs,
@@ -467,9 +488,7 @@ fn answer_pending_plan_question(
     );
     if specialist == "still_image" || specialist == "scene_generation" || specialist == "text_sync"
     {
-        reply.push_str(
-            "\n\nReply **Approved** to run this pending plan, or say what to change.",
-        );
+        reply.push_str("\n\nReply **Approved** to run this pending plan, or say what to change.");
     }
     Some(reply)
 }
@@ -546,10 +565,10 @@ fn director_turn_inner(
     request: DirectorTurnRequest,
 ) -> Result<DirectorTurnResponse, String> {
     use crate::director_actions::{
-        find_pending_action_in_history, format_approval_request, parse_actions, planner_system_prompt,
-        validate_action, ActionKind,
+        find_pending_action_in_history, format_approval_request, parse_actions,
+        planner_system_prompt, validate_action, ActionKind,
     };
-    use crate::specialists::{self, specialist_spends, SpecialistLlm};
+    use crate::specialists::{self, specialist_requires_approval, SpecialistLlm};
 
     let model = request.model.trim().to_string();
     if model.is_empty() {
@@ -587,7 +606,9 @@ fn director_turn_inner(
         })?;
 
     let (chat_api, chat_key) = settings::api_key_for(&app, &chat_api_id)?;
-    let user_question = last_user_message(&request.messages).unwrap_or("").to_string();
+    let user_question = last_user_message(&request.messages)
+        .unwrap_or("")
+        .to_string();
     let specialist_llm = SpecialistLlm {
         api: &chat_api,
         api_key: &chat_key,
@@ -650,8 +671,7 @@ fn director_turn_inner(
 
     // If the user approved/continued and a pending action is embedded in history, execute it.
     if user_approved || user_continue {
-        if let Some(mut pending) = find_pending_action_in_history(&history_pairs) {
-            pending.requires_approval = false;
+        if let Some(pending) = find_pending_action_in_history(&history_pairs) {
             match validate_action(pending.clone(), project_root_ref) {
                 Ok(validated) => {
                     app.emit(
@@ -667,19 +687,20 @@ fn director_turn_inner(
                             Some(&specialist_llm),
                         )
                         .map(Some),
-                        ActionKind::Inspect => specialists::run_inspect(&validated, project_root_ref)
-                            .map(|text| {
+                        ActionKind::Inspect => {
+                            specialists::run_inspect(&validated, project_root_ref).map(|text| {
                                 Some(specialists::SpecialistResult {
                                     message: text,
                                     continue_suggested: false,
                                 })
-                            }),
-                        ActionKind::AskUser | ActionKind::Done => Ok(Some(
-                            specialists::SpecialistResult {
+                            })
+                        }
+                        ActionKind::AskUser | ActionKind::Done => {
+                            Ok(Some(specialists::SpecialistResult {
                                 message: validated.action.message.clone().unwrap_or_default(),
                                 continue_suggested: false,
-                            },
-                        )),
+                            }))
+                        }
                     };
                     match outcome {
                         Ok(Some(result)) => {
@@ -850,24 +871,12 @@ fn director_turn_inner(
                         .specialist
                         .clone()
                         .unwrap_or_else(|| "unknown".into());
-                    // Host-enforced gate for paid work. Do NOT treat the user's message as
-                    // approval for a *newly planned* action — "generate / send for video"
-                    // phrases only unlock the pending-action path above.
-                    // LLM may set requires_approval:false for cheap focused still edits.
-                    let host_must_approve = matches!(
-                        specialist.as_str(),
-                        "scene_generation" | "model_sheet" | "text_sync" | "lip_sync" | "assemble"
-                    );
-                    // assemble is local ffmpeg (no provider spend) but still plan-gated.
-                    let needs_approval = if specialist == "assemble" {
-                        true
-                    } else {
-                        specialist_spends(&specialist)
-                            && (validated.action.requires_approval || host_must_approve)
-                    };
+                    // Host-enforced gate. The planner cannot waive approval.
+                    // Billable specialists always gate; assemble is local ffmpeg
+                    // but still plan-gated.
+                    let needs_approval = specialist_requires_approval(&specialist);
                     if needs_approval {
-                        let mut approval =
-                            format_approval_request(&validated.action, &validated);
+                        let mut approval = format_approval_request(&validated.action, &validated);
                         if specialist == "model_sheet" {
                             approval.push_str("\n\n");
                             approval.push_str(&specialists::model_sheet_approval_notes(
@@ -922,9 +931,8 @@ fn director_turn_inner(
                             break;
                         }
                         Err(error) => {
-                            result_chunks.push(format!(
-                                "### Specialist `{specialist}` error\n{error}"
-                            ));
+                            result_chunks
+                                .push(format!("### Specialist `{specialist}` error\n{error}"));
                         }
                     }
                 }
@@ -993,7 +1001,7 @@ I'll route this to scene generation.
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].action, ActionKind::RunSpecialist);
         assert_eq!(actions[0].specialist.as_deref(), Some("scene_generation"));
-        assert!(actions[0].requires_approval);
+        assert!(actions[0].inputs.get("model").is_none());
     }
 
     #[test]
@@ -1024,6 +1032,24 @@ Here is the action:
         let actions = parse_actions(text).expect("parse");
         let err = validate_action(actions[0].clone(), Some("/tmp")).expect_err("should reject");
         assert!(err.to_string().contains("hack"), "{err}");
+    }
+
+    #[test]
+    fn accepts_scene_intent_specialist() {
+        let text = r#"<director_action>
+{"action":"run_specialist","specialist":"scene_intent","inputs":{"brief":"Draft scene intent for Scene 1.","scene":1}}
+</director_action>"#;
+        let actions = parse_actions(text).expect("parse");
+        validate_action(actions[0].clone(), Some("/tmp")).expect("scene_intent should be allowed");
+    }
+
+    #[test]
+    fn accepts_scene_look_specialist() {
+        let text = r#"<director_action>
+{"action":"run_specialist","specialist":"scene_look","inputs":{"brief":"Draft the scene look board for Scene 1.","scene":1}}
+</director_action>"#;
+        let actions = parse_actions(text).expect("parse");
+        validate_action(actions[0].clone(), Some("/tmp")).expect("scene_look should be allowed");
     }
 
     #[test]
@@ -1157,6 +1183,57 @@ Here is the action:
             Some("scene_generation")
         );
         assert!(validated.action.inputs.get("handoff_path").is_none());
+        assert!(
+            validated
+                .action
+                .inputs
+                .get("output_path")
+                .and_then(|v| v.as_str())
+                .is_some_and(|p| p.ends_with(".mp4")),
+            "host should keep or derive an output path"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_derives_still_output_and_strips_model() {
+        let text = r#"<director_action>
+{"action":"run_specialist","specialist":"still_image","inputs":{"prompt":"wide rainy alley","model":"secret-id"},"requires_approval":false}
+</director_action>"#;
+        let actions = parse_actions(text).expect("parse");
+        assert!(actions[0].inputs.get("model").is_none());
+        let validated = validate_action(actions[0].clone(), Some("/tmp"))
+            .expect("still_image should validate without an invented output_path");
+        assert_eq!(
+            validated
+                .action
+                .inputs
+                .get("output_path")
+                .and_then(|v| v.as_str()),
+            Some("Stills/wide_rainy_alley.png")
+        );
+        assert!(crate::specialists::specialist_requires_approval(
+            "still_image"
+        ));
+        assert!(crate::specialists::specialist_requires_approval("assemble"));
+        assert!(!crate::specialists::specialist_requires_approval("script"));
+    }
+
+    #[test]
+    fn host_derives_freeform_video_without_output_path() {
+        let text = r#"<director_action>
+{"action":"run_specialist","specialist":"scene_generation","inputs":{"prompt":"misty pine forest at dawn"}}
+</director_action>"#;
+        let actions = parse_actions(text).expect("parse");
+        let validated = validate_action(actions[0].clone(), Some("/tmp"))
+            .expect("freeform video should not require the model to invent output_path");
+        assert_eq!(
+            validated
+                .action
+                .inputs
+                .get("output_path")
+                .and_then(|v| v.as_str()),
+            Some("Videos/misty_pine_forest_at_dawn.mp4")
+        );
     }
 }

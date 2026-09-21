@@ -15,6 +15,7 @@ pub mod handoff;
 pub mod migrate;
 pub mod redo;
 pub mod render;
+pub mod resolve;
 pub mod state;
 pub mod strategy;
 pub mod timing;
@@ -43,15 +44,17 @@ use crate::director_actions::{
 };
 use crate::scene_plan::redo::CutContext;
 use crate::scene_plan::state::sidecar_root_from;
+use crate::script::{
+    aspect_from_text, extract_dialogue_text, extract_scene_section, requested_scene_number,
+    section_title,
+};
 use crate::specialists::{
     build_text_specialist_dossier, capability_model, collect_text_specialist_paths, input_str,
     SpecialistLlm, SpecialistResult,
 };
-use regex::Regex;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 const STATE_NAME: &str = "scene_plan_state.json";
 const MAX_CORRECTION_ATTEMPTS: usize = 2;
@@ -153,7 +156,6 @@ fn pending_write_action(
     source_scene: u32,
 ) -> DirectorAction {
     let mut action = validated.action.clone();
-    action.requires_approval = false;
     action.inputs.insert(
         "plan_state".into(),
         json!(paths.state.to_string_lossy().to_string()),
@@ -534,7 +536,7 @@ fn redo_user_block(turn: &Turn, contexts: &[CutContext]) -> String {
     out.push_str(&turn.brief);
     out.push_str("\n\n## Host instructions\n");
     out.push_str(&format!(
-        "Re-emit **exactly** these blocks of source Scene {}, in this order, and nothing else: {}. Keep each cut's `source_scene`/`cut`/cue ids. Each cut must carry exactly the dialogue listed below — word for word — but *how* it is staged is yours to change (lip-sync, voice-over over a different image, silent insert, new framing). Use the user's direction above. Respect the asset rules and render buckets as in normal planning.\n\n",
+        "Re-emit **exactly** these blocks of source Scene {}, in this order, and nothing else: {}. Keep each cut's `source_scene`/`cut`. Each cut must carry exactly the dialogue listed below — word for word — but *how* it is staged is yours to change (lip-sync, voice-over over a different image, silent insert, new framing). Use the user's direction above. Do not invent model ids, output paths, durations, or reference asset paths — the host fills those.\n\n",
         section.source_scene,
         contexts.iter().map(|c| format!("`### {}`", c.id)).collect::<Vec<_>>().join(", ")
     ));
@@ -590,7 +592,7 @@ fn provider_buckets_block(config: &HostConfig) -> String {
             describe_policy(config.policy_for(lane))
         ));
     }
-    out.push_str("`estimated_screen_duration_seconds + head + tail` must fit the largest bucket of the lane you choose.\n\n");
+    out.push_str("The host snaps each cut to a bucket of the resolved lane. Split a cut if the spoken line cannot fit the largest bucket.\n\n");
     out
 }
 
@@ -604,8 +606,8 @@ fn scene_plan_user_block(turn: &Turn) -> String {
     out.push_str(&turn.brief);
     out.push_str("\n\n## Host instructions\n");
     out.push_str(&format!(
-        "You are planning generated cuts of **source Scene {}**. Head each block `### Scene {} — Cut M` and set `source_scene: {}` plus `cut: M`; the first block this turn is `### {next}` (cue ids `{}a`, `{}b`, …). Plan at most {MAX_CUTS_PER_TURN} cuts in this reply; the host will call you again for the rest. Do not ask questions. Emit exactly one `<workbench_file path=\"prod.md\">`. Do not emit sidecar files.\n\n",
-        section.source_scene, section.source_scene, section.source_scene, next.cue_prefix(), next.cue_prefix()
+        "You are planning generated cuts of **source Scene {}**. Head each block `### Scene {} — Cut M` and set `source_scene: {}` plus `cut: M`; the first block this turn is `### {next}`. Plan at most {MAX_CUTS_PER_TURN} cuts in this reply; the host will call you again for the rest. Do not ask questions. Emit exactly one `<workbench_file path=\"prod.md\">`. Do not emit sidecar files.\n\n",
+        section.source_scene, section.source_scene, section.source_scene
     ));
     out.push_str(&format!("## Scene strategy: {}\n{}\nLip-sync readiness below is a capability, not an instruction: choose per line whether the performing face is on camera (lip-sync), the line plays over something else (voice_over), or the beat is silent.\n\n", turn.strategy.describe(), turn.strategy.strategy.guidance()));
     out.push_str(&format!(
@@ -853,8 +855,6 @@ Required shape:
 source_scene: 1
 cut: 1
 title: Short title
-provider: atlascloud
-stage: base_video
 scene_type: character_performance
 continuity:
   group: scene1_train
@@ -863,49 +863,32 @@ continuity:
   closing_state: "..."
   carry_forward: []
 editing:
-  estimated_screen_duration_seconds: 4.0
-  head_handle_seconds: 0.5
-  tail_handle_seconds: 0.5
+  pace: natural
   transition_in: cut
   transition_out: cut
-  continuity_frame_strategy: none
   cut_guidance: null
 speech:
   mode: source_video_lipsync
-  language: en
   cues:
-    - id: S01C01_a
-      speaker: Tom
+    - speaker: Tom
       text: "Dialogue copied from the source."
       on_camera: true
       delivery: calm, solemn
-generation_requirements:
-  source_mode: reference_to_video
-  generation_path: audio_driven_i2v
-  aspect_ratio: "9:16"
-  required_capabilities:
-    - character_reference
-  priorities:
-    - prompt_adherence
 prompt: |-
   Creative visual prompt.
-reference_assets:
-  - path: "<exact path from the host's asset list>"
-    role: character_reference
 negative_prompt: "bad framing, distorted faces"
 ```
 
 Rules:
-- `source_scene` and `cut` must match the heading `### Scene N — Cut M`. Cue ids are `S{source:02}C{cut:02}_suffix`, for example `S01C02_a`.
+- `source_scene` and `cut` must match the heading `### Scene N — Cut M`.
 - Cue `text` must quote the source dialogue verbatim and in order, starting with the first uncovered line. You may stop partway; the host tracks what remains.
-- Lip-sync readiness is a *capability*, not an instruction. Use `speech.mode: source_video_lipsync` (with `generation_path: audio_driven_i2v`, `source_mode: reference_to_video` or `image_to_video` + `start_frame`, and that speaker's listed reference path) when the speaker's mouth visibly performs the line on camera. One on-camera speaker per lip-sync cut.
+- Lip-sync readiness is a *capability*, not an instruction. Use `speech.mode: source_video_lipsync` when the speaker's mouth visibly performs the line on camera. One on-camera speaker per lip-sync cut. Name the speaker; the host attaches their reference image.
 - Otherwise a line may play as `voice_over`: over a reaction, an insert, atmosphere, or over the speaker's own visible but non-speaking face (`on_camera: true`; say the face is not speaking in the prompt and put `lip movement` in negative_prompt). Never let a voice-over cut *look* like lip-sync.
 - Silent cuts (`speech.mode: none`) are expected for establishing shots, inserts, reactions, and action/sound/transition beats. Vary shot types according to the scene strategy the host gives you.
 - Speakers without a listed reference cannot be lip-synced: keep them off camera or in voice-over.
-- Rejected combinations: `source_video_lipsync` without a usable reference/start frame, with zero or several on-camera speakers, or on `text_to_video`; `audio_driven_i2v` without lip-sync; invented or foreign reference paths.
-- Durations: the host recomputes cue durations at 165 WPM. `estimated_screen_duration_seconds + head + tail` must fit a render bucket of the lane you use (listed by the host). Do not emit `target_duration_seconds`.
-- `text_to_video` has no `reference_assets`. `reference_to_video` has at least one. `image_to_video` has one asset with `role: start_frame`.
-- Use the requested aspect ratio exactly, quoted like `"9:16"`. Do not emit sidecar files. Do not ask questions.
+- `editing.pace` is `tight`, `natural`, or `held`. The host snaps duration to a provider bucket. Split a cut if the spoken line cannot fit the largest bucket of the resolved lane.
+- Do **not** emit `provider`, `stage`, `speech.language`, cue `id`, `generation_requirements`, `reference_assets`, `estimated_screen_duration_seconds`, handle seconds, or `target_duration_seconds`. The host derives those.
+- Do not emit sidecar files. Do not ask questions.
 "#
 }
 
@@ -951,130 +934,10 @@ fn source_context(
     }
 }
 
-fn requested_scene_number(text: &str) -> Option<u32> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"(?i)\bscene\s+(\d+)\b").unwrap());
-    re.captures(text)
-        .and_then(|c| c.get(1))
-        .and_then(|m| m.as_str().parse().ok())
-}
-
-fn extract_scene_section(text: &str, scene: u32) -> Option<String> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let heading_re =
-        RE.get_or_init(|| Regex::new(r"(?i)^\s{0,3}#{0,6}\s*scene\s+(\d+)\b.*$").unwrap());
-    let mut start = None;
-    let mut end = None;
-    let mut offset = 0usize;
-    for line in text.split_inclusive('\n') {
-        if let Some(caps) = heading_re.captures(line.trim_end()) {
-            let n = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
-            if start.is_some() && n != Some(scene) {
-                end = Some(offset);
-                break;
-            }
-            if n == Some(scene) && start.is_none() {
-                start = Some(offset);
-            }
-        }
-        offset += line.len();
-    }
-    let start = start?;
-    Some(text[start..end.unwrap_or(text.len())].trim().to_string())
-}
-
-fn section_title(section: &str) -> Option<String> {
-    section.lines().find_map(|line| {
-        let trimmed = line.trim().trim_start_matches('#').trim();
-        trimmed
-            .to_ascii_lowercase()
-            .starts_with("scene ")
-            .then(|| trimmed.to_string())
-    })
-}
-
-const STAGE_DIRECTION_LABELS: &[&str] = &[
-    "location",
-    "action",
-    "sound",
-    "transition",
-    "dialogue",
-    "camera",
-    "music",
-    "note",
-    "notes",
-    "vfx",
-    "sfx",
-    "setting",
-    "time",
-    "mood",
-    "props",
-    "wardrobe",
-    "lighting",
-    "continuity",
-    "style",
-    "voiceover",
-    "narration",
-];
-
-fn bullet_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^\s*[-*+]\s+\*\*\s*([^*]+?)\s*:?\s*\*\*\s*:?\s*(.*?)\s*$").unwrap()
-    })
-}
-
-fn extract_dialogue_text(section: &str) -> String {
-    let mut in_dialogue = false;
-    let mut cues: Vec<String> = Vec::new();
-    for line in section.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(caps) = bullet_re().captures(line) {
-            let label = caps[1].trim().trim_end_matches(':').trim().to_lowercase();
-            let text = caps.get(2).map(|m| m.as_str().trim()).unwrap_or("");
-            if label == "dialogue" {
-                in_dialogue = true;
-                continue;
-            }
-            if STAGE_DIRECTION_LABELS.contains(&label.as_str()) {
-                in_dialogue = false;
-                continue;
-            }
-            if in_dialogue && !text.is_empty() {
-                cues.push(
-                    text.trim_matches(|c| matches!(c, '"' | '“' | '”'))
-                        .trim()
-                        .to_string(),
-                );
-            }
-            continue;
-        }
-        if trimmed.starts_with('#') || trimmed.starts_with('-') || trimmed.starts_with('*') {
-            in_dialogue = false;
-            continue;
-        }
-        if in_dialogue {
-            if let Some(last) = cues.last_mut() {
-                last.push(' ');
-                last.push_str(trimmed);
-            }
-        }
-    }
-    cues.join(" ")
-}
-
-fn aspect_from_text(text: &str) -> Option<String> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"\b\d{1,4}:\d{1,4}\b").unwrap());
-    re.find(text).map(|m| m.as_str().to_string())
-}
-
 #[cfg(test)]
 mod adapter_tests {
     use super::*;
+    use crate::script::{extract_dialogue_text, extract_scene_section, section_title};
 
     const SCRIPT: &str = "Scene 1 — The last train\n\n\
 - **Location:** A two-carriage night train approaching Willowby Halt.\n\
@@ -1160,8 +1023,7 @@ Scene 2 — The halt\n\n\
         let (turn, fx) = test_turn(dir.path());
         let block = scene_plan_user_block(&turn);
         assert!(
-            block
-                .contains("the first block this turn is `### Scene 1 — Cut 3` (cue ids `S01C03_a`"),
+            block.contains("the first block this turn is `### Scene 1 — Cut 3`"),
             "{block}"
         );
         assert!(block.contains(&format!("reference_image: `{}`", fx.tom_closeup.display())));
@@ -1178,6 +1040,9 @@ Scene 2 — The halt\n\n\
         assert!(!c.contains("`voice_over` cuts must not show a lip-sync-ready speaker on camera"));
         assert!(c.contains("capability"));
         assert!(c.contains("Silent cuts (`speech.mode: none`) are expected"));
+        assert!(c.contains("Do **not** emit `provider`"));
+        assert!(!c.contains("generation_path: audio_driven_i2v"));
+        assert!(!c.contains("estimated_screen_duration_seconds:"));
     }
 
     #[test]

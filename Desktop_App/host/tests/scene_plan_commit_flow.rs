@@ -336,7 +336,7 @@ fn rejected_chunk_leaves_everything_untouched() {
     fs::write(&p.prod_md, "# Production\n").unwrap();
     let mut state = state_for(&p, 1);
     let before = state.clone();
-    let bad = lipsync_scene_yaml(1, S1).replace("  generation_path: audio_driven_i2v\n", "");
+    let bad = lipsync_scene_yaml(1, S1).replace("  mode: source_video_lipsync\n", "");
     let issues = rejected(
         commit_model_chunk(
             &p,

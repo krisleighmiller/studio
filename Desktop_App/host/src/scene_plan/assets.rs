@@ -179,7 +179,7 @@ impl AssetRegistry {
     /// Markdown for the planner prompt: exact paths the model may use.
     pub fn prompt_block(&self) -> String {
         let mut out = String::from(
-            "## Character assets discovered by the host\n\nUse these exact paths in `reference_assets`. A speaker marked lip-sync ready must be lip-synced when on camera. Speakers not listed have no assets.\n\n",
+            "## Character assets discovered by the host\n\nName the speaker; the host attaches their reference image. A speaker marked lip-sync ready can be lip-synced when on camera. Speakers not listed have no assets.\n\n",
         );
         if self.characters.is_empty() {
             out.push_str("- none found\n");

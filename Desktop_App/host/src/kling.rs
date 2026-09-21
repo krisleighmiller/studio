@@ -148,10 +148,7 @@ fn param_num_as_string(params: &Value, keys: &[&str], default: &str) -> String {
     default.to_string()
 }
 
-fn resolve_image_input(
-    raw: &str,
-    project_root: Option<&str>,
-) -> Result<String, String> {
+fn resolve_image_input(raw: &str, project_root: Option<&str>) -> Result<String, String> {
     let raw = raw.trim();
     if raw.starts_with("http://") || raw.starts_with("https://") || raw.starts_with("data:") {
         return Ok(raw.to_string());
@@ -203,7 +200,10 @@ fn build_video_body(
             "input_video",
         ],
     );
-    let image_tail = param_str(params, &["image_tail", "imageTail", "end_image", "endImage"]);
+    let image_tail = param_str(
+        params,
+        &["image_tail", "imageTail", "end_image", "endImage"],
+    );
 
     let mut body = serde_json::Map::new();
     body.insert("model_name".into(), json!(model));
@@ -439,10 +439,7 @@ pub fn collect_media(
     let polled = get_prediction(api, prediction_id, wait_seconds, app)?;
     let parsed: Value = serde_json::from_str(&polled)
         .map_err(|error| format!("Could not parse Kling poll result: {error}"))?;
-    let status = parsed
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let status = parsed.get("status").and_then(|v| v.as_str()).unwrap_or("");
     if status == "failed" {
         return Err(format!("Kling task failed: {parsed}"));
     }

@@ -227,7 +227,11 @@ fn gemini_chat(
         });
     }
 
-    let parsed = post_json(&url, vec![("content-type".into(), "application/json".into())], &body)?;
+    let parsed = post_json(
+        &url,
+        vec![("content-type".into(), "application/json".into())],
+        &body,
+    )?;
     extract_gemini_text(&parsed)
 }
 
@@ -258,7 +262,8 @@ fn post_json(url: &str, headers: Vec<(String, String)>, body: &Value) -> Result<
     if !status.is_success() {
         return Err(format!("Chat request failed ({status}): {text}"));
     }
-    serde_json::from_str(&text).map_err(|error| format!("Could not parse chat JSON: {error}\n{text}"))
+    serde_json::from_str(&text)
+        .map_err(|error| format!("Could not parse chat JSON: {error}\n{text}"))
 }
 
 fn extract_openai_assistant_text(parsed: &Value) -> Result<String, String> {
@@ -280,9 +285,13 @@ fn extract_content_field(message: &Value) -> String {
             .iter()
             .filter_map(|part| {
                 if part.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    part.get("text").and_then(|t| t.as_str()).map(str::to_string)
+                    part.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(str::to_string)
                 } else {
-                    part.get("text").and_then(|t| t.as_str()).map(str::to_string)
+                    part.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(str::to_string)
                 }
             })
             .collect::<Vec<_>>()
@@ -300,7 +309,9 @@ fn extract_anthropic_text(parsed: &Value) -> Result<String, String> {
         .iter()
         .filter_map(|part| {
             if part.get("type").and_then(|t| t.as_str()) == Some("text") {
-                part.get("text").and_then(|t| t.as_str()).map(str::to_string)
+                part.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(str::to_string)
             } else {
                 None
             }

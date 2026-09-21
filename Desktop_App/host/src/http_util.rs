@@ -21,7 +21,9 @@ fn is_transient(error: &reqwest::Error) -> bool {
     error.is_timeout()
         || error.is_connect()
         || error.is_request()
-        || error.status().is_some_and(|status| status.is_server_error())
+        || error
+            .status()
+            .is_some_and(|status| status.is_server_error())
 }
 
 fn send_with_retry<F>(

@@ -136,9 +136,8 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
         if file_type.is_dir() {
             copy_dir_recursive(&src, &dest)?;
         } else {
-            fs::copy(&src, &dest).map_err(|error| {
-                format!("Could not copy {}: {error}", src.display())
-            })?;
+            fs::copy(&src, &dest)
+                .map_err(|error| format!("Could not copy {}: {error}", src.display()))?;
         }
     }
     Ok(())
@@ -202,8 +201,29 @@ fn extension_lower(path: &Path) -> Option<String> {
 
 fn is_probably_text(path: &Path) -> bool {
     const TEXT_EXTENSIONS: &[&str] = &[
-        "md", "markdown", "txt", "yaml", "yml", "json", "toml", "csv", "ts", "tsx", "js", "jsx",
-        "css", "html", "htm", "rs", "py", "sh", "xml", "svg", "env", "gitignore", "prompt",
+        "md",
+        "markdown",
+        "txt",
+        "yaml",
+        "yml",
+        "json",
+        "toml",
+        "csv",
+        "ts",
+        "tsx",
+        "js",
+        "jsx",
+        "css",
+        "html",
+        "htm",
+        "rs",
+        "py",
+        "sh",
+        "xml",
+        "svg",
+        "env",
+        "gitignore",
+        "prompt",
     ];
     match extension_lower(path) {
         Some(ext) => TEXT_EXTENSIONS.iter().any(|allowed| *allowed == ext),
@@ -212,15 +232,16 @@ fn is_probably_text(path: &Path) -> bool {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
-            matches!(name, "prod.md" | "Makefile" | "Dockerfile" | "LICENSE" | "README")
-                || !name.contains('.')
+            matches!(
+                name,
+                "prod.md" | "Makefile" | "Dockerfile" | "LICENSE" | "README"
+            ) || !name.contains('.')
         }
     }
 }
 
 fn classify_path(path: &Path) -> &'static str {
-    const IMAGE_EXTENSIONS: &[&str] =
-        &["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "ico"];
+    const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "ico"];
     const VIDEO_EXTENSIONS: &[&str] = &["mp4", "webm", "mov", "mkv", "m4v"];
     const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "ogg", "flac", "m4a", "aac", "opus"];
 
@@ -285,9 +306,7 @@ pub fn extract_out_frame(
         let parent = video
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
-            .ok_or_else(|| {
-                "Video path has no parent directory for .out-frame.png".to_string()
-            })?;
+            .ok_or_else(|| "Video path has no parent directory for .out-frame.png".to_string())?;
         parent.join(format!("{stem}.out-frame.png"))
     };
 
@@ -307,19 +326,18 @@ pub fn extract_out_frame(
             "-sseof",
             "-0.1",
             "-i",
-            video.to_str().ok_or_else(|| "Video path is not valid UTF-8".to_string())?,
+            video
+                .to_str()
+                .ok_or_else(|| "Video path is not valid UTF-8".to_string())?,
             "-frames:v",
             "1",
             "-q:v",
             "2",
-            out.to_str().ok_or_else(|| "Output path is not valid UTF-8".to_string())?,
+            out.to_str()
+                .ok_or_else(|| "Output path is not valid UTF-8".to_string())?,
         ])
         .output()
-        .map_err(|error| {
-            format!(
-                "Could not run ffmpeg (is it installed on PATH?): {error}"
-            )
-        })?;
+        .map_err(|error| format!("Could not run ffmpeg (is it installed on PATH?): {error}"))?;
 
     if !status.status.success() {
         let stderr = String::from_utf8_lossy(&status.stderr);
@@ -334,9 +352,7 @@ pub fn extract_out_frame(
             out.display()
         ));
     }
-    let bytes = fs::metadata(&out)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let bytes = fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     Ok(json!({
         "ok": true,
         "video_path": video.to_string_lossy(),
@@ -398,7 +414,10 @@ pub fn probe_image_size(path: &str) -> Result<(u32, u32), String> {
         .map_err(|error| format!("Could not run ffprobe (is it on PATH?): {error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffprobe size failed for {}: {stderr}", path.display()));
+        return Err(format!(
+            "ffprobe size failed for {}: {stderr}",
+            path.display()
+        ));
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let (w, h) = text

@@ -9,25 +9,33 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /**
  * Resolve the workbench-host binary for dev and packaged builds.
  */
+function unpackagedDev() {
+  return Boolean(process.defaultApp) || process.env.ELECTRON_IS_DEV === "1";
+}
+
 export function resolveHostBinary() {
   if (process.env.WORKBENCH_HOST_BIN) {
     return process.env.WORKBENCH_HOST_BIN;
   }
   const root = path.resolve(__dirname, "..");
   const candidates = [];
-  if (process.resourcesPath) {
+  if (process.resourcesPath && !unpackagedDev()) {
     candidates.push(path.join(process.resourcesPath, "workbench-host"));
   }
   // Prefer in-tree builds; also honor CARGO_TARGET_DIR (e.g. CI / sandboxes).
+  // Unpackaged `electron .` must prefer debug so `npm run dev:host` wins over a stale release binary.
   const targetRoots = [
     path.join(root, "host", "target"),
     process.env.CARGO_TARGET_DIR,
   ].filter(Boolean);
   for (const targetRoot of targetRoots) {
-    candidates.push(
-      path.join(targetRoot, "release", "workbench-host"),
-      path.join(targetRoot, "debug", "workbench-host"),
-    );
+    const debug = path.join(targetRoot, "debug", "workbench-host");
+    const release = path.join(targetRoot, "release", "workbench-host");
+    if (unpackagedDev()) {
+      candidates.push(debug, release);
+    } else {
+      candidates.push(release, debug);
+    }
   }
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;
@@ -41,6 +49,8 @@ export class Sidecar {
   #nextId = 1;
   #eventHandlers = new Set();
   #settingsDir;
+  #bin = null;
+  #binMtime = 0;
 
   constructor({ settingsDir }) {
     this.#settingsDir = settingsDir;
@@ -54,6 +64,9 @@ export class Sidecar {
         `workbench-host binary not found at ${bin}. Run: (cd host && cargo build)`,
       );
     }
+    this.#bin = bin;
+    this.#binMtime = fs.statSync(bin).mtimeMs;
+    console.error(`[workbench-host] using ${bin}`);
     this.#child = spawn(bin, [], {
       stdio: ["pipe", "pipe", "pipe"],
       env: {
@@ -92,7 +105,22 @@ export class Sidecar {
     return () => this.#eventHandlers.delete(handler);
   }
 
+  #restartIfBinaryChanged() {
+    if (!this.#bin || !unpackagedDev()) return;
+    let mtime = 0;
+    try {
+      mtime = fs.statSync(this.#bin).mtimeMs;
+    } catch {
+      return;
+    }
+    if (!(mtime > this.#binMtime)) return;
+    console.error("[workbench-host] binary changed — restarting sidecar");
+    this.stop();
+    this.start();
+  }
+
   invoke(cmd, args = {}) {
+    this.#restartIfBinaryChanged();
     if (!this.#child || !this.#child.stdin.writable) {
       return Promise.reject(new Error("workbench-host is not running"));
     }

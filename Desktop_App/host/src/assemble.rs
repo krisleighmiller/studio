@@ -329,17 +329,11 @@ fn parse_assemble_map_text(text: &str) -> Result<Map<String, Value>, String> {
 
         if in_captions {
             if let Some(rest) = trimmed.strip_prefix("mode:") {
-                out.insert(
-                    "caption_mode".into(),
-                    Value::String(unquote_yaml(rest)),
-                );
+                out.insert("caption_mode".into(), Value::String(unquote_yaml(rest)));
                 continue;
             }
             if let Some(rest) = trimmed.strip_prefix("language:") {
-                out.insert(
-                    "caption_language".into(),
-                    Value::String(unquote_yaml(rest)),
-                );
+                out.insert("caption_language".into(), Value::String(unquote_yaml(rest)));
                 continue;
             }
             // Leaving captions when a non-caption key appears at same/outdent level
@@ -498,8 +492,8 @@ pub fn merge_assemble_map_into_inputs(
     if !map_path.is_file() {
         return Err(format!("Assemble map not found: {}", map_path.display()));
     }
-    let text = fs::read_to_string(&map_path)
-        .map_err(|e| format!("Could not read assemble map: {e}"))?;
+    let text =
+        fs::read_to_string(&map_path).map_err(|e| format!("Could not read assemble map: {e}"))?;
     let parsed = parse_assemble_map_text(&text)?;
     for (k, v) in parsed {
         inputs.entry(k).or_insert(v);
@@ -561,10 +555,7 @@ fn extract_yaml_blocks(text: &str) -> Vec<String> {
 fn parse_scene_id_from_heading(line: &str) -> Option<u32> {
     let t = line.trim();
     let rest = t.strip_prefix("### Scene ")?;
-    let num: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     num.parse().ok()
 }
 
@@ -681,7 +672,14 @@ fn run_ffmpeg(args: &[String], label: &str) -> Result<(), String> {
         .map_err(|e| format!("Could not run ffmpeg for {label} (is it on PATH?): {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail: String = stderr.chars().rev().take(1200).collect::<String>().chars().rev().collect();
+        let tail: String = stderr
+            .chars()
+            .rev()
+            .take(1200)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         return Err(format!("ffmpeg failed ({label}): {tail}"));
     }
     Ok(())
@@ -708,7 +706,11 @@ fn discover_scene_video(
     discover_in_dir(&dir, scene_id, prefer_retry)
 }
 
-fn discover_in_dir(dir: &Path, scene_id: u32, prefer_retry: bool) -> Option<(PathBuf, Option<PathBuf>)> {
+fn discover_in_dir(
+    dir: &Path,
+    scene_id: u32,
+    prefer_retry: bool,
+) -> Option<(PathBuf, Option<PathBuf>)> {
     let read = fs::read_dir(dir).ok()?;
     let mut videos = Vec::new();
     let mut wavs = Vec::new();
@@ -735,14 +737,14 @@ fn discover_in_dir(dir: &Path, scene_id: u32, prefer_retry: bool) -> Option<(Pat
             })
             .cloned()
             .or_else(|| {
-                videos.iter().find(|p| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| {
-                            n.to_ascii_lowercase()
-                                .starts_with(&format!("sc{scene_id}"))
+                videos
+                    .iter()
+                    .find(|p| {
+                        p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                            n.to_ascii_lowercase().starts_with(&format!("sc{scene_id}"))
                         })
-                }).cloned()
+                    })
+                    .cloned()
             })
             .unwrap_or_else(|| videos[0].clone())
     } else {
@@ -777,9 +779,11 @@ fn discover_in_dir(dir: &Path, scene_id: u32, prefer_retry: bool) -> Option<(Pat
     let audio = wavs
         .iter()
         .find(|p| {
-            p.file_stem()
-                .and_then(|s| s.to_str())
-                .is_some_and(|s| s == stem || s.starts_with(&format!("SC{scene_id}")) || s.starts_with(&format!("sc{scene_id}")))
+            p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| {
+                s == stem
+                    || s.starts_with(&format!("SC{scene_id}"))
+                    || s.starts_with(&format!("sc{scene_id}"))
+            })
         })
         .cloned()
         .or_else(|| wavs.first().cloned());
@@ -800,15 +804,19 @@ fn parse_scene_assets(
             let obj = item.as_object().ok_or_else(|| {
                 "assemble scenes[] entries must be objects with id + video".to_string()
             })?;
-            let id = obj
-                .get("id")
-                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-                .ok_or_else(|| "assemble scene missing id".to_string())? as u32;
+            let id =
+                obj.get("id")
+                    .and_then(|v| {
+                        v.as_u64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
+                    .ok_or_else(|| "assemble scene missing id".to_string())? as u32;
             let video_raw = obj
                 .get("video")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| format!("assemble scene {id} missing video path"))?;
-            let video = resolve_under_project(video_raw, project_root).map_err(|e| e.to_string())?;
+            let video =
+                resolve_under_project(video_raw, project_root).map_err(|e| e.to_string())?;
             if !video.is_file() {
                 return Err(format!("Scene {id} video not found: {}", video.display()));
             }
@@ -860,7 +868,9 @@ fn parse_scene_assets(
             if let Ok(read) = fs::read_dir(&scenes_dir) {
                 for entry in read.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if let Some(rest) = name.strip_prefix("Scene").or_else(|| name.strip_prefix("scene"))
+                    if let Some(rest) = name
+                        .strip_prefix("Scene")
+                        .or_else(|| name.strip_prefix("scene"))
                     {
                         if let Ok(id) = rest.parse::<u32>() {
                             found.push(id);
@@ -975,14 +985,12 @@ fn build_plan(
     let meta_by_id: std::collections::HashMap<u32, &SceneMeta> =
         metas.iter().map(|m| (m.id, m)).collect();
 
-    let output_raw = input_str(inputs, &["output_path", "output", "save_path"]).ok_or_else(
-        || {
-            "assemble needs output_path for the master (or an assemble_map that sets it)"
+    let output_raw =
+        input_str(inputs, &["output_path", "output", "save_path"]).ok_or_else(|| {
+            "assemble needs a master path — the host should have derived Final/<project>_final.mp4"
                 .to_string()
-        },
-    )?;
-    let output_path =
-        resolve_under_project(output_raw, project_root).map_err(|e| e.to_string())?;
+        })?;
+    let output_path = resolve_under_project(output_raw, project_root).map_err(|e| e.to_string())?;
     if output_path
         .extension()
         .and_then(|e| e.to_str())
@@ -1005,10 +1013,7 @@ fn build_plan(
     let work_dir = if let Some(w) = input_str(inputs, &["work_dir"]) {
         resolve_under_project(w, project_root).map_err(|e| e.to_string())?
     } else {
-        output_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("work")
+        output_path.parent().unwrap_or(Path::new(".")).join("work")
     };
 
     let trim_explicit = input_str(inputs, &["trim"]).is_some();
@@ -1258,7 +1263,8 @@ fn trim_scene(app: &HostCtx, scene: &ScenePlan, out: &Path) -> Result<(), String
         ),
     );
     let speech = scene.speech_mode.to_ascii_lowercase();
-    let needs_vo = (speech.contains("voiceover") || (!scene.has_audio_stream && scene.audio.is_some()))
+    let needs_vo = (speech.contains("voiceover")
+        || (!scene.has_audio_stream && scene.audio.is_some()))
         && scene.audio.is_some();
     let vf = normalize_vf();
 
@@ -1312,12 +1318,7 @@ fn trim_scene(app: &HostCtx, scene: &ScenePlan, out: &Path) -> Result<(), String
             "yuv420p".into(),
         ];
         if scene.has_audio_stream {
-            args.extend([
-                "-c:a".into(),
-                "aac".into(),
-                "-ar".into(),
-                "48000".into(),
-            ]);
+            args.extend(["-c:a".into(), "aac".into(), "-ar".into(), "48000".into()]);
         } else {
             args.extend([
                 "-f".into(),
@@ -1338,7 +1339,13 @@ fn trim_scene(app: &HostCtx, scene: &ScenePlan, out: &Path) -> Result<(), String
     Ok(())
 }
 
-fn apply_edge_fade(app: &HostCtx, clip: &Path, fade_in: bool, fade_out: bool, out: &Path) -> Result<(), String> {
+fn apply_edge_fade(
+    app: &HostCtx,
+    clip: &Path,
+    fade_in: bool,
+    fade_out: bool,
+    out: &Path,
+) -> Result<(), String> {
     if !fade_in && !fade_out {
         fs::copy(clip, out).map_err(|e| format!("Could not copy clip for edge fade: {e}"))?;
         return Ok(());
@@ -1396,10 +1403,7 @@ fn concat_cuts(app: &HostCtx, clips: &[PathBuf], out: &Path) -> Result<(), Strin
         "director-progress",
         format!("Assemble: concat {} clips (hard cuts)…", clips.len()),
     );
-    let list_path = out
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("concat.txt");
+    let list_path = out.parent().unwrap_or(Path::new(".")).join("concat.txt");
     let mut list = String::new();
     for clip in clips {
         let p = clip.to_string_lossy().replace('\'', "'\\''");
@@ -1456,7 +1460,10 @@ fn concat_with_xfades(
     let mut a_label = "0:a".to_string();
     let mut offset = durations[0];
     for i in 1..clips.len() {
-        let kind = transitions.get(i - 1).copied().unwrap_or(TransitionKind::Cut);
+        let kind = transitions
+            .get(i - 1)
+            .copied()
+            .unwrap_or(TransitionKind::Cut);
         let use_fade = !matches!(kind, TransitionKind::Cut);
         let d = if use_fade { fade_dur } else { 0.01 };
         let next_v = format!("v{i}");
@@ -1550,11 +1557,14 @@ fn mix_music(
     Ok(())
 }
 
-fn mux_soft_subs(app: &HostCtx, video: &Path, srt: &Path, language: &str, out: &Path) -> Result<(), String> {
-    app.emit(
-        "director-progress",
-        "Assemble: muxing soft subtitles…",
-    );
+fn mux_soft_subs(
+    app: &HostCtx,
+    video: &Path,
+    srt: &Path,
+    language: &str,
+    out: &Path,
+) -> Result<(), String> {
+    app.emit("director-progress", "Assemble: muxing soft subtitles…");
     let args = vec![
         "-y".into(),
         "-i".into(),
@@ -1576,19 +1586,15 @@ fn mux_soft_subs(app: &HostCtx, video: &Path, srt: &Path, language: &str, out: &
 }
 
 fn burn_subs(app: &HostCtx, video: &Path, srt: &Path, out: &Path) -> Result<(), String> {
-    app.emit(
-        "director-progress",
-        "Assemble: burning captions…",
-    );
+    app.emit("director-progress", "Assemble: burning captions…");
     // Escape path for subtitles filter
     let srt_esc = srt
         .to_string_lossy()
         .replace('\\', "\\\\")
         .replace(':', "\\:")
         .replace('\'', "\\'");
-    let vf = format!(
-        "subtitles='{srt_esc}':force_style='Alignment=2,FontSize=16,Outline=2,Shadow=0'"
-    );
+    let vf =
+        format!("subtitles='{srt_esc}':force_style='Alignment=2,FontSize=16,Outline=2,Shadow=0'");
     let args = vec![
         "-y".into(),
         "-i".into(),
@@ -1606,8 +1612,7 @@ fn burn_subs(app: &HostCtx, video: &Path, srt: &Path, out: &Path) -> Result<(), 
 }
 
 fn execute_plan(app: &HostCtx, plan: &AssemblePlan) -> Result<String, String> {
-    fs::create_dir_all(&plan.work_dir)
-        .map_err(|e| format!("Could not create work dir: {e}"))?;
+    fs::create_dir_all(&plan.work_dir).map_err(|e| format!("Could not create work dir: {e}"))?;
     if let Some(parent) = plan.output_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Could not create output dir: {e}"))?;
     }
@@ -1692,7 +1697,9 @@ fn execute_plan(app: &HostCtx, plan: &AssemblePlan) -> Result<String, String> {
 
     let master_dur = probe_duration_seconds(&plan.output_path.to_string_lossy())?;
     let (w, h) = probe_image_size(&plan.output_path.to_string_lossy()).unwrap_or((0, 0));
-    let bytes = fs::metadata(&plan.output_path).map(|m| m.len()).unwrap_or(0);
+    let bytes = fs::metadata(&plan.output_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     let mut report = String::from("Assemble finished (host-run).\n");
     report.push_str(&format!(
@@ -1738,10 +1745,7 @@ fn execute_plan(app: &HostCtx, plan: &AssemblePlan) -> Result<String, String> {
     } else {
         report.push_str("- music: none\n");
     }
-    report.push_str(&format!(
-        "- captions: `{}`",
-        plan.caption_mode.as_str()
-    ));
+    report.push_str(&format!("- captions: `{}`", plan.caption_mode.as_str()));
     if !matches!(plan.caption_mode, CaptionMode::None) {
         report.push_str(&format!(" (`{}`)", srt_path.display()));
     }
@@ -1758,10 +1762,7 @@ fn execute_plan(app: &HostCtx, plan: &AssemblePlan) -> Result<String, String> {
     Ok(report)
 }
 
-pub fn approval_notes(
-    inputs: &Map<String, Value>,
-    project_root: Option<&str>,
-) -> String {
+pub fn approval_notes(inputs: &Map<String, Value>, project_root: Option<&str>) -> String {
     match build_plan(inputs, project_root) {
         Ok(plan) => {
             let planned: f64 = plan.scenes.iter().map(|s| s.trim_duration).sum();
@@ -1771,14 +1772,9 @@ pub fn approval_notes(
                 plan.production_path.display()
             ));
             body.push_str(&format!("- trim mode: `{}`\n", plan.trim_mode.as_str()));
-            body.push_str(&format!(
-                "- planned runtime (post-trim): **{planned:.1}s**"
-            ));
+            body.push_str(&format!("- planned runtime (post-trim): **{planned:.1}s**"));
             if plan.sum_estimated > 0.0 {
-                body.push_str(&format!(
-                    " · sum of estimates: ~{:.1}s",
-                    plan.sum_estimated
-                ));
+                body.push_str(&format!(" · sum of estimates: ~{:.1}s", plan.sum_estimated));
             }
             body.push('\n');
             body.push_str(&format!("- output: `{}`\n", plan.output_path.display()));
@@ -1799,10 +1795,7 @@ pub fn approval_notes(
             } else {
                 body.push_str("- music: none\n");
             }
-            body.push_str(&format!(
-                "- captions: `{}`\n",
-                plan.caption_mode.as_str()
-            ));
+            body.push_str(&format!("- captions: `{}`\n", plan.caption_mode.as_str()));
             body.push_str("- scenes:\n");
             for scene in &plan.scenes {
                 body.push_str(&format!(

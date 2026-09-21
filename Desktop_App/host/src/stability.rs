@@ -1,7 +1,7 @@
 //! Stability AI Stable Image API (v2beta multipart).
 
 use crate::ctx::HostCtx;
-use crate::media_util::{emit_progress, http_client, param_str, write_bytes, write_b64};
+use crate::media_util::{emit_progress, http_client, param_str, write_b64, write_bytes};
 use crate::settings::ApiEntry;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,7 +34,10 @@ pub fn looks_like_model(model: &str) -> bool {
     let id = model.to_ascii_lowercase();
     id.starts_with("stable-image")
         || id.starts_with("stability-")
-        || matches!(id.as_str(), "core" | "ultra" | "sd3" | "sd3.5" | "stable-diffusion-3")
+        || matches!(
+            id.as_str(),
+            "core" | "ultra" | "sd3" | "sd3.5" | "stable-diffusion-3"
+        )
 }
 
 pub fn generate_image(

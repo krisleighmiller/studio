@@ -126,9 +126,7 @@ fn resolve_api_for_prediction(app: &HostCtx, prediction_id: &str) -> Result<ApiE
     if luma::parse_id(prediction_id).is_some() {
         return settings::find_api_by_kind(app, "luma");
     }
-    if sync_labs::parse_id(prediction_id).is_some()
-        && prediction_id.starts_with("sync:")
-    {
+    if sync_labs::parse_id(prediction_id).is_some() && prediction_id.starts_with("sync:") {
         return settings::find_api_by_kind(app, "sync-labs");
     }
     settings::find_api_by_kind(app, "atlas-cloud")
@@ -220,16 +218,12 @@ fn generate(
             save_path.as_deref(),
             Some(app),
         )?,
-        ("replicate", _) => {
-            replicate::generate(&api, &model, &params, project_root, Some(app))?
-        }
+        ("replicate", _) => replicate::generate(&api, &model, &params, project_root, Some(app))?,
         ("fal", _) => fal::generate(&api, &model, &params, project_root, Some(app))?,
         ("runway", "video") => {
             runway::generate_video(&api, &model, &params, project_root, Some(app))?
         }
-        ("luma", "video") => {
-            luma::generate_video(&api, &model, &params, project_root, Some(app))?
-        }
+        ("luma", "video") => luma::generate_video(&api, &model, &params, project_root, Some(app))?,
         ("sync-labs", "video") => {
             sync_labs::generate_video(&api, &model, &params, project_root, Some(app))?
         }
@@ -253,10 +247,7 @@ fn generate(
     };
 
     // Sync adapters already applied save_path.
-    if matches!(
-        api.kind.as_str(),
-        "openai-chat" | "gemini" | "stability"
-    ) {
+    if matches!(api.kind.as_str(), "openai-chat" | "gemini" | "stability") {
         return Ok(generated);
     }
 

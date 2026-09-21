@@ -16,15 +16,18 @@ pub mod luma;
 pub mod media;
 pub mod media_util;
 pub mod openai_images;
+pub mod output_paths;
 pub mod prompts;
 pub mod replicate;
 pub mod runway;
 pub mod scene_plan;
+pub mod script;
 pub mod settings;
 pub mod specialists;
 pub mod stability;
 pub mod sync_labs;
 pub mod voice;
+pub mod workflow;
 
 use crate::ctx::HostCtx;
 use crate::voice::RecorderState;
@@ -203,6 +206,32 @@ pub fn dispatch(
                 .map_err(|error| format!("Invalid save designed voice request: {error}"))?;
             to_value(voice::voice_save_designed_voice(app.clone(), request))
         }
+        "workflow_import" => workflow::cmd_import(args),
+        "workflow_status" => workflow::cmd_status(args),
+        "workflow_save_character" => workflow::cmd_save_character(args),
+        "workflow_draft_intent" => workflow::cmd_draft_intent(app, args),
+        "workflow_save_intent" => workflow::cmd_save_intent(args),
+        "workflow_approve_intent" => workflow::cmd_approve_intent(args),
+        "workflow_set_strategy" => workflow::cmd_set_strategy(args),
+        "workflow_backfill_sketches" => workflow::cmd_backfill_sketches(args),
+        "workflow_draft_sketches" => workflow::cmd_draft_sketches(app, args),
+        "workflow_update_sketch" => workflow::cmd_update_sketch(args),
+        "workflow_save_sketch" => workflow::cmd_save_sketch(args),
+        "workflow_draft_look" => workflow::cmd_draft_look(app, args),
+        "workflow_update_look_slot" => workflow::cmd_update_look_slot(args),
+        "workflow_attach_look" => workflow::cmd_attach_look(args),
+        "workflow_approve_look" => workflow::cmd_approve_look(args),
+        "workflow_reject_look" => workflow::cmd_reject_look(args),
+        "workflow_delete_look" => workflow::cmd_delete_look(args),
+        "workflow_generate_look" => workflow::cmd_generate_look(args),
+        "workflow_draft_start_frame_prompt" => workflow::cmd_draft_start_frame_prompt(app, args),
+        "workflow_save_start_frame_prompt" => workflow::cmd_save_start_frame_prompt(args),
+        "workflow_generate_start_frame" => workflow::cmd_generate_start_frame(args),
+        "workflow_edit_start_frame" => workflow::cmd_edit_start_frame(args),
+        "workflow_attach_start_frame" => workflow::cmd_attach_start_frame(args),
+        "workflow_approve_start_frame" => workflow::cmd_approve_start_frame(args),
+        "workflow_reject_start_frame" => workflow::cmd_reject_start_frame(args),
+        "workflow_delete_start_frame" => workflow::cmd_delete_start_frame(args),
         "ping" => Ok(json!("pong")),
         other => Err(format!("Unknown command: {other}")),
     }

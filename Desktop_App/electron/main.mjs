@@ -326,6 +326,16 @@ function createMenu(recentProjects = loadRecentProjects()) {
           accelerator: "CmdOrCtrl+Alt+V",
           click: () => send("open-voice"),
         },
+        {
+          label: "Production Desk",
+          accelerator: "CmdOrCtrl+Alt+P",
+          click: () => send("open-workflow"),
+        },
+        {
+          label: "Toggle Chat",
+          accelerator: "CmdOrCtrl+Alt+H",
+          click: () => send("toggle-chat"),
+        },
         { type: "separator" },
         { role: "toggleDevTools" },
         // Do not use bare role:reload — its default Ctrl+R steals Refresh Explorer.
@@ -405,6 +415,8 @@ function wireAppShortcuts(win) {
     } else if (key === "," && !input.shift && !input.alt) action = "open-settings";
     else if (key === "r" && !input.shift && !input.alt) action = "refresh-explorer";
     else if (key === "v" && input.alt) action = "open-voice";
+    else if (key === "p" && input.alt) action = "open-workflow";
+    else if (key === "h" && input.alt) action = "toggle-chat";
     else if (key === "c" && input.shift && !input.alt) action = "copy-chat";
     else if (key === "e" && input.shift && !input.alt) action = "save-chat";
 

@@ -32,6 +32,15 @@ import {
   settingsAreDirty,
 } from "./settingsPanel";
 import { bindVoiceHost, openVoicePanelContext, renderVoicePanel } from "./voicePanel";
+import {
+  bindWorkflowDesk,
+  clearWorkflowDesk,
+  loadWorkflowDesk,
+  refreshWorkflowDesk,
+  renderWorkflowDesk,
+  workflowSelection,
+  workflowStatusLine,
+} from "./workflowDesk";
 
 type DirEntry = {
   name: string;
@@ -39,7 +48,7 @@ type DirEntry = {
   isDir: boolean;
 };
 
-type TabKind = "text" | "settings" | "docs" | "voice" | MediaKind;
+type TabKind = "text" | "settings" | "docs" | "voice" | "workflow" | MediaKind;
 
 type EditorTab = {
   id: string;
@@ -134,6 +143,7 @@ const els = {
   editor: document.querySelector<HTMLTextAreaElement>("#editor")!,
   preview: document.querySelector<HTMLElement>("#markdown-preview")!,
   settingsView: document.querySelector<HTMLElement>("#settings-view")!,
+  workflowView: document.querySelector<HTMLElement>("#workflow-view")!,
   voiceView: document.querySelector<HTMLElement>("#voice-view")!,
   docsView: document.querySelector<HTMLElement>("#docs-view")!,
   mediaView: document.querySelector<HTMLElement>("#media-view")!,
@@ -181,6 +191,9 @@ const els = {
   statusRight: document.querySelector<HTMLElement>("#status-right")!,
   explorerPanel: document.querySelector<HTMLElement>("#explorer-panel")!,
   chatPanel: document.querySelector<HTMLElement>("#chat-panel")!,
+  chatSplitter: document.querySelector<HTMLElement>('[data-splitter="chat"]')!,
+  toggleChatBtn: document.querySelector<HTMLButtonElement>("#toggle-chat-btn")!,
+  chatRail: document.querySelector<HTMLButtonElement>("#chat-rail")!,
   contextMenu: document.querySelector<HTMLElement>("#context-menu")!,
 };
 
@@ -197,6 +210,8 @@ let applyingHistory = false;
 let lastEditorSnapshot = "";
 let findMatchIndex = -1;
 let pendingCreate: { parentDir: string; kind: "file" | "folder" } | null = null;
+let chatCollapsed = false;
+let workflowLoadedRoot: string | null = null;
 let pendingRename: { path: string; isDir: boolean } | null = null;
 let createCommitInFlight = false;
 let renameCommitInFlight = false;
@@ -291,6 +306,7 @@ function addPathToChat(path: string): void {
   target.attachments.push(normalized);
   renderChatAttachments();
   setStatus("Added to chat", basename(normalized));
+  setChatCollapsed(false);
 }
 
 function removeChatAttachment(path: string): void {
@@ -356,6 +372,38 @@ function isDocsTab(
   tab: EditorTab | undefined,
 ): tab is EditorTab & { kind: "docs" } {
   return Boolean(tab && tab.kind === "docs");
+}
+
+function isWorkflowTab(
+  tab: EditorTab | undefined,
+): tab is EditorTab & { kind: "workflow" } {
+  return Boolean(tab && tab.kind === "workflow");
+}
+
+function isAppLevelTab(tab: EditorTab): boolean {
+  return tab.kind === "settings" || tab.kind === "docs" || tab.kind === "voice";
+}
+
+function hideSpecialViews(): void {
+  els.settingsView.classList.add("hidden");
+  els.workflowView.classList.add("hidden");
+  els.voiceView.classList.add("hidden");
+  els.docsView.classList.add("hidden");
+}
+
+function setChatCollapsed(collapsed: boolean): void {
+  chatCollapsed = collapsed;
+  els.chatPanel.classList.toggle("collapsed", collapsed);
+  els.chatSplitter.classList.toggle("chat-collapsed", collapsed);
+  els.chatRail.classList.toggle("hidden", !collapsed);
+  const label = collapsed ? "Show chat" : "Hide chat";
+  els.toggleChatBtn.title = `${label} (Ctrl+Alt+H)`;
+  els.toggleChatBtn.setAttribute("aria-label", label);
+  els.toggleChatBtn.setAttribute("aria-pressed", collapsed ? "true" : "false");
+}
+
+function toggleChatPanel(): void {
+  setChatCollapsed(!chatCollapsed);
 }
 
 async function confirmAction(
@@ -465,6 +513,52 @@ function openVoiceTab(): void {
   renderEditor();
   openVoicePanelContext(projectRoot, selectedPath);
   setStatus("Character Voice");
+}
+
+function workflowTabRecord(): EditorTab {
+  return {
+    id: uid("editor"),
+    kind: "workflow",
+    path: null,
+    name: "Production",
+    contents: "",
+    original: "",
+    dirty: false,
+    undoStack: [],
+    redoStack: [],
+    preview: false,
+    selectionStart: 0,
+    selectionEnd: 0,
+    playbackRate: 1,
+  };
+}
+
+function openWorkflowTab(): void {
+  syncTabFromEditor();
+  const existing = editorTabs.find((tab) => tab.kind === "workflow");
+  if (existing) {
+    activeEditorId = existing.id;
+    renderEditor();
+    return;
+  }
+  pauseAllMedia();
+  const tab = workflowTabRecord();
+  editorTabs.unshift(tab);
+  activeEditorId = tab.id;
+  renderEditor();
+  setStatus("Production", workflowStatusLine() || "View → Production Desk");
+}
+
+async function loadProjectWorkflow(root: string): Promise<void> {
+  openWorkflowTab();
+  if (workflowLoadedRoot === root) return;
+  workflowLoadedRoot = root;
+  await loadWorkflowDesk(root);
+  const selection = workflowSelection();
+  if (selection.path) selectedPath = selection.path;
+  if (isWorkflowTab(activeEditor())) {
+    setStatus("Production", workflowStatusLine());
+  }
 }
 
 function isAvTab(tab: EditorTab | undefined): tab is EditorTab {
@@ -797,7 +891,9 @@ function renderEditorTabs(): void {
           ? "Character voice studio"
           : tab.kind === "docs"
             ? "Workbench documentation"
-            : (tab.path ?? "Untitled (not saved to project yet)");
+            : tab.kind === "workflow"
+              ? "Production desk"
+              : (tab.path ?? "Untitled (not saved to project yet)");
     button.dataset.tabId = tab.id;
     button.innerHTML = `<span class="tab-label"></span>`;
     button.querySelector(".tab-label")!.textContent = tab.name;
@@ -845,9 +941,7 @@ function renderEditor(): void {
   const tab = activeEditor();
   if (!tab) {
     hideMediaView();
-    els.settingsView.classList.add("hidden");
-    els.voiceView.classList.add("hidden");
-    els.docsView.classList.add("hidden");
+    hideSpecialViews();
     els.editor.classList.add("hidden");
     els.preview.classList.add("hidden");
     els.editorToolbar.classList.add("hidden");
@@ -862,8 +956,7 @@ function renderEditor(): void {
 
   if (tab.kind === "settings") {
     hideMediaView();
-    els.voiceView.classList.add("hidden");
-    els.docsView.classList.add("hidden");
+    hideSpecialViews();
     els.preview.classList.add("hidden");
     els.editor.classList.add("hidden");
     els.editorToolbar.classList.add("hidden");
@@ -876,10 +969,24 @@ function renderEditor(): void {
     return;
   }
 
+  if (tab.kind === "workflow") {
+    hideMediaView();
+    hideSpecialViews();
+    els.preview.classList.add("hidden");
+    els.editor.classList.add("hidden");
+    els.editorToolbar.classList.add("hidden");
+    if (!els.findBar.classList.contains("hidden")) {
+      closeFindBar();
+    }
+    els.workflowView.classList.remove("hidden");
+    renderWorkflowDesk();
+    setStatus("Production", workflowStatusLine() || "View → Production Desk");
+    return;
+  }
+
   if (tab.kind === "voice") {
     hideMediaView();
-    els.settingsView.classList.add("hidden");
-    els.docsView.classList.add("hidden");
+    hideSpecialViews();
     els.preview.classList.add("hidden");
     els.editor.classList.add("hidden");
     els.editorToolbar.classList.add("hidden");
@@ -894,8 +1001,7 @@ function renderEditor(): void {
 
   if (tab.kind === "docs") {
     hideMediaView();
-    els.settingsView.classList.add("hidden");
-    els.voiceView.classList.add("hidden");
+    hideSpecialViews();
     els.preview.classList.add("hidden");
     els.editor.classList.add("hidden");
     els.editorToolbar.classList.add("hidden");
@@ -908,9 +1014,7 @@ function renderEditor(): void {
     return;
   }
 
-  els.settingsView.classList.add("hidden");
-  els.voiceView.classList.add("hidden");
-  els.docsView.classList.add("hidden");
+  hideSpecialViews();
 
   if (tab.kind !== "text") {
     els.preview.classList.add("hidden");
@@ -2458,11 +2562,11 @@ async function openProjectAt(selected: string): Promise<void> {
   selectedPath = null;
   expandedDirs.clear();
   expandedDirs.add(root);
-  // Settings / docs are app-level — keep those tabs across project switches.
-  editorTabs = editorTabs.filter(
-    (tab) => tab.kind === "settings" || tab.kind === "docs" || tab.kind === "voice",
-  );
+  // Settings / docs / voice are app-level — keep those tabs across project switches.
+  editorTabs = editorTabs.filter((tab) => isAppLevelTab(tab));
   activeEditorId = editorTabs[0]?.id ?? null;
+  workflowLoadedRoot = null;
+  clearWorkflowDesk();
   els.mediaVideo.removeAttribute("src");
   els.mediaAudio.removeAttribute("src");
   delete els.mediaVideo.dataset.path;
@@ -2472,6 +2576,8 @@ async function openProjectAt(selected: string): Promise<void> {
   renderEditor();
   setStatus("Project opened", root);
   void rememberRecentProject(root);
+  await loadProjectWorkflow(root);
+  await renderExplorer();
 }
 
 async function openProject(): Promise<void> {
@@ -2500,10 +2606,10 @@ async function closeProject(): Promise<void> {
   projectRoot = null;
   selectedPath = null;
   expandedDirs.clear();
-  editorTabs = editorTabs.filter(
-    (tab) => tab.kind === "settings" || tab.kind === "docs" || tab.kind === "voice",
-  );
+  editorTabs = editorTabs.filter((tab) => isAppLevelTab(tab));
   activeEditorId = editorTabs[0]?.id ?? null;
+  workflowLoadedRoot = null;
+  clearWorkflowDesk();
   els.mediaVideo.removeAttribute("src");
   els.mediaAudio.removeAttribute("src");
   delete els.mediaVideo.dataset.path;
@@ -2761,6 +2867,7 @@ function showChatContextMenu(clientX: number, clientY: number): void {
 }
 
 function focusedEditorExcerpt(tab: EditorTab | undefined): string | null {
+  if (isWorkflowTab(tab)) return workflowSelection().excerpt;
   if (!isTextTab(tab) || !tab.contents.trim()) return null;
   return tab.contents;
 }
@@ -2936,12 +3043,16 @@ async function sendChatMessage(
         context: {
           projectRoot,
           selectedPath,
-          focusedEditorPath: editor?.path ?? null,
+          focusedEditorPath: isWorkflowTab(editor)
+            ? workflowSelection().path
+            : (editor?.path ?? null),
           focusedEditorExcerpt: focusedEditorExcerpt(editor),
           attachedPaths: [...tab.attachments],
           capabilityDefaults: settings.capabilityDefaults ?? {},
           adultContentEnabled: Boolean(settings.adultContentEnabled),
           adultCapabilityDefaults: settings.adultCapabilityDefaults ?? {},
+          workflowStage: isWorkflowTab(editor) ? workflowSelection().stage : null,
+          workflowSceneId: isWorkflowTab(editor) ? workflowSelection().sceneId : null,
         },
       },
     });
@@ -2991,6 +3102,11 @@ async function sendChatMessage(
     }
     if (projectRoot) {
       await renderExplorer();
+      try {
+        await refreshWorkflowDesk();
+      } catch {
+        /* desk refresh is best-effort after chat */
+      }
     }
 
     // Specialist hop (model sheet / collect) with a pending action in the reply.
@@ -3569,6 +3685,12 @@ function handleMenuAction(action: string): void {
     case "open-voice":
       openVoiceTab();
       break;
+    case "open-workflow":
+      openWorkflowTab();
+      break;
+    case "toggle-chat":
+      toggleChatPanel();
+      break;
     case "open-docs":
       openDocsTab();
       break;
@@ -3700,6 +3822,8 @@ function bindUi(): void {
   els.saveChatBtn.addEventListener("click", () => {
     void saveChatTranscript();
   });
+  els.toggleChatBtn.addEventListener("click", () => toggleChatPanel());
+  els.chatRail.addEventListener("click", () => setChatCollapsed(false));
   els.chatPanel.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -3995,9 +4119,19 @@ function bindUi(): void {
       handleMenuAction("find");
       return;
     }
+    if (key === "h" && event.altKey) {
+      event.preventDefault();
+      handleMenuAction("toggle-chat");
+      return;
+    }
     if (key === "h") {
       event.preventDefault();
       handleMenuAction("replace");
+      return;
+    }
+    if (key === "p" && event.altKey) {
+      event.preventDefault();
+      handleMenuAction("open-workflow");
       return;
     }
     if (key === "p" && event.shiftKey) {
@@ -4052,6 +4186,43 @@ async function boot(): Promise<void> {
     onStatus: setStatus,
     onSaved: () => {
       void renderExplorer();
+      void refreshWorkflowDesk();
+    },
+  });
+  bindWorkflowDesk({
+    root: els.workflowView,
+    projectRoot: () => projectRoot,
+    onOpenPath: (path) => {
+      void openFile(path);
+    },
+    onAddToChat: (path) => addPathToChat(path),
+    onOpenVoice: (characterDirectory) => {
+      selectedPath = characterDirectory;
+      openVoiceTab();
+    },
+    onComposeChat: (text, attachment) => {
+      if (!activeChat()) createChatTab("Director");
+      if (attachment) addPathToChat(attachment);
+      setChatCollapsed(false);
+      renderChat();
+      els.chatInput.value = text;
+      els.chatInput.focus();
+    },
+    onSelectionChange: (selection) => {
+      if (selection.path) selectedPath = selection.path;
+    },
+    chatModel: () => getSettings().selectedChatModel,
+    onStatus: setStatus,
+    onPendingPlan: (text) => {
+      const tab = activeChat() ?? createChatTab("Director");
+      tab.messages.push({
+        id: uid("msg"),
+        role: "assistant",
+        text,
+      });
+      setChatCollapsed(false);
+      renderChat();
+      setStatus("Scene look generate", "Approve in chat to spend");
     },
   });
   try {

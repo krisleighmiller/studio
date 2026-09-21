@@ -135,15 +135,12 @@ fn request_json(
 }
 
 /// Upload a local file via Sync assets; returns a public HTTPS url.
-fn upload_local_file(
-    api: &ApiEntry,
-    path: &Path,
-    app: Option<&HostCtx>,
-) -> Result<String, String> {
+fn upload_local_file(api: &ApiEntry, path: &Path, app: Option<&HostCtx>) -> Result<String, String> {
     if !path.is_file() {
         return Err(format!("Media path not found: {}", path.display()));
     }
-    let bytes = fs::read(path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let bytes =
+        fs::read(path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let size = bytes.len() as u64;
     if size == 0 {
         return Err(format!("File is empty: {}", path.display()));
@@ -379,7 +376,8 @@ pub fn get_prediction(
     wait_seconds: u64,
     app: Option<&HostCtx>,
 ) -> Result<String, String> {
-    let id = parse_id(prediction_id).ok_or_else(|| format!("Not a Sync Labs id: {prediction_id}"))?;
+    let id =
+        parse_id(prediction_id).ok_or_else(|| format!("Not a Sync Labs id: {prediction_id}"))?;
     let url = format!("{}/v2/generate/{id}?include=progress", base(api));
     let deadline = Instant::now() + Duration::from_secs(wait_seconds.max(1));
     let last = loop {
@@ -403,10 +401,7 @@ pub fn get_prediction(
         thread::sleep(Duration::from_secs(3));
     };
 
-    let status = last
-        .get("status")
-        .cloned()
-        .unwrap_or(json!("unknown"));
+    let status = last.get("status").cloned().unwrap_or(json!("unknown"));
     let output_url = last
         .get("outputUrl")
         .and_then(|v| v.as_str())

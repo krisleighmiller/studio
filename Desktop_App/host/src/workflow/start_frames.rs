@@ -1,0 +1,1338 @@
+//! Cut-specific still generation, edits, versions, and approval.
+//!
+//! Character sheets and approved scene looks are generation inputs. The host
+//! owns output paths and the approved cut image that later becomes video input.
+use crate::director_actions::{
+    format_approval_request, resolve_under_project, validate_action, ActionKind, DirectorAction,
+};
+use crate::scene_plan::handoff::CutId;
+use crate::workflow::import;
+use crate::workflow::look;
+use crate::workflow::state::{
+    AssetRecord, AssetRole, AssetStatus, CutRecord, JobRecord, JobStatus, ProjectState, SceneRecord,
+};
+use serde_json::{json, Map, Value};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+const MAX_SCENE_REFS: usize = 4;
+const START_FRAME_INSTRUCTION: &str = "Create one production-ready still image: the frozen opening frame before any dialogue or movement begins. Preserve the named characters' identities from their model sheets and match approved scene references. Any visible mouth must be naturally relaxed and closed, ready for later animation. Do not render speech, lip movement, captions, labels, contact sheets, or model-sheet layouts.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationRef {
+    pub asset_id: String,
+    pub path: String,
+    pub label: String,
+}
+
+pub fn prompt_system_prompt() -> &'static str {
+    "You draft a single cut start-frame image prompt. Return ONLY JSON:\n\
+{\"prompt\":\"one still-image prompt\",\"negative_prompt\":\"optional\"}\n\
+Use the cut sketch as the creative source. Describe one frozen opening composition before action or speech begins, not a video sequence. Preserve shot role, subject, on-camera people, location, approved scene look, period, props, and continuity.\n\
+STRICT STILL-SOURCE RULES:\n\
+- Never include quoted dialogue or describe anyone saying, speaking, delivering, performing, or forming words.\n\
+- Never request lip-sync, lip movement, a phoneme, a speaking mouth, or a mouth visibly forming words.\n\
+- For a performance cut, keep the face clearly visible but the mouth naturally relaxed and closed in the instant before speech. The later video stage animates it.\n\
+- Never describe camera movement, shot progression, timing, audio, sound design, or a sequence of events.\n\
+- The negative prompt must not prohibit a closed, relaxed, or neutral mouth.\n\
+Do not emit paths, asset ids, models, providers, production notes, or host fields. The host owns references and output paths."
+}
+
+pub fn prompt_user_prompt(scene: &SceneRecord, cut: &CutRecord, brief: &str) -> String {
+    let mut out = format!(
+        "Scene {}: {}\nCut {}\nTitle: {}\n",
+        scene.id,
+        scene.title,
+        cut.id.cut,
+        cut.title.as_deref().unwrap_or("(untitled)")
+    );
+    if let Some(location) = &scene.location {
+        out.push_str(&format!("Location: {location}\n"));
+    }
+    out.push_str(&format!(
+        "Required frozen-mouth treatment: {}\n",
+        still_mouth_instruction(cut)
+    ));
+    if let Some(sketch) = &cut.sketch {
+        out.push_str(&format!(
+            "Shot role: {}\nSubject: {}\nSpeaker: {}\nMouth policy: {}\nOn camera: {}\n",
+            sketch
+                .shot_role
+                .map(|role| role.label())
+                .unwrap_or("unspecified"),
+            sketch.subject.as_deref().unwrap_or("(unspecified)"),
+            sketch.speaker.as_deref().unwrap_or("(none)"),
+            sketch
+                .mouth_policy
+                .map(|policy| policy.label())
+                .unwrap_or("unspecified"),
+            if sketch.on_camera.is_empty() {
+                "(unspecified)".into()
+            } else {
+                sketch.on_camera.join(", ")
+            }
+        ));
+        if let Some(prompt) = &sketch.visual_prompt {
+            out.push_str(&format!("Existing visual prompt:\n{prompt}\n"));
+        }
+        if !sketch.reference_roles.is_empty() {
+            out.push_str(&format!(
+                "Requested scene reference roles: {}\n",
+                sketch
+                    .reference_roles
+                    .iter()
+                    .map(|role| role.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    } else {
+        out.push_str("No typed sketch exists; convert the imported cut fields into a still.\n");
+        if let Some(subject) = &cut.subject {
+            out.push_str(&format!("Subject: {subject}\n"));
+        }
+        if let Some(prompt) = &cut.prompt {
+            out.push_str(&format!(
+                "Imported production prompt (extract one opening still):\n{prompt}\n"
+            ));
+        }
+    }
+    if let Some(prompt) = &cut.start_frame_prompt {
+        out.push_str(&format!("Existing cut start-frame prompt:\n{prompt}\n"));
+    }
+    if !cut.dialogue.is_empty() {
+        out.push_str("Dialogue context:\n");
+        for line in &cut.dialogue {
+            out.push_str(&format!("- {}: {}\n", line.speaker, line.text));
+        }
+    }
+    out.push_str("\nApproved scene look:\n");
+    out.push_str(&look::look_summary(scene));
+    if !brief.trim().is_empty() {
+        out.push_str("\n\nUser direction:\n");
+        out.push_str(brief.trim());
+    }
+    out
+}
+
+pub fn apply_prompt(cut: &mut CutRecord, value: &Value) -> Result<(), String> {
+    let (prompt, negative) = prompt_fields(value)?;
+    ensure_still_prompt(cut, &prompt, negative.as_deref())?;
+    cut.start_frame_prompt = Some(prompt);
+    cut.start_frame_negative_prompt = negative;
+    Ok(())
+}
+
+pub fn save_prompt(cut: &mut CutRecord, prompt: &str, negative: &str) -> Result<(), String> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Err("start-frame prompt cannot be empty".into());
+    }
+    let negative = negative.trim();
+    cut.start_frame_prompt = Some(prompt.to_string());
+    cut.start_frame_negative_prompt = (!negative.is_empty()).then(|| negative.to_string());
+    Ok(())
+}
+
+pub fn prompt_issues(cut: &CutRecord, value: &Value) -> Result<Vec<String>, String> {
+    let (prompt, negative) = prompt_fields(value)?;
+    Ok(still_prompt_issues(cut, &prompt, negative.as_deref()))
+}
+
+pub fn prompt_correction(issues: &[String]) -> String {
+    format!(
+        "Workbench host rejected that response as a video/performance prompt rather than a frozen source image:\n- {}\n\
+Re-emit ONLY the JSON object. Describe the single instant before speech or movement. Keep visible faces usable for later animation, with naturally relaxed closed mouths. Remove dialogue quotations, word-forming mouths, lip-sync language, audio, timing, camera movement, and event progression. Do not put `closed mouth`, `relaxed mouth`, or `neutral mouth` in the negative prompt.",
+        issues.join("\n- ")
+    )
+}
+
+fn prompt_fields(value: &Value) -> Result<(String, Option<String>), String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "start-frame prompt JSON must be an object".to_string())?;
+    let prompt = obj
+        .get("prompt")
+        .or_else(|| obj.get("visual_prompt"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "start-frame prompt JSON needs `prompt`".to_string())?
+        .to_string();
+    let negative = obj
+        .get("negative_prompt")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    Ok((prompt, negative))
+}
+
+fn ensure_still_prompt(
+    cut: &CutRecord,
+    prompt: &str,
+    negative: Option<&str>,
+) -> Result<(), String> {
+    let issues = still_prompt_issues(cut, prompt, negative);
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "start-frame prompt is video-like:\n- {}\nRemove the performance-over-time language before generating an image.",
+            issues.join("\n- ")
+        ))
+    }
+}
+
+fn still_prompt_issues(cut: &CutRecord, prompt: &str, negative: Option<&str>) -> Vec<String> {
+    let lower = prompt.to_ascii_lowercase();
+    let checks = [
+        (
+            ["lip-sync", "lip sync", "lipsync"].as_slice(),
+            "lip-sync language belongs to video generation",
+        ),
+        (
+            [
+                "mouth visibly",
+                "mouth forming",
+                "forming the words",
+                "forming words",
+                "mid-speech",
+                "mid speech",
+                "speaking mouth",
+                "visibly speaking",
+            ]
+            .as_slice(),
+            "the prompt depicts speech or a word-forming mouth",
+        ),
+        (
+            [
+                "delivering the line",
+                "delivers the line",
+                "performs the line",
+                "performing the line",
+                "says the line",
+                "speaks the line",
+            ]
+            .as_slice(),
+            "the prompt describes dialogue performance instead of a frozen pre-speech frame",
+        ),
+        (
+            [
+                "camera movement",
+                "camera moves",
+                "camera makes",
+                "rack focus",
+                "push-in",
+                "push in",
+                "dolly",
+                "tracking shot",
+            ]
+            .as_slice(),
+            "the prompt describes camera movement",
+        ),
+        (
+            ["sound design", "audio:", "voice-over", "voice over"].as_slice(),
+            "the prompt contains audio direction",
+        ),
+    ];
+    let mut issues = Vec::new();
+    for (patterns, message) in checks {
+        if patterns.iter().any(|pattern| lower.contains(pattern))
+            && !issues.iter().any(|issue| issue == message)
+        {
+            issues.push(message.to_string());
+        }
+    }
+    let normalized_prompt = normalized_words(prompt);
+    for line in &cut.dialogue {
+        let normalized_line = normalized_words(&line.text);
+        if normalized_line.len() >= 6 && normalized_prompt.contains(&normalized_line) {
+            issues.push("the prompt repeats dialogue text that should only be context".into());
+            break;
+        }
+    }
+    if let Some(negative) = negative {
+        let negative = negative.to_ascii_lowercase();
+        if ["closed mouth", "relaxed mouth", "neutral mouth"]
+            .iter()
+            .any(|pattern| negative.contains(pattern))
+        {
+            issues.push(
+                "the negative prompt prohibits the neutral closed mouth required for a source still"
+                    .into(),
+            );
+        }
+    }
+    issues
+}
+
+fn normalized_words(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn still_mouth_instruction(cut: &CutRecord) -> &'static str {
+    match cut
+        .sketch
+        .as_ref()
+        .and_then(|sketch| sketch.mouth_policy)
+    {
+        Some(crate::workflow::state::MouthPolicy::NoPeople) => {
+            "no person or speaking mouth appears in the frame"
+        }
+        Some(crate::workflow::state::MouthPolicy::OffCamera) => {
+            "the speaker stays off camera; any visible person has a relaxed closed mouth"
+        }
+        Some(crate::workflow::state::MouthPolicy::ClosedOrNotVisible) => {
+            "mouths are naturally closed or not visible"
+        }
+        Some(crate::workflow::state::MouthPolicy::SpeakingVisible) | None => {
+            "the future speaker's face is clearly visible, with a naturally relaxed closed mouth in the instant before speech"
+        }
+    }
+}
+
+pub fn frame_rel(scene_id: u32, cut: u32, version: u32, ext: &str) -> String {
+    format!(
+        "Preproduction/Scene{scene_id}/start_frames/cut_{cut}_v{version}.{}",
+        ext.trim_start_matches('.')
+    )
+}
+
+fn next_frame_rel(root: &Path, state: &ProjectState, scene_id: u32, cut: u32, ext: &str) -> String {
+    for version in 1..=999 {
+        let rel = frame_rel(scene_id, cut, version, ext);
+        if !stem_exists(root, &rel)
+            && !state
+                .assets
+                .iter()
+                .any(|asset| same_stem(&asset.path, &rel))
+            && !state.jobs.iter().any(|job| {
+                job.output_path
+                    .as_deref()
+                    .is_some_and(|path| same_stem(path, &rel))
+            })
+        {
+            return rel;
+        }
+    }
+    frame_rel(scene_id, cut, 1000, ext)
+}
+
+fn cut_ref_haystack(cut: &CutRecord) -> String {
+    let mut parts = Vec::new();
+    if let Some(title) = &cut.title {
+        parts.push(title.clone());
+    }
+    if let Some(subject) = &cut.subject {
+        parts.push(subject.clone());
+    }
+    if let Some(prompt) = &cut.prompt {
+        parts.push(prompt.clone());
+    }
+    if let Some(prompt) = &cut.start_frame_prompt {
+        parts.push(prompt.clone());
+    }
+    for line in &cut.dialogue {
+        parts.push(line.speaker.clone());
+    }
+    if let Some(sketch) = &cut.sketch {
+        for value in [
+            sketch.title.as_ref(),
+            sketch.subject.as_ref(),
+            sketch.speaker.as_ref(),
+            sketch.visual_prompt.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            parts.push(value.clone());
+        }
+        parts.extend(sketch.on_camera.iter().cloned());
+        parts.extend(sketch.dialogue.iter().map(|line| line.speaker.clone()));
+    }
+    parts.join("\n")
+}
+
+pub fn generation_refs(
+    root: &Path,
+    state: &ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+) -> Result<Vec<GenerationRef>, String> {
+    let scene = state
+        .scene(scene_id)
+        .ok_or_else(|| format!("scene {scene_id} not found"))?;
+    let cut = scene
+        .cuts
+        .iter()
+        .find(|cut| cut.id.cut == cut_number)
+        .ok_or_else(|| format!("cut {scene_id}.{cut_number} not found"))?;
+    let hay = cut_ref_haystack(cut);
+    let title = cut.title.as_deref().unwrap_or("");
+    let identity = look::keep_existing_identity_refs(
+        root,
+        look::collect_look_identity_refs(state, scene_id, AssetRole::MoodReference, &hay, title),
+    );
+    let mut refs: Vec<GenerationRef> = identity
+        .into_iter()
+        .map(|reference| GenerationRef {
+            asset_id: reference.asset_id,
+            path: reference.path,
+            label: format!("{} {}", reference.character_name, reference.role.label()),
+        })
+        .collect();
+
+    let requested: Vec<AssetRole> = cut
+        .sketch
+        .as_ref()
+        .map(|sketch| sketch.reference_roles.clone())
+        .unwrap_or_default();
+    let fallback_to_approved = requested.is_empty();
+    if let Some(board) = &scene.look_board {
+        let mut scene_refs = Vec::new();
+        for slot in &board.slots {
+            let include = slot.role == AssetRole::WardrobeReference
+                || requested.contains(&slot.role)
+                || fallback_to_approved;
+            if !include {
+                continue;
+            }
+            let Some(asset_id) = &slot.approved_asset_id else {
+                continue;
+            };
+            let Some(asset) = state.asset(asset_id) else {
+                continue;
+            };
+            if asset.status != AssetStatus::Approved || !file_exists(root, &asset.path) {
+                continue;
+            }
+            scene_refs.push(GenerationRef {
+                asset_id: asset.id.clone(),
+                path: asset.path.clone(),
+                label: format!("{} {}", slot.title, slot.role.label()),
+            });
+        }
+        scene_refs.sort_by_key(|reference| {
+            if state
+                .asset(&reference.asset_id)
+                .is_some_and(|asset| asset.role == AssetRole::WardrobeReference)
+            {
+                0
+            } else {
+                1
+            }
+        });
+        for reference in scene_refs.into_iter().take(MAX_SCENE_REFS) {
+            if !refs.iter().any(|item| item.path == reference.path) {
+                refs.push(reference);
+            }
+        }
+    }
+    Ok(refs)
+}
+
+pub fn prepare_generate(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+) -> Result<(String, String), String> {
+    let (title, prompt, negative) = {
+        let scene = state
+            .scene(scene_id)
+            .ok_or_else(|| format!("scene {scene_id} not found"))?;
+        let cut = scene
+            .cuts
+            .iter()
+            .find(|cut| cut.id.cut == cut_number)
+            .ok_or_else(|| format!("cut {scene_id}.{cut_number} not found"))?;
+        let prompt = cut
+            .start_frame_prompt
+            .as_deref()
+            .or_else(|| {
+                cut.sketch
+                    .as_ref()
+                    .and_then(|sketch| sketch.visual_prompt.as_deref())
+            })
+            .or(cut.prompt.as_deref())
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .ok_or_else(|| {
+                "draft or enter a cut visual prompt before generating a start frame".to_string()
+            })?
+            .to_string();
+        let negative = cut
+            .start_frame_negative_prompt
+            .clone()
+            .or_else(|| {
+                cut.sketch
+                    .as_ref()
+                    .and_then(|sketch| sketch.negative_prompt.clone())
+            })
+            .or_else(|| cut.negative_prompt.clone());
+        ensure_still_prompt(cut, &prompt, negative.as_deref())?;
+        (
+            cut.title
+                .clone()
+                .unwrap_or_else(|| format!("Cut {cut_number}")),
+            prompt,
+            negative,
+        )
+    };
+    let refs = generation_refs(root, state, scene_id, cut_number)?;
+    let rel = next_frame_rel(root, state, scene_id, cut_number, "png");
+    create_parent(root, &rel)?;
+    let mut generation_prompt = format!("{prompt}\n\n{START_FRAME_INSTRUCTION}");
+    if let Some(negative) = negative.filter(|value| !value.trim().is_empty()) {
+        generation_prompt.push_str("\n\nAvoid: ");
+        generation_prompt.push_str(negative.trim());
+    }
+    let mut inputs = Map::new();
+    inputs.insert("prompt".into(), Value::String(generation_prompt));
+    inputs.insert("output_path".into(), Value::String(rel.clone()));
+    if let Some(aspect) = &state.settings.aspect_ratio {
+        inputs.insert("aspect_ratio".into(), Value::String(aspect.clone()));
+    }
+    if !refs.is_empty() {
+        inputs.insert(
+            "reference_images".into(),
+            json!(refs
+                .iter()
+                .map(|reference| reference.path.clone())
+                .collect::<Vec<_>>()),
+        );
+    }
+    let action = DirectorAction {
+        action: ActionKind::RunSpecialist,
+        specialist: Some("still_image".into()),
+        inputs,
+        message: None,
+        op: None,
+        path: None,
+    };
+    let root_s = root.to_string_lossy().to_string();
+    let validated = validate_action(action.clone(), Some(&root_s)).map_err(|e| e.to_string())?;
+    let mut card = format!(
+        "Cut start frame · Scene {scene_id} Cut {cut_number} · {title}\nHost will save to `{rel}`.\nThis cut image—not a model-sheet closeup—becomes the video source after approval."
+    );
+    append_refs(&mut card, &refs);
+    card.push_str("\n\n");
+    card.push_str(&format_approval_request(&action, &validated));
+    push_job(
+        state,
+        "cut_start_frame",
+        scene_id,
+        cut_number,
+        rel,
+        refs.iter()
+            .map(|reference| reference.asset_id.clone())
+            .collect(),
+    );
+    Ok((
+        card,
+        format!("Start-frame generate ready for Scene {scene_id} Cut {cut_number}. Approve the still_image plan in chat."),
+    ))
+}
+
+pub fn prepare_edit(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+    asset_id: &str,
+    brief: &str,
+) -> Result<(String, String), String> {
+    let brief = brief.trim();
+    if brief.is_empty() {
+        return Err("enter an edit brief first".into());
+    }
+    let cut_id = CutId::new(scene_id, cut_number);
+    let source = state
+        .asset(asset_id)
+        .filter(|asset| asset.cut_id == Some(cut_id) && asset.role.is_cut_image())
+        .ok_or_else(|| format!("cut image `{asset_id}` not found"))?
+        .clone();
+    if !file_exists(root, &source.path) {
+        return Err(format!("source image not found: {}", source.path));
+    }
+    let refs = generation_refs(root, state, scene_id, cut_number)?;
+    let ext = Path::new(&source.path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| is_image_ext(value))
+        .unwrap_or("png");
+    let rel = next_frame_rel(root, state, scene_id, cut_number, ext);
+    create_parent(root, &rel)?;
+    let mut inputs = Map::new();
+    inputs.insert("source_frame".into(), Value::String(source.path.clone()));
+    inputs.insert("edit_brief".into(), Value::String(brief.to_string()));
+    inputs.insert("preserve_props".into(), Value::Bool(true));
+    inputs.insert("output_path".into(), Value::String(rel.clone()));
+    if let Some(aspect) = &state.settings.aspect_ratio {
+        inputs.insert("aspect_ratio".into(), Value::String(aspect.clone()));
+    }
+    let extra_refs: Vec<&GenerationRef> = refs
+        .iter()
+        .filter(|reference| reference.path != source.path)
+        .collect();
+    if !extra_refs.is_empty() {
+        inputs.insert(
+            "reference_images".into(),
+            json!(extra_refs
+                .iter()
+                .map(|reference| reference.path.clone())
+                .collect::<Vec<_>>()),
+        );
+    }
+    let action = DirectorAction {
+        action: ActionKind::RunSpecialist,
+        specialist: Some("still_image".into()),
+        inputs,
+        message: None,
+        op: None,
+        path: None,
+    };
+    let root_s = root.to_string_lossy().to_string();
+    let validated = validate_action(action.clone(), Some(&root_s)).map_err(|e| e.to_string())?;
+    let mut card = format!(
+        "Cut start-frame edit · Scene {scene_id} Cut {cut_number}\nSource version: `{}`\nHost will save the edit to `{rel}`.",
+        source.path
+    );
+    append_refs(&mut card, &refs);
+    card.push_str("\n\n");
+    card.push_str(&format_approval_request(&action, &validated));
+    let mut input_asset_ids = vec![source.id];
+    for reference in refs {
+        if !input_asset_ids.contains(&reference.asset_id) {
+            input_asset_ids.push(reference.asset_id);
+        }
+    }
+    push_job(
+        state,
+        "cut_start_frame_edit",
+        scene_id,
+        cut_number,
+        rel,
+        input_asset_ids,
+    );
+    Ok((
+        card,
+        format!("Start-frame edit ready for Scene {scene_id} Cut {cut_number}. Approve the still_image plan in chat."),
+    ))
+}
+
+pub fn attach_image(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+    source: &str,
+) -> Result<String, String> {
+    require_cut(state, scene_id, cut_number)?;
+    let source = resolve_under_project(source, Some(root.to_string_lossy().as_ref()))
+        .or_else(|_| {
+            let path = PathBuf::from(source);
+            if path.is_absolute() {
+                Ok(path)
+            } else {
+                Err(crate::director_actions::ActionError::Validate(
+                    "image path could not be resolved".into(),
+                ))
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    if !source.is_file() {
+        return Err(format!("image not found: {}", source.display()));
+    }
+    let ext = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| is_image_ext(value))
+        .unwrap_or("png");
+    let rel = next_frame_rel(root, state, scene_id, cut_number, ext);
+    let dest = root.join(&rel);
+    if source != dest {
+        create_parent(root, &rel)?;
+        fs::copy(&source, &dest).map_err(|error| format!("could not copy image: {error}"))?;
+    }
+    let parent_asset_id =
+        latest_cut_asset(state, scene_id, cut_number).map(|asset| asset.id.clone());
+    let asset_id = state.push_asset(AssetRecord {
+        id: String::new(),
+        path: rel,
+        role: AssetRole::CutStartFrame,
+        status: AssetStatus::Draft,
+        scene_id: Some(scene_id),
+        cut_id: Some(CutId::new(scene_id, cut_number)),
+        character_id: None,
+        source_job_id: None,
+        parent_asset_id,
+        notes: Some("attached cut start frame".into()),
+    });
+    Ok(asset_id)
+}
+
+pub fn set_status(
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+    asset_id: &str,
+    status: AssetStatus,
+) -> Result<String, String> {
+    let cut_id = CutId::new(scene_id, cut_number);
+    let path = state
+        .asset(asset_id)
+        .filter(|asset| asset.cut_id == Some(cut_id) && asset.role.is_cut_image())
+        .ok_or_else(|| format!("cut image `{asset_id}` not found"))?
+        .path
+        .clone();
+    if status == AssetStatus::Approved {
+        for asset in &mut state.assets {
+            if asset.cut_id == Some(cut_id)
+                && asset.role.is_cut_image()
+                && asset.status == AssetStatus::Approved
+            {
+                asset.status = AssetStatus::Draft;
+            }
+        }
+    }
+    state
+        .asset_mut(asset_id)
+        .ok_or_else(|| format!("cut image `{asset_id}` not found"))?
+        .status = status;
+    let cut = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .and_then(|scene| scene.cuts.iter_mut().find(|cut| cut.id.cut == cut_number))
+        .ok_or_else(|| format!("cut {scene_id}.{cut_number} not found"))?;
+    match status {
+        AssetStatus::Approved => cut.approved_start_frame = Some(path),
+        AssetStatus::Rejected if cut.approved_start_frame.as_deref() == Some(path.as_str()) => {
+            cut.approved_start_frame = None;
+        }
+        _ => {}
+    }
+    Ok(asset_id.to_string())
+}
+
+pub fn delete_image(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+    asset_id: &str,
+) -> Result<String, String> {
+    let cut_id = CutId::new(scene_id, cut_number);
+    let asset = state
+        .asset(asset_id)
+        .filter(|asset| asset.cut_id == Some(cut_id) && asset.role.is_cut_image())
+        .ok_or_else(|| format!("cut image `{asset_id}` not found"))?
+        .clone();
+    if !is_start_frame_rel(&asset.path) {
+        return Err(
+            "refusing to delete a cut image outside Preproduction/SceneN/start_frames".into(),
+        );
+    }
+    let root_s = root.to_string_lossy().to_string();
+    let path =
+        resolve_under_project(&asset.path, Some(&root_s)).map_err(|error| error.to_string())?;
+    if path.is_file() {
+        fs::remove_file(&path)
+            .map_err(|error| format!("could not delete `{}`: {error}", path.display()))?;
+    }
+    state.assets.retain(|item| item.id != asset_id);
+    for item in &mut state.assets {
+        if item.parent_asset_id.as_deref() == Some(asset_id) {
+            item.parent_asset_id = None;
+        }
+    }
+    for job in &mut state.jobs {
+        job.input_asset_ids.retain(|id| id != asset_id);
+        job.output_asset_ids.retain(|id| id != asset_id);
+    }
+    if let Some(cut) = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .and_then(|scene| scene.cuts.iter_mut().find(|cut| cut.id.cut == cut_number))
+    {
+        if cut.approved_start_frame.as_deref() == Some(asset.path.as_str()) {
+            cut.approved_start_frame = None;
+        }
+    }
+    Ok(asset.path)
+}
+
+pub fn on_still_saved(project_root: Option<&str>, requested_path: &str) -> Option<String> {
+    let root = Path::new(project_root?.trim());
+    if !root.join(crate::workflow::state::STATE_REL).is_file() {
+        return None;
+    }
+    let actual = actual_path(root, requested_path)?;
+    let rel = relativize(root, &actual);
+    if !is_start_frame_rel(&rel) {
+        return None;
+    }
+    let scene_id = scene_from_rel(&rel)?;
+    let cut_number = cut_from_rel(&rel)?;
+    let cut_id = CutId::new(scene_id, cut_number);
+    let mut state = import::load_state(root).ok()?;
+    if let Some(existing_id) = state
+        .assets
+        .iter()
+        .find(|asset| asset.path == rel && asset.cut_id == Some(cut_id))
+        .map(|asset| asset.id.clone())
+    {
+        complete_job(&mut state, &rel, &existing_id);
+        let _ = import::save_project(root, state);
+        return Some(format!("Cut start frame already registered: `{rel}`."));
+    }
+    require_cut(&state, scene_id, cut_number).ok()?;
+    let job_id = matching_job(&state, &rel).map(|job| job.id.clone());
+    let parent_asset_id =
+        latest_cut_asset(&state, scene_id, cut_number).map(|asset| asset.id.clone());
+    let asset_id = state.push_asset(AssetRecord {
+        id: String::new(),
+        path: rel.clone(),
+        role: AssetRole::CutStartFrame,
+        status: AssetStatus::Draft,
+        scene_id: Some(scene_id),
+        cut_id: Some(cut_id),
+        character_id: None,
+        source_job_id: job_id,
+        parent_asset_id,
+        notes: Some("generated cut start frame".into()),
+    });
+    complete_job(&mut state, &rel, &asset_id);
+    let _ = import::save_project(root, state);
+    Some(format!(
+        "Registered cut start-frame draft `{asset_id}` at `{rel}`. Approve it on the Reference Images stage."
+    ))
+}
+
+fn append_refs(card: &mut String, refs: &[GenerationRef]) {
+    if refs.is_empty() {
+        return;
+    }
+    card.push_str("\nGeneration references:");
+    for reference in refs {
+        card.push_str(&format!("\n- {} · `{}`", reference.label, reference.path));
+    }
+}
+
+fn push_job(
+    state: &mut ProjectState,
+    kind: &str,
+    scene_id: u32,
+    cut_number: u32,
+    rel: String,
+    input_asset_ids: Vec<String>,
+) {
+    state.jobs.push(JobRecord {
+        id: state.next_job_id(),
+        kind: kind.into(),
+        provider: None,
+        model: None,
+        input_asset_ids,
+        output_asset_ids: Vec::new(),
+        status: JobStatus::Pending,
+        output_path: Some(rel),
+        raw_provider_id: Some(format!("s{scene_id}_c{cut_number}")),
+        error: None,
+    });
+}
+
+fn require_cut(state: &ProjectState, scene_id: u32, cut_number: u32) -> Result<(), String> {
+    state
+        .scene(scene_id)
+        .and_then(|scene| scene.cuts.iter().find(|cut| cut.id.cut == cut_number))
+        .map(|_| ())
+        .ok_or_else(|| format!("cut {scene_id}.{cut_number} not found"))
+}
+
+fn latest_cut_asset(state: &ProjectState, scene_id: u32, cut_number: u32) -> Option<&AssetRecord> {
+    let cut_id = CutId::new(scene_id, cut_number);
+    state
+        .assets
+        .iter()
+        .rev()
+        .find(|asset| asset.cut_id == Some(cut_id) && asset.role.is_cut_image())
+}
+
+fn matching_job<'a>(state: &'a ProjectState, rel: &str) -> Option<&'a JobRecord> {
+    state.jobs.iter().find(|job| {
+        matches!(
+            job.kind.as_str(),
+            "cut_start_frame" | "cut_start_frame_edit"
+        ) && job
+            .output_path
+            .as_deref()
+            .is_some_and(|path| same_stem(path, rel))
+    })
+}
+
+fn complete_job(state: &mut ProjectState, rel: &str, asset_id: &str) {
+    if let Some(job) = state.jobs.iter_mut().find(|job| {
+        matches!(
+            job.kind.as_str(),
+            "cut_start_frame" | "cut_start_frame_edit"
+        ) && job
+            .output_path
+            .as_deref()
+            .is_some_and(|path| same_stem(path, rel))
+    }) {
+        job.status = JobStatus::Completed;
+        job.output_path = Some(rel.to_string());
+        if !job.output_asset_ids.iter().any(|id| id == asset_id) {
+            job.output_asset_ids.push(asset_id.to_string());
+        }
+    }
+}
+
+fn create_parent(root: &Path, rel: &str) -> Result<(), String> {
+    if let Some(parent) = root.join(rel).parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create start-frame folder: {error}"))?;
+    }
+    Ok(())
+}
+
+fn stem_exists(root: &Path, rel: &str) -> bool {
+    let requested = root.join(rel);
+    let Some(parent) = requested.parent() else {
+        return false;
+    };
+    let Some(stem) = requested.file_stem() else {
+        return false;
+    };
+    fs::read_dir(parent).ok().is_some_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            let path = entry.path();
+            path.is_file() && path.file_stem() == Some(stem) && is_image_path(&path)
+        })
+    })
+}
+
+fn same_stem(a: &str, b: &str) -> bool {
+    let normalize = |value: &str| {
+        Path::new(value)
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    };
+    normalize(a) == normalize(b)
+}
+
+fn actual_path(root: &Path, requested: &str) -> Option<PathBuf> {
+    let requested = PathBuf::from(requested);
+    let requested = if requested.is_absolute() {
+        requested
+    } else {
+        root.join(requested)
+    };
+    if requested.is_file() {
+        return Some(requested);
+    }
+    let parent = requested.parent()?;
+    let stem = requested.file_stem()?;
+    fs::read_dir(parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.is_file() && path.file_stem() == Some(stem) && is_image_path(path))
+}
+
+fn file_exists(root: &Path, value: &str) -> bool {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path.is_file()
+    } else {
+        root.join(path).is_file()
+    }
+}
+
+fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(is_image_ext)
+}
+
+fn is_image_ext(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif"
+    )
+}
+
+fn is_start_frame_rel(value: &str) -> bool {
+    let normalized = value.replace('\\', "/");
+    normalized.contains("Preproduction/Scene") && normalized.contains("/start_frames/")
+}
+
+fn scene_from_rel(value: &str) -> Option<u32> {
+    let normalized = value.replace('\\', "/");
+    let rest = normalized.split("Preproduction/Scene").nth(1)?;
+    let number: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    number.parse().ok()
+}
+
+fn cut_from_rel(value: &str) -> Option<u32> {
+    let stem = Path::new(value).file_stem()?.to_str()?;
+    let rest = stem.strip_prefix("cut_")?;
+    rest.split("_v").next()?.parse().ok()
+}
+
+fn relativize(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflow::state::{
+        CharacterRecord, CutSketch, LookBoard, LookSlot, MouthPolicy, ShotRole,
+    };
+
+    fn write(root: &Path, rel: &str) {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"image").unwrap();
+    }
+
+    fn fixture(root: &Path) -> ProjectState {
+        let mut state = ProjectState::new();
+        state.settings.aspect_ratio = Some("9:16".into());
+        for (id, path, role, character_id) in [
+            (
+                "tom_identity",
+                "Characters/Tom Vale/model_sheet/tom_closeup_front.png",
+                AssetRole::IdentityReference,
+                Some("tom_vale"),
+            ),
+            (
+                "tom_body",
+                "Characters/Tom Vale/model_sheet/tom_standing_front.png",
+                AssetRole::BodyReference,
+                Some("tom_vale"),
+            ),
+            (
+                "wardrobe",
+                "Preproduction/Scene1/references/wardrobe_1.png",
+                AssetRole::WardrobeReference,
+                None,
+            ),
+            (
+                "interior",
+                "Preproduction/Scene1/references/interior_1.png",
+                AssetRole::InteriorReference,
+                None,
+            ),
+        ] {
+            write(root, path);
+            state.assets.push(AssetRecord {
+                id: id.into(),
+                path: path.into(),
+                role,
+                status: AssetStatus::Approved,
+                scene_id: role.is_scene_look().then_some(1),
+                cut_id: None,
+                character_id: character_id.map(str::to_string),
+                source_job_id: None,
+                parent_asset_id: None,
+                notes: (role == AssetRole::BodyReference).then(|| "standing_front".into()),
+            });
+        }
+        state.characters.push(CharacterRecord {
+            id: "tom_vale".into(),
+            name: "Tom Vale".into(),
+            dir: "Characters/Tom Vale".into(),
+            identity_ready: true,
+            voice_ready: false,
+            profile_path: None,
+            model_sheet_manifest_path: None,
+            profile: Default::default(),
+            asset_ids: vec!["tom_identity".into(), "tom_body".into()],
+            notes: Vec::new(),
+        });
+        let scene = state.scene_mut(1, "The last train");
+        scene.location = Some("night train".into());
+        let mut board = LookBoard::default();
+        let mut wardrobe =
+            LookSlot::new("s1_look_03", AssetRole::WardrobeReference, "Travel clothes");
+        wardrobe.asset_ids.push("wardrobe".into());
+        wardrobe.approved_asset_id = Some("wardrobe".into());
+        let mut interior =
+            LookSlot::new("s1_look_01", AssetRole::InteriorReference, "Train interior");
+        interior.asset_ids.push("interior".into());
+        interior.approved_asset_id = Some("interior".into());
+        board.slots.extend([interior, wardrobe]);
+        board.sync_asset_ids();
+        scene.look_board = Some(board);
+        let cut = scene.cut_mut(1);
+        cut.title = Some("Tom guards the parcel".into());
+        cut.subject = Some("Tom Vale".into());
+        cut.sketch = Some(CutSketch {
+            title: Some("Tom guards the parcel".into()),
+            shot_role: Some(ShotRole::Performance),
+            subject: Some("Tom Vale".into()),
+            speaker: Some("Tom Vale".into()),
+            mouth_policy: Some(MouthPolicy::SpeakingVisible),
+            visual_prompt: Some("Tom Vale in the narrow train, brown parcel on his knees".into()),
+            negative_prompt: Some("modern clothes, text".into()),
+            reference_roles: vec![AssetRole::InteriorReference],
+            on_camera: vec!["Tom Vale".into()],
+            ..CutSketch::default()
+        });
+        state
+    }
+
+    #[test]
+    fn llm_prompt_only_updates_creative_fields() {
+        let mut cut = CutRecord::new(CutId::new(1, 1));
+        apply_prompt(
+            &mut cut,
+            &json!({
+                "prompt": "Tom at the rainy window",
+                "negative_prompt": "modern train",
+                "output_path": "/tmp/invented.png",
+                "reference_images": ["bad.png"]
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            cut.start_frame_prompt.as_deref(),
+            Some("Tom at the rainy window")
+        );
+        assert_eq!(
+            cut.start_frame_negative_prompt.as_deref(),
+            Some("modern train")
+        );
+        assert!(cut.sketch.is_none());
+        assert!(cut.approved_start_frame.is_none());
+    }
+
+    #[test]
+    fn llm_video_prompt_is_rejected_but_manual_draft_can_be_saved() {
+        let mut cut = CutRecord::new(CutId::new(1, 1));
+        cut.dialogue.push(crate::script::DialogueLine {
+            speaker: "Tom Vale".into(),
+            text: "We shall be there before supper.".into(),
+        });
+        cut.sketch = Some(CutSketch {
+            mouth_policy: Some(MouthPolicy::SpeakingVisible),
+            ..CutSketch::default()
+        });
+        let first = json!({
+            "prompt": "Tom in the carriage, natural lip-sync framing"
+        });
+        let first_issues = prompt_issues(&cut, &first).unwrap();
+        assert!(first_issues.iter().any(|issue| issue.contains("lip-sync")));
+
+        let second = json!({
+            "prompt": "Cinematic still of Tom, mouth visibly forming the words, “We shall be there before supper.”",
+            "negative_prompt": "closed mouth, camera movement"
+        });
+        let second_issues = prompt_issues(&cut, &second).unwrap();
+        assert!(second_issues
+            .iter()
+            .any(|issue| issue.contains("word-forming mouth")));
+        assert!(second_issues
+            .iter()
+            .any(|issue| issue.contains("repeats dialogue")));
+        assert!(second_issues
+            .iter()
+            .any(|issue| issue.contains("prohibits the neutral closed mouth")));
+        assert!(apply_prompt(&mut cut, &second).is_err());
+        assert!(cut.start_frame_prompt.is_none());
+        save_prompt(
+            &mut cut,
+            "Tom in the carriage, natural lip-sync framing",
+            "modern objects",
+        )
+        .unwrap();
+        assert_eq!(
+            cut.start_frame_prompt.as_deref(),
+            Some("Tom in the carriage, natural lip-sync framing")
+        );
+    }
+
+    #[test]
+    fn performance_start_frame_accepts_visible_face_before_speech() {
+        let mut cut = CutRecord::new(CutId::new(1, 1));
+        cut.sketch = Some(CutSketch {
+            mouth_policy: Some(MouthPolicy::SpeakingVisible),
+            ..CutSketch::default()
+        });
+        apply_prompt(
+            &mut cut,
+            &json!({
+                "prompt": "Tom Vale faces the camera in the rainy carriage, his mouth naturally relaxed and closed in the instant before speech",
+                "negative_prompt": "open mouth, visible speech, lip movement, text"
+            }),
+        )
+        .unwrap();
+        assert!(cut.start_frame_prompt.is_some());
+    }
+
+    #[test]
+    fn generation_uses_identity_and_approved_requested_scene_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = fixture(dir.path());
+        let refs = generation_refs(dir.path(), &state, 1, 1).unwrap();
+        let ids: Vec<&str> = refs
+            .iter()
+            .map(|reference| reference.asset_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["tom_identity", "tom_body", "wardrobe", "interior"]
+        );
+    }
+
+    #[test]
+    fn prepare_generate_creates_host_path_and_pending_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = fixture(root);
+        let (card, _) = prepare_generate(root, &mut state, 1, 1).unwrap();
+        assert!(card.contains("Preproduction/Scene1/start_frames/cut_1_v1.png"));
+        assert!(card.contains("Characters/Tom Vale/model_sheet/tom_closeup_front.png"));
+        assert!(card.contains("Preproduction/Scene1/references/wardrobe_1.png"));
+        assert!(card.contains("Avoid: modern clothes, text"));
+        let action = card.split("```json").nth(1).unwrap_or(&card);
+        assert!(action.contains("reference_images"));
+        assert!(!action.contains("source_frame"));
+        let job = state.jobs.last().unwrap();
+        assert_eq!(job.kind, "cut_start_frame");
+        assert_eq!(job.status, JobStatus::Pending);
+        assert_eq!(job.input_asset_ids.len(), 4);
+    }
+
+    #[test]
+    fn prepare_generate_blocks_a_preexisting_video_like_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = fixture(root);
+        state.scenes[0].cuts[0].start_frame_prompt =
+            Some("Tom speaks with natural lip-sync framing".into());
+        let error = prepare_generate(root, &mut state, 1, 1).unwrap_err();
+        assert!(error.contains("video-like"));
+        assert!(state.jobs.is_empty());
+    }
+
+    #[test]
+    fn versions_skip_other_extensions_and_pending_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = fixture(root);
+        write(root, "Preproduction/Scene1/start_frames/cut_1_v1.jpg");
+        state.jobs.push(JobRecord {
+            id: "job_9".into(),
+            kind: "cut_start_frame".into(),
+            provider: None,
+            model: None,
+            input_asset_ids: Vec::new(),
+            output_asset_ids: Vec::new(),
+            status: JobStatus::Pending,
+            output_path: Some("Preproduction/Scene1/start_frames/cut_1_v2.png".into()),
+            raw_provider_id: Some("s1_c1".into()),
+            error: None,
+        });
+        assert_eq!(
+            next_frame_rel(root, &state, 1, 1, "png"),
+            "Preproduction/Scene1/start_frames/cut_1_v3.png"
+        );
+    }
+
+    #[test]
+    fn saved_frame_registers_then_approve_and_edit_use_it_as_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = fixture(root);
+        prepare_generate(root, &mut state, 1, 1).unwrap();
+        let requested = state.jobs[0].output_path.clone().unwrap();
+        import::save_project(root, state).unwrap();
+        write(root, &requested);
+        let note = on_still_saved(Some(root.to_str().unwrap()), &requested).unwrap();
+        assert!(note.contains("Registered cut start-frame draft"));
+        let mut state = import::load_state(root).unwrap();
+        let frame = state
+            .assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::CutStartFrame)
+            .unwrap()
+            .clone();
+        set_status(&mut state, 1, 1, &frame.id, AssetStatus::Approved).unwrap();
+        assert_eq!(
+            state.scenes[0].cuts[0].approved_start_frame.as_deref(),
+            Some(requested.as_str())
+        );
+        let (card, _) =
+            prepare_edit(root, &mut state, 1, 1, &frame.id, "Make Tom's coat wetter").unwrap();
+        assert!(card.contains("\"source_frame\""));
+        assert!(card.contains(&requested));
+        assert!(card.contains("cut_1_v2.png"));
+        assert_eq!(state.jobs.last().unwrap().kind, "cut_start_frame_edit");
+        assert_eq!(
+            state.jobs.last().unwrap().input_asset_ids.first(),
+            Some(&frame.id)
+        );
+    }
+
+    #[test]
+    fn attach_approve_delete_manages_exact_cut_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = fixture(root);
+        let source = root.join("outside.jpg");
+        fs::write(&source, b"jpg").unwrap();
+        let id = attach_image(root, &mut state, 1, 1, source.to_str().unwrap()).unwrap();
+        let path = state.asset(&id).unwrap().path.clone();
+        assert!(root.join(&path).is_file());
+        set_status(&mut state, 1, 1, &id, AssetStatus::Approved).unwrap();
+        assert_eq!(
+            state.scenes[0].cuts[0].approved_start_frame.as_deref(),
+            Some(path.as_str())
+        );
+        delete_image(root, &mut state, 1, 1, &id).unwrap();
+        assert!(!root.join(path).exists());
+        assert!(state.asset(&id).is_none());
+        assert!(state.scenes[0].cuts[0].approved_start_frame.is_none());
+    }
+
+    #[test]
+    fn manually_deleted_approved_frame_is_pruned_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = fixture(root);
+        let source = root.join("attached.png");
+        fs::write(&source, b"png").unwrap();
+        let id = attach_image(root, &mut state, 1, 1, source.to_str().unwrap()).unwrap();
+        set_status(&mut state, 1, 1, &id, AssetStatus::Approved).unwrap();
+        let path = state.asset(&id).unwrap().path.clone();
+        import::save_project(root, state).unwrap();
+        fs::remove_file(root.join(&path)).unwrap();
+
+        let loaded = import::load_state(root).unwrap();
+        assert!(loaded.asset(&id).is_none());
+        assert!(loaded.scenes[0].cuts[0].approved_start_frame.is_none());
+    }
+}

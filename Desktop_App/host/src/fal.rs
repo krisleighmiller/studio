@@ -63,7 +63,10 @@ fn build_body(params: &Value, project_root: Option<&str>) -> Result<Value, Strin
         ] {
             if let Some(Value::String(path)) = obj.get(key).cloned() {
                 if !path.starts_with("http") && !path.starts_with("data:") {
-                    obj.insert(key.to_string(), json!(file_to_data_uri(&path, project_root)?));
+                    obj.insert(
+                        key.to_string(),
+                        json!(file_to_data_uri(&path, project_root)?),
+                    );
                 }
             }
         }
@@ -135,10 +138,7 @@ pub fn get_prediction(
         parse_id(prediction_id).ok_or_else(|| format!("Not a fal id: {prediction_id}"))?;
     let auth = auth(api)?;
     let client = http_client(60)?;
-    let status_url = format!(
-        "{}/{model}/requests/{request_id}/status",
-        queue_base(api)
-    );
+    let status_url = format!("{}/{model}/requests/{request_id}/status", queue_base(api));
     let response_url = format!("{}/{model}/requests/{request_id}", queue_base(api));
     let deadline = Instant::now() + Duration::from_secs(wait_seconds.max(1));
     let mut last_status = String::from("UNKNOWN");

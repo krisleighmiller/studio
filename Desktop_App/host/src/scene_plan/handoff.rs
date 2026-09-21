@@ -43,15 +43,22 @@ pub struct SceneHandoff {
     pub cut: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Host-owned. Ignored on input; always `atlascloud` after validation.
+    #[serde(default = "default_provider")]
     pub provider: String,
+    /// Host-owned. Ignored on input; always `base_video` after validation.
+    #[serde(default)]
     pub stage: Stage,
     pub scene_type: SceneType,
     pub continuity: Continuity,
     pub editing: Editing,
     #[serde(default)]
     pub speech: Speech,
+    /// Host-owned. Ignored on input, recomputed on every validation.
+    #[serde(default)]
     pub generation_requirements: GenerationRequirements,
     pub prompt: String,
+    /// Host-owned. Ignored on input when a registry is present; attached from the speaker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reference_assets: Vec<ReferenceAsset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,12 +94,17 @@ impl SceneHandoff {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
+    #[default]
     BaseVideo,
     LipSync,
     Post,
+}
+
+fn default_provider() -> String {
+    "atlascloud".into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,17 +144,40 @@ pub enum RelationToPrevious {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Editing {
+    /// Host-owned. Ignored on input; snapped from speech + pace + lane buckets.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub estimated_screen_duration_seconds: f64,
-    #[serde(default)]
+    /// Host-owned policy constant. Ignored on input.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub head_handle_seconds: f64,
-    #[serde(default)]
+    /// Host-owned policy constant. Ignored on input.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub tail_handle_seconds: f64,
+    /// Creative pace hint. The host snaps it to a provider bucket.
+    #[serde(default, skip_serializing_if = "Pace::is_natural")]
+    pub pace: Pace,
     pub transition_in: Transition,
     pub transition_out: Transition,
     #[serde(default)]
     pub continuity_frame_strategy: ContinuityFrameStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cut_guidance: Option<String>,
+}
+
+/// How much air the host should leave around the spoken floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Pace {
+    Tight,
+    #[default]
+    Natural,
+    Held,
+}
+
+impl Pace {
+    pub fn is_natural(&self) -> bool {
+        matches!(self, Pace::Natural)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,7 +222,8 @@ pub enum SpeechMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cue {
-    /// `S{source:02}C{cut:02}_{suffix}`.
+    /// Host-owned `S{source:02}C{cut:02}_{suffix}`. Optional on input.
+    #[serde(default)]
     pub id: String,
     pub speaker: String,
     pub text: String,
@@ -212,22 +248,29 @@ fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationRequirements {
+    /// Host-owned. Ignored on input.
+    #[serde(default)]
     pub source_mode: SourceMode,
+    /// Host-owned. Ignored on input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_path: Option<GenerationPath>,
+    /// Host-owned. Copied from PlanState, never echoed by the model.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub aspect_ratio: String,
+    /// Host-owned. Ignored on input.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub priorities: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceMode {
+    #[default]
     TextToVideo,
     ImageToVideo,
     ReferenceToVideo,

@@ -1,10 +1,10 @@
 //! ElevenLabs direct API adapter for the in-desk Voice tab.
 
+use crate::ctx::HostCtx;
 use crate::settings;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use crate::ctx::HostCtx;
 
 const API_BASE: &str = "https://api.elevenlabs.io";
 const USER_AGENT: &str = "VideoWorkbench/0.1 (desktop; elevenlabs-voice)";
@@ -60,10 +60,7 @@ pub struct LibraryPage {
     pub next_page_token: Option<String>,
 }
 
-fn label(
-    labels: &std::collections::HashMap<String, String>,
-    key: &str,
-) -> Option<String> {
+fn label(labels: &std::collections::HashMap<String, String>, key: &str) -> Option<String> {
     labels
         .get(key)
         .map(|value| value.trim().to_string())
@@ -82,8 +79,13 @@ pub fn elevenlabs_list_voices(
     let mut req = client
         .get(format!("{API_BASE}/v2/voices"))
         .header("xi-api-key", &key)
-        .query(&[("page_size", page_size.unwrap_or(40).clamp(1, 100).to_string())]);
-    if let Some(search) = search.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+        .query(&[(
+            "page_size",
+            page_size.unwrap_or(40).clamp(1, 100).to_string(),
+        )]);
+    if let Some(search) = search
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
     {
         req = req.query(&[("search", search)]);
     }
@@ -250,7 +252,9 @@ pub fn elevenlabs_design_voice(
         return Err("Voice description is required.".into());
     }
     if sample.chars().count() < 100 {
-        return Err("Sample text must be at least 100 characters for ElevenLabs voice design.".into());
+        return Err(
+            "Sample text must be at least 100 characters for ElevenLabs voice design.".into(),
+        );
     }
     if sample.chars().count() > 1000 {
         sample = sample.chars().take(1000).collect();

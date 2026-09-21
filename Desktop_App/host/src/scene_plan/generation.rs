@@ -93,7 +93,11 @@ mod tests {
 
     #[test]
     fn render_request_comes_from_derived_timing_not_the_model() {
-        let h = parse_handoff_yaml(&lipsync_scene_yaml(2, "Hello there friend.")).unwrap();
+        let h = parse_handoff_yaml(&lipsync_scene_yaml(
+            2,
+            "This is a twelve word sentence that needs a reliable duration estimate.",
+        ))
+        .unwrap();
         assert!(RenderRequest::from_handoff(&h)
             .unwrap_err()
             .contains("never validated"));

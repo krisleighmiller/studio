@@ -1,8 +1,8 @@
+use crate::ctx::HostCtx;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
-use crate::ctx::HostCtx;
 
 const ATLAS_MODELS_URL: &str = "https://api.atlascloud.ai/api/v1/models";
 
@@ -32,7 +32,8 @@ pub struct ApiEntry {
 
 fn settings_path(app: &HostCtx) -> Result<PathBuf, String> {
     let dir = app.settings_dir();
-    fs::create_dir_all(dir).map_err(|error| format!("Could not create config directory: {error}"))?;
+    fs::create_dir_all(dir)
+        .map_err(|error| format!("Could not create config directory: {error}"))?;
     Ok(dir.join("settings.json"))
 }
 
@@ -123,7 +124,10 @@ fn migrate_legacy_providers(mut value: Value) -> Value {
     }
 
     // Rewrite capabilityDefaults / selectedChatModel providerId → apiId
-    if let Some(caps) = value.get_mut("capabilityDefaults").and_then(|v| v.as_object_mut()) {
+    if let Some(caps) = value
+        .get_mut("capabilityDefaults")
+        .and_then(|v| v.as_object_mut())
+    {
         for (_slot, ref_val) in caps.iter_mut() {
             rewrite_model_ref(ref_val, &id_map, apis.first());
         }
@@ -190,7 +194,10 @@ fn ensure_apis_nonempty(mut value: Value) -> Value {
         .to_string();
     let id_map = serde_json::Map::new();
     let fallback = json!({ "id": first_id });
-    if let Some(caps) = value.get_mut("capabilityDefaults").and_then(|v| v.as_object_mut()) {
+    if let Some(caps) = value
+        .get_mut("capabilityDefaults")
+        .and_then(|v| v.as_object_mut())
+    {
         for (_slot, ref_val) in caps.iter_mut() {
             rewrite_model_ref(ref_val, &id_map, Some(&fallback));
         }
@@ -206,10 +213,10 @@ pub fn load_settings(app: HostCtx) -> Result<Value, String> {
     if !path.exists() {
         return Ok(default_settings());
     }
-    let raw = fs::read_to_string(&path)
-        .map_err(|error| format!("Could not read settings: {error}"))?;
-    let value: Value = serde_json::from_str(&raw)
-        .map_err(|error| format!("Could not parse settings: {error}"))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|error| format!("Could not read settings: {error}"))?;
+    let value: Value =
+        serde_json::from_str(&raw).map_err(|error| format!("Could not parse settings: {error}"))?;
     let had_legacy = value.get("providers").is_some() && value.get("apis").is_none();
     let migrated = migrate_legacy_providers(value);
     // Persist conversion once so keys are not stuck in the old shape.
@@ -290,7 +297,9 @@ pub fn find_api(app: &HostCtx, api_id: &str) -> Result<ApiEntry, String> {
 pub fn find_api_by_kind(app: &HostCtx, kind: &str) -> Result<ApiEntry, String> {
     let apis = list_apis(app)?;
     apis.iter()
-        .find(|api| api.enabled && api.kind == kind && (!api.api_key.trim().is_empty() || kind == "ollama"))
+        .find(|api| {
+            api.enabled && api.kind == kind && (!api.api_key.trim().is_empty() || kind == "ollama")
+        })
         .cloned()
         .or_else(|| apis.into_iter().find(|api| api.kind == kind))
         .ok_or_else(|| format!("Add a {kind} API in Settings first."))
@@ -344,19 +353,28 @@ pub fn api_key_for(app: &HostCtx, api_id: &str) -> Result<(ApiEntry, String), St
     let key = api.api_key.trim().to_string();
     let key_optional = api.kind == "ollama" || is_local_llm_base(&api.base_url);
     if key.is_empty() && !key_optional {
-        return Err(format!("Add an API key for “{}” in Settings first.", api.name));
+        return Err(format!(
+            "Add an API key for “{}” in Settings first.",
+            api.name
+        ));
     }
     Ok((api, key))
 }
 
-pub fn fetch_api_catalog(kind: String, api_key: String, base_url: String) -> Result<Vec<CatalogModel>, String> {
+pub fn fetch_api_catalog(
+    kind: String,
+    api_key: String,
+    base_url: String,
+) -> Result<Vec<CatalogModel>, String> {
     match kind.as_str() {
         "atlas-cloud" => fetch_atlas_catalog(api_key),
         "openai-chat" => fetch_openai_catalog(api_key, base_url),
         "ollama" => fetch_ollama_catalog(base_url),
         "gemini" => fetch_gemini_catalog(api_key, base_url),
         "sync-labs" => crate::sync_labs::fetch_catalog(&api_key, &base_url),
-        other => Err(format!("Catalog fetch is not supported for protocol “{other}”.")),
+        other => Err(format!(
+            "Catalog fetch is not supported for protocol “{other}”."
+        )),
     }
 }
 
@@ -479,7 +497,9 @@ fn fetch_openai_catalog(api_key: String, base_url: String) -> Result<Vec<Catalog
         .text()
         .map_err(|error| format!("Could not read catalog response: {error}"))?;
     if !status.is_success() {
-        return Err(format!("OpenAI-compatible catalog failed ({status}): {body}"));
+        return Err(format!(
+            "OpenAI-compatible catalog failed ({status}): {body}"
+        ));
     }
     let parsed: Value = serde_json::from_str(&body)
         .map_err(|error| format!("Could not parse catalog JSON: {error}"))?;

@@ -146,6 +146,56 @@ pub fn broll_scene_yaml(cut: u32) -> String {
     broll_cut_yaml(1, cut)
 }
 
+/// Creative-only YAML: no provider, stage, cue ids, generation_requirements, or durations.
+pub fn slim_lipsync_yaml(cut: u32, text: &str) -> String {
+    format!(
+        r#"source_scene: 1
+cut: {cut}
+title: Sam addresses the camera
+scene_type: character_performance
+continuity:
+  group: standalone
+  relation_to_previous: new_setup
+  opening_state: "Sam faces the camera in a medium shot."
+  closing_state: "Sam settles in the same position."
+editing:
+  pace: natural
+  transition_in: cut
+  transition_out: cut
+speech:
+  mode: source_video_lipsync
+  cues:
+    - speaker: Sam
+      text: "{text}"
+      on_camera: true
+      delivery: calm, conversational
+prompt: |-
+  Sam faces the camera and speaks naturally. Locked-off camera with no zoom.
+negative_prompt: "sideways scene, rotated horizon"
+"#
+    )
+}
+
+pub fn slim_broll_yaml(cut: u32) -> String {
+    format!(
+        r#"source_scene: 1
+cut: {cut}
+title: City at dusk
+scene_type: b_roll
+continuity:
+  group: standalone
+  relation_to_previous: new_setup
+editing:
+  transition_in: cut
+  transition_out: dissolve
+speech:
+  mode: none
+prompt: |-
+  Slow aerial drift over a city skyline at dusk, warm practicals switching on.
+"#
+    )
+}
+
 pub fn cut_markdown(source_scene: u32, cut: u32, yaml: &str) -> String {
     format!("### Scene {source_scene} — Cut {cut}\n\n#### Atlas Generation Handoff\n\n```yaml\n{}\n```\n", yaml.trim_end())
 }

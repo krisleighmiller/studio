@@ -65,7 +65,11 @@ impl RenderDurationPolicy {
             RenderDurationPolicy::Buckets { seconds } => {
                 let mut sorted = seconds.clone();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                sorted.iter().copied().find(|b| *b + 1e-9 >= minimum_source_seconds).ok_or_else(|| {
+                sorted
+                    .iter()
+                    .copied()
+                    .find(|b| *b + 1e-9 >= minimum_source_seconds)
+                    .ok_or_else(|| {
                     format!(
                         "minimum source duration {:.2}s exceeds the largest provider render bucket {:.2}s (buckets: {:?})",
                         minimum_source_seconds,
@@ -93,6 +97,25 @@ impl RenderDurationPolicy {
                     ));
                 }
                 Ok(round2(chosen))
+            }
+        }
+    }
+
+    /// The next larger legal duration after `current`, if the lane has one.
+    pub fn next_above(&self, current: f64) -> Option<f64> {
+        match self {
+            RenderDurationPolicy::Buckets { seconds } => {
+                let mut sorted = seconds.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.iter().copied().find(|b| *b > current + 1e-9)
+            }
+            RenderDurationPolicy::Continuous {
+                max_seconds,
+                step_seconds,
+                ..
+            } => {
+                let next = round2(current + step_seconds);
+                (next <= max_seconds + 1e-9).then_some(next)
             }
         }
     }
@@ -179,6 +202,12 @@ pub struct HostConfig {
     pub model_buckets: Vec<ModelBucketRule>,
     #[serde(default, skip_serializing_if = "LaneModels::is_empty")]
     pub lane_models: LaneModels,
+    #[serde(default = "default_head_handle")]
+    pub head_handle_seconds: f64,
+    #[serde(default = "default_tail_handle")]
+    pub tail_handle_seconds: f64,
+    #[serde(default = "default_language")]
+    pub default_language: String,
 }
 
 fn default_wpm() -> f64 {
@@ -186,6 +215,15 @@ fn default_wpm() -> f64 {
 }
 fn default_buckets() -> RenderDurationPolicy {
     RenderDurationPolicy::buckets(&[5.0, 10.0])
+}
+fn default_head_handle() -> f64 {
+    0.5
+}
+fn default_tail_handle() -> f64 {
+    0.5
+}
+fn default_language() -> String {
+    "en".into()
 }
 
 impl Default for HostConfig {
@@ -198,11 +236,22 @@ impl Default for HostConfig {
             reference_to_video_render: default_buckets(),
             model_buckets: default_model_bucket_rules(),
             lane_models: LaneModels::default(),
+            head_handle_seconds: default_head_handle(),
+            tail_handle_seconds: default_tail_handle(),
+            default_language: default_language(),
         }
     }
 }
 
 impl HostConfig {
+    pub fn choose_render_duration(
+        &self,
+        lane: RenderLane,
+        minimum_source_seconds: f64,
+    ) -> Result<f64, String> {
+        self.policy_for(lane).choose(minimum_source_seconds)
+    }
+
     pub fn policy_for(&self, lane: RenderLane) -> &RenderDurationPolicy {
         match lane {
             RenderLane::TextToVideo => &self.text_to_video_render,
@@ -289,6 +338,8 @@ mod tests {
         let p = RenderDurationPolicy::buckets(&[10.0, 5.0]);
         assert_eq!(p.choose(3.0).unwrap(), 5.0);
         assert_eq!(p.choose(8.0).unwrap(), 10.0);
+        assert_eq!(p.next_above(5.0), Some(10.0));
+        assert_eq!(p.next_above(10.0), None);
         assert!(p
             .choose(10.01)
             .unwrap_err()

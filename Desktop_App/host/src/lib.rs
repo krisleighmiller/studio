@@ -179,6 +179,15 @@ pub fn dispatch(
         }
         "voice_stop_recording" => to_value(voice::voice_stop_recording(recorder)),
         "voice_recording_level" => to_value(voice::voice_recording_level(recorder)),
+        "voice_attach_existing" => {
+            let request = args
+                .get("request")
+                .cloned()
+                .ok_or_else(|| "Missing request".to_string())?;
+            let request: voice::AttachExistingVoiceRequest = serde_json::from_value(request)
+                .map_err(|error| format!("Invalid attach voice request: {error}"))?;
+            to_value(voice::voice_attach_existing(request))
+        }
         "voice_save_recording" => {
             let request = args
                 .get("request")
@@ -213,10 +222,20 @@ pub fn dispatch(
         "workflow_save_intent" => workflow::cmd_save_intent(args),
         "workflow_approve_intent" => workflow::cmd_approve_intent(args),
         "workflow_set_strategy" => workflow::cmd_set_strategy(args),
+        "workflow_save_profile" => workflow::cmd_save_profile(args),
+        "workflow_set_requirement_status" => workflow::cmd_set_requirement_status(args),
+        "workflow_add_requirement" => workflow::cmd_add_requirement(args),
         "workflow_backfill_sketches" => workflow::cmd_backfill_sketches(args),
         "workflow_draft_sketches" => workflow::cmd_draft_sketches(app, args),
         "workflow_update_sketch" => workflow::cmd_update_sketch(args),
         "workflow_save_sketch" => workflow::cmd_save_sketch(args),
+        "workflow_set_animatic_duration" => workflow::cmd_set_animatic_duration(args),
+        "workflow_reorder_animatic" => workflow::cmd_reorder_animatic(args),
+        "workflow_reorder_cuts" => workflow::cmd_reorder_cuts(args),
+        "workflow_approve_animatic" => workflow::cmd_approve_animatic(args),
+        "workflow_attach_scratch_audio" => workflow::cmd_attach_scratch_audio(args),
+        "workflow_clear_scratch_audio" => workflow::cmd_clear_scratch_audio(args),
+        "workflow_clear_package_review" => workflow::cmd_clear_package_review(args),
         "workflow_draft_look" => workflow::cmd_draft_look(app, args),
         "workflow_update_look_slot" => workflow::cmd_update_look_slot(args),
         "workflow_attach_look" => workflow::cmd_attach_look(args),
@@ -224,8 +243,25 @@ pub fn dispatch(
         "workflow_reject_look" => workflow::cmd_reject_look(args),
         "workflow_delete_look" => workflow::cmd_delete_look(args),
         "workflow_generate_look" => workflow::cmd_generate_look(args),
+        "workflow_generate_wardrobe_plate" => workflow::cmd_generate_wardrobe_plate(args),
+        "workflow_delete_wardrobe_plate" => workflow::cmd_delete_wardrobe_plate(args),
         "workflow_draft_start_frame_prompt" => workflow::cmd_draft_start_frame_prompt(app, args),
         "workflow_save_start_frame_prompt" => workflow::cmd_save_start_frame_prompt(args),
+        "workflow_save_production_prompt" => workflow::cmd_save_production_prompt(args),
+        "workflow_refresh_production_handoff" => workflow::cmd_refresh_production_handoff(args),
+        "workflow_sync_production_notes" => workflow::cmd_sync_production_notes(app, args),
+        "workflow_prepare_render" => workflow::cmd_prepare_render(args),
+        "workflow_set_visual_source" => workflow::cmd_set_visual_source(args),
+        "workflow_bind_continuity_frame" => workflow::cmd_bind_continuity_frame(args),
+        "workflow_set_take_status" => workflow::cmd_set_take_status(args),
+        "workflow_delete_take" => workflow::cmd_delete_take(args),
+        "workflow_prepare_assemble" => workflow::cmd_prepare_assemble(args),
+        "workflow_mark_cut_version" => workflow::cmd_mark_cut_version(args),
+        "workflow_set_cut_version_stage" => workflow::cmd_set_cut_version_stage(args),
+        "workflow_lock_picture" => workflow::cmd_lock_picture(args),
+        "workflow_set_post_status" => workflow::cmd_set_post_status(args),
+        "workflow_set_editorial_path" => workflow::cmd_set_editorial_path(args),
+        "workflow_check_deliverable" => workflow::cmd_check_deliverable(args),
         "workflow_generate_start_frame" => workflow::cmd_generate_start_frame(args),
         "workflow_edit_start_frame" => workflow::cmd_edit_start_frame(args),
         "workflow_attach_start_frame" => workflow::cmd_attach_start_frame(args),

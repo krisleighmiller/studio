@@ -1,12 +1,19 @@
 //! V2 workflow: typed project state and import from existing folders.
+pub mod animatic;
+pub mod breakdown;
 pub mod characters;
+pub mod identity;
 pub mod import;
 pub mod intent;
 pub mod llm;
 pub mod look;
+pub mod post;
+pub mod production;
+pub mod recipe;
 pub mod report;
 pub mod route;
 pub mod sketches;
+pub mod sources;
 pub mod start_frames;
 pub mod state;
 pub mod validate;
@@ -16,13 +23,17 @@ pub use report::{project_report, MixCounts, ProjectReport, SceneReport};
 pub use route::{classify_planning, PlanningKind};
 pub use state::{
     AssetRecord, AssetRole, CharacterProfile, CharacterRecord, CutRecord, ProjectState,
-    SceneRecord, STATE_REL,
+    SceneRecord, VisualSourceSpec, VisualSourceStrategy, STATE_REL,
 };
 
 use crate::ctx::HostCtx;
+use crate::director_actions::{
+    format_approval_request, validate_action, ActionKind, DirectorAction,
+};
+use crate::scene_plan::handoff::CutId;
 use crate::scene_plan::strategy::SceneStrategy;
-use crate::workflow::state::{AssetStatus, MouthPolicy, ShotRole};
-use serde_json::{json, Value};
+use crate::workflow::state::{AssetStatus, MouthPolicy, ShotRole, TakeStatus};
+use serde_json::{json, Map, Value};
 use std::path::Path;
 
 fn arg_path(args: &Value, key: &str) -> Result<String, String> {
@@ -186,11 +197,117 @@ pub fn cmd_set_strategy(args: &Value) -> Result<Value, String> {
     result_with_note(imported, format!("Strategy set to {}.", strategy.label()))
 }
 
+pub fn cmd_save_profile(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let mut profile: crate::workflow::state::ProductionProfile = args
+        .get("profile")
+        .cloned()
+        .ok_or_else(|| "Missing profile".to_string())
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|error| format!("invalid production profile: {error}"))
+        })?;
+    if crate::workflow::state::ProductionRecipe::parse(profile.recipe.as_str()).is_none() {
+        return Err(format!("Unknown recipe `{}`.", profile.recipe.as_str()));
+    }
+    if profile.deliverables.is_empty() {
+        return Err("A production profile needs a deliverable.".into());
+    }
+    for deliverable in &mut profile.deliverables {
+        if deliverable.name.trim().is_empty() {
+            return Err("A deliverable needs a name.".into());
+        }
+        if deliverable.id.trim().is_empty() {
+            deliverable.id = crate::workflow::state::deliverable_id(&deliverable.name);
+        }
+    }
+    let mut state = import::load_state(Path::new(&root))?;
+    state.profile = Some(profile);
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(imported, "Production profile saved.")
+}
+
+pub fn cmd_set_requirement_status(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let requirement_id =
+        opt_str(args, "requirementId").ok_or_else(|| "Missing requirement id".to_string())?;
+    let status = opt_str(args, "status")
+        .as_deref()
+        .and_then(crate::workflow::state::RequirementStatus::parse)
+        .ok_or_else(|| {
+            "status must be missing, draft, present, approved, or deferred".to_string()
+        })?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let requirement = state
+        .requirement_mut(&requirement_id)
+        .ok_or_else(|| format!("requirement {requirement_id} not found"))?;
+    requirement.status = status;
+    requirement.status_override = true;
+    let name = requirement.name.clone();
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(imported, format!("Set {name} to {}.", status.label()))
+}
+
+pub fn cmd_add_requirement(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let name = opt_str(args, "name").ok_or_else(|| "Missing requirement name".to_string())?;
+    let kind = opt_str(args, "kind")
+        .as_deref()
+        .and_then(crate::workflow::state::RequirementKind::parse)
+        .ok_or_else(|| "Unknown requirement kind".to_string())?;
+    let scene_id = args.get("sceneId").and_then(|value| {
+        value
+            .as_u64()
+            .map(|n| n as u32)
+            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+    });
+    let mut state = import::load_state(Path::new(&root))?;
+    let id = crate::workflow::state::requirement_id(kind, &name);
+    if state
+        .requirements
+        .iter()
+        .any(|requirement| requirement.id == id)
+    {
+        return Err(format!(
+            "A {kind} requirement named {name} already exists.",
+            kind = kind.label()
+        ));
+    }
+    let status = if kind == crate::workflow::state::RequirementKind::Deferred {
+        crate::workflow::state::RequirementStatus::Deferred
+    } else {
+        crate::workflow::state::RequirementStatus::Missing
+    };
+    state
+        .requirements
+        .push(crate::workflow::state::RequirementRecord {
+            id,
+            kind,
+            name: name.clone(),
+            status,
+            scene_ids: scene_id.into_iter().collect(),
+            character_id: None,
+            notes: None,
+            status_override: kind == crate::workflow::state::RequirementKind::Deferred,
+            user_added: true,
+        });
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!("Added {kind} requirement {name}.", kind = kind.label()),
+    )
+}
+
 pub fn cmd_backfill_sketches(args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;
     let replace = arg_bool(args, "replace", true);
     let mut state = import::load_state(Path::new(&root))?;
+    let recipe = state
+        .profile
+        .as_ref()
+        .map(|profile| profile.recipe)
+        .unwrap_or_default();
     let scene = state
         .scenes
         .iter_mut()
@@ -200,6 +317,7 @@ pub fn cmd_backfill_sketches(args: &Value) -> Result<Value, String> {
         scene.strategy = Some(SceneStrategy::CinematicBalanced);
     }
     let n = sketches::backfill_scene(scene, replace);
+    crate::workflow::recipe::clear_unrequired_mouths(crate::workflow::recipe::graph(recipe), scene);
     if n == 0 {
         return Err("No production notes to backfill into cut sketches.".into());
     }
@@ -215,6 +333,11 @@ pub fn cmd_update_sketch(args: &Value) -> Result<Value, String> {
     let scene_id = arg_u32(args, "sceneId")?;
     let cut_n = arg_u32(args, "cut")?;
     let mut state = import::load_state(Path::new(&root))?;
+    let recipe = state
+        .profile
+        .as_ref()
+        .map(|profile| profile.recipe)
+        .unwrap_or_default();
     let scene = state
         .scenes
         .iter_mut()
@@ -234,6 +357,9 @@ pub fn cmd_update_sketch(args: &Value) -> Result<Value, String> {
             .find(|c| c.id.cut == cut_n)
             .ok_or_else(|| format!("cut {cut_n} not found on scene {scene_id}"))?;
         sketches::patch_sketch(cut, shot_role, mouth_policy, title, visual_prompt, subject);
+        if !crate::workflow::recipe::graph(recipe).requires_role("mouth_policy") {
+            crate::workflow::recipe::clear_mouth(cut);
+        }
     }
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_note(imported, format!("Updated sketch for cut {cut_n}."))
@@ -247,6 +373,11 @@ pub fn cmd_save_sketch(args: &Value) -> Result<Value, String> {
         .get("sketch")
         .ok_or_else(|| "Missing sketch".to_string())?;
     let mut state = import::load_state(Path::new(&root))?;
+    let recipe = state
+        .profile
+        .as_ref()
+        .map(|profile| profile.recipe)
+        .unwrap_or_default();
     let cut = state
         .scenes
         .iter_mut()
@@ -254,8 +385,155 @@ pub fn cmd_save_sketch(args: &Value) -> Result<Value, String> {
         .and_then(|scene| scene.cuts.iter_mut().find(|cut| cut.id.cut == cut_n))
         .ok_or_else(|| format!("cut {cut_n} not found on scene {scene_id}"))?;
     sketches::replace_sketch(cut, sketch)?;
+    if !crate::workflow::recipe::graph(recipe).requires_role("mouth_policy") {
+        crate::workflow::recipe::clear_mouth(cut);
+    }
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_note(imported, format!("Saved sketch for cut {cut_n}."))
+}
+
+pub fn cmd_set_animatic_duration(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let shot_id = opt_str(args, "shotId").ok_or_else(|| "Missing shot id".to_string())?;
+    let seconds = arg_f64(args, "durationSeconds")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let scene = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .ok_or_else(|| format!("scene {scene_id} not found"))?;
+    crate::workflow::animatic::set_duration(scene, &shot_id, seconds)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!("Set timing to {seconds:.2}s. Later shot packages need review. Renders were kept."),
+    )
+}
+
+pub fn cmd_reorder_animatic(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let shot_ids = arg_string_list(args, "shotIds")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let scene = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .ok_or_else(|| format!("scene {scene_id} not found"))?;
+    crate::workflow::animatic::reorder(scene, &shot_ids)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        "Animatic order saved. Later shot packages need review. Renders were kept.",
+    )
+}
+
+pub fn cmd_reorder_cuts(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let shot_ids = arg_string_list(args, "shotIds")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    crate::workflow::identity::reorder_cuts(&mut state, scene_id, &shot_ids)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        "Cut order saved. Shot ids are unchanged and existing takes were kept.",
+    )
+}
+
+pub fn cmd_approve_animatic(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let scene = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .ok_or_else(|| format!("scene {scene_id} not found"))?;
+    crate::workflow::animatic::approve(scene)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(imported, "Rough cut approved.")
+}
+
+pub fn cmd_attach_scratch_audio(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let shot_id = opt_str(args, "shotId").ok_or_else(|| "Missing shot id".to_string())?;
+    let source = arg_path(args, "sourcePath")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let scene = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .ok_or_else(|| format!("scene {scene_id} not found"))?;
+    let rel = crate::workflow::animatic::attach_scratch(
+        Path::new(&root),
+        scene,
+        &shot_id,
+        Path::new(&source),
+    )?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(imported, format!("Attached scratch audio `{rel}`."))
+}
+
+pub fn cmd_clear_scratch_audio(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let shot_id = opt_str(args, "shotId").ok_or_else(|| "Missing shot id".to_string())?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let scene = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .ok_or_else(|| format!("scene {scene_id} not found"))?;
+    crate::workflow::animatic::clear_scratch(Path::new(&root), scene, &shot_id)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(imported, "Removed scratch audio.")
+}
+
+pub fn cmd_clear_package_review(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let cut_n = arg_u32(args, "cut")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let cut = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .and_then(|scene| scene.cuts.iter_mut().find(|cut| cut.id.cut == cut_n))
+        .ok_or_else(|| format!("cut {cut_n} not found on scene {scene_id}"))?;
+    cut.package_needs_review = false;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!("Cut {cut_n} shot package marked reviewed."),
+    )
+}
+
+fn arg_f64(args: &Value, key: &str) -> Result<f64, String> {
+    args.get(key)
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_i64().map(|n| n as f64))
+                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        })
+        .ok_or_else(|| format!("Missing or invalid argument: {key}"))
+}
+
+fn arg_string_list(args: &Value, key: &str) -> Result<Vec<String>, String> {
+    args.get(key)
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| format!("Missing or invalid argument: {key}"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(|text| text.to_string())
+                .ok_or_else(|| format!("Invalid {key}"))
+        })
+        .collect()
 }
 
 pub fn cmd_draft_intent(app: &HostCtx, args: &Value) -> Result<Value, String> {
@@ -326,6 +604,11 @@ pub fn cmd_draft_sketches(app: &HostCtx, args: &Value) -> Result<Value, String> 
     let api_id = opt_str(args, "apiId");
     let brief = opt_str(args, "brief").unwrap_or_default();
     let mut state = import::load_state(Path::new(&root))?;
+    let recipe = state
+        .profile
+        .as_ref()
+        .map(|profile| profile.recipe)
+        .unwrap_or_default();
     let strategy_raw = opt_str(args, "strategy");
     let strategy = strategy_raw
         .as_deref()
@@ -377,6 +660,7 @@ pub fn cmd_draft_sketches(app: &HostCtx, args: &Value) -> Result<Value, String> 
             verdict = validate::validate_scene_mix(scene);
         }
     }
+    crate::workflow::recipe::clear_unrequired_mouths(crate::workflow::recipe::graph(recipe), scene);
     let imported = import::save_project(Path::new(&root), state)?;
     let note = if verdict.is_reject() {
         format!(
@@ -564,6 +848,24 @@ pub fn cmd_generate_look(args: &Value) -> Result<Value, String> {
     result_with_pending(imported, note, card)
 }
 
+pub fn cmd_generate_wardrobe_plate(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let (card, note) = look::prepare_wardrobe_plate(Path::new(&root), &mut state, scene_id)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_pending(imported, note, card)
+}
+
+pub fn cmd_delete_wardrobe_plate(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let asset_id = arg_path(args, "assetId")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let path = look::delete_wardrobe_plate(Path::new(&root), &mut state, &asset_id)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(imported, format!("Deleted wardrobe plate `{path}`."))
+}
+
 pub fn cmd_draft_start_frame_prompt(app: &HostCtx, args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;
@@ -643,6 +945,455 @@ pub fn cmd_save_start_frame_prompt(args: &Value) -> Result<Value, String> {
     result_with_note(
         imported,
         format!("Saved start-frame prompt for Scene {scene_id} Cut {cut_number}."),
+    )
+}
+
+pub fn cmd_save_production_prompt(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let cut_number = arg_u32(args, "cut")?;
+    let prompt = opt_str(args, "prompt").ok_or_else(|| "Missing production prompt".to_string())?;
+    let negative = provided_str(args, "negativePrompt").unwrap_or_default();
+    let mut state = import::load_state(Path::new(&root))?;
+    production::sync_from_planning(Path::new(&root), &mut state, scene_id, cut_number)?;
+    let path = production::save_prompt(
+        Path::new(&root),
+        &mut state,
+        scene_id,
+        cut_number,
+        &prompt,
+        &negative,
+    )?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!("Saved production prompt for Scene {scene_id} Cut {cut_number} in `{path}`."),
+    )
+}
+
+pub fn cmd_refresh_production_handoff(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let cut_number = arg_u32(args, "cut")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let path = production::sync_from_planning(Path::new(&root), &mut state, scene_id, cut_number)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!(
+            "Refreshed host-owned source, speech, lane, and timing fields for Scene {scene_id} Cut {cut_number} in `{path}`."
+        ),
+    )
+}
+
+pub fn cmd_sync_production_notes(app: &HostCtx, args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let model = opt_str(args, "modelId").unwrap_or_default();
+    let api_id = opt_str(args, "apiId");
+    let brief = opt_str(args, "brief").unwrap_or_default();
+    let requested_cut = args.get("cut").and_then(|value| {
+        value
+            .as_u64()
+            .map(|number| number as u32)
+            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+    });
+    let mut state = import::load_state(Path::new(&root))?;
+    let cuts: Vec<u32> = match requested_cut {
+        Some(cut) => vec![cut],
+        None => state
+            .scene(scene_id)
+            .ok_or_else(|| format!("scene {scene_id} not found"))?
+            .cuts
+            .iter()
+            .map(|cut| cut.id.cut)
+            .collect(),
+    };
+    if cuts.is_empty() {
+        return Err(format!("scene {scene_id} has no cuts"));
+    }
+    let user = production::draft_user_prompt(&state, scene_id, &cuts, &brief)?;
+    app.emit(
+        "director-progress",
+        json!(format!(
+            "Building full production video prompt{} for Scene {scene_id}…",
+            if cuts.len() == 1 { "" } else { "s" }
+        )),
+    );
+    let (value, _) = llm::complete_json(
+        app,
+        api_id.as_deref(),
+        &model,
+        production::draft_system_prompt(),
+        &user,
+    )?;
+    let drafts = production::parse_drafts(&value, &cuts)?;
+    let mut updated = Vec::new();
+    for (cut, prompt, negative) in drafts {
+        production::sync_from_planning(Path::new(&root), &mut state, scene_id, cut)?;
+        production::save_prompt(
+            Path::new(&root),
+            &mut state,
+            scene_id,
+            cut,
+            &prompt,
+            &negative,
+        )?;
+        updated.push(cut);
+    }
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!(
+            "Built {} full production video prompt(s) from the script, cut sequence, and approved visual sources.",
+            updated.len()
+        ),
+    )
+}
+
+pub fn cmd_prepare_render(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let cut_number = arg_u32(args, "cut")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let (card, note) =
+        production::prepare_render(Path::new(&root), &mut state, scene_id, cut_number)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_pending(imported, note, card)
+}
+
+pub fn cmd_set_visual_source(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let cut_number = arg_u32(args, "cut")?;
+    let strategy_text =
+        opt_str(args, "strategy").ok_or_else(|| "Missing visual-source strategy".to_string())?;
+    let strategy = VisualSourceStrategy::parse(&strategy_text).ok_or_else(|| {
+        "strategy must be preproduction_start_frame, previous_selected_take_exit_frame, shared_reference, no_start_frame, or deferred_manual".to_string()
+    })?;
+    let predecessor = if strategy == VisualSourceStrategy::PreviousSelectedTakeExitFrame {
+        Some(CutId::new(scene_id, arg_u32(args, "predecessorCut")?))
+    } else {
+        None
+    };
+    let asset_id = opt_str(args, "assetId");
+    let mut state = import::load_state(Path::new(&root))?;
+    sources::set_strategy(
+        &mut state,
+        scene_id,
+        cut_number,
+        strategy,
+        predecessor,
+        asset_id.as_deref(),
+    )?;
+    let bound_path = predecessor
+        .filter(|predecessor| {
+            state
+                .scene(predecessor.source_scene)
+                .and_then(|scene| scene.cuts.iter().find(|cut| cut.id == *predecessor))
+                .and_then(|cut| cut.selected_take.as_ref())
+                .is_some()
+        })
+        .map(|_| {
+            sources::bind_selected_exit_frame(Path::new(&root), &mut state, scene_id, cut_number)
+        })
+        .transpose()?;
+    let ready = state
+        .scene(scene_id)
+        .and_then(|scene| scene.cuts.iter().find(|cut| cut.id.cut == cut_number))
+        .is_some_and(|cut| cut.visual_source_ready());
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!(
+            "Saved source strategy `{}` for Scene {scene_id} Cut {cut_number} ({}).{}",
+            strategy.label(),
+            if ready {
+                "render source ready"
+            } else {
+                "planned; concrete source unresolved"
+            },
+            bound_path
+                .map(|path| format!(" Bound selected predecessor exit frame: `{path}`."))
+                .unwrap_or_default()
+        ),
+    )
+}
+
+pub fn cmd_bind_continuity_frame(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let cut_number = arg_u32(args, "cut")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let path =
+        sources::bind_selected_exit_frame(Path::new(&root), &mut state, scene_id, cut_number)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!(
+            "Bound selected predecessor exit frame to Scene {scene_id} Cut {cut_number}: `{path}`."
+        ),
+    )
+}
+
+pub fn cmd_set_take_status(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let cut_number = arg_u32(args, "cut")?;
+    let take_id = opt_str(args, "takeId").ok_or_else(|| "Missing takeId".to_string())?;
+    let status_text = opt_str(args, "status").ok_or_else(|| "Missing take status".to_string())?;
+    let status = TakeStatus::parse(&status_text).ok_or_else(|| {
+        "status must be unreviewed, selected, alternate, rejected, needs_edit, needs_rerender, or used_in_assembly".to_string()
+    })?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let invalidated = sources::set_take_status(&mut state, scene_id, cut_number, &take_id, status)?;
+    let dependent_cuts: Vec<(u32, u32)> = if status == TakeStatus::Selected {
+        let predecessor = CutId::new(scene_id, cut_number);
+        state
+            .scenes
+            .iter()
+            .flat_map(|scene| {
+                scene.cuts.iter().filter_map(move |cut| {
+                    cut.visual_source
+                        .as_ref()
+                        .filter(|source| {
+                            source.strategy == VisualSourceStrategy::PreviousSelectedTakeExitFrame
+                                && source.predecessor == Some(predecessor)
+                        })
+                        .map(|_| (scene.id, cut.id.cut))
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut rebound = 0;
+    for (dependent_scene, dependent_cut) in dependent_cuts {
+        sources::bind_selected_exit_frame(
+            Path::new(&root),
+            &mut state,
+            dependent_scene,
+            dependent_cut,
+        )?;
+        rebound += 1;
+    }
+    let imported = import::save_project(Path::new(&root), state)?;
+    let suffix = if invalidated == 0 {
+        String::new()
+    } else {
+        format!(" {invalidated} dependent continuity source(s) must be rebound.")
+    };
+    result_with_note(
+        imported,
+        format!(
+            "Marked take `{take_id}` as `{}` for Scene {scene_id} Cut {cut_number}.{suffix}{}",
+            status.label(),
+            if rebound == 0 {
+                String::new()
+            } else {
+                format!(" Rebound {rebound} dependent continuity frame(s).")
+            }
+        ),
+    )
+}
+
+pub fn cmd_delete_take(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let cut_number = arg_u32(args, "cut")?;
+    let take_id = opt_str(args, "takeId").ok_or_else(|| "Missing takeId".to_string())?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let path = sources::delete_take(Path::new(&root), &mut state, scene_id, cut_number, &take_id)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!("Deleted video take `{path}` from Scene {scene_id} Cut {cut_number}."),
+    )
+}
+
+pub fn cmd_prepare_assemble(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let scene = state
+        .scene(scene_id)
+        .ok_or_else(|| format!("Scene {scene_id} not found"))?;
+    if scene.cuts.is_empty() {
+        return Err(format!("Scene {scene_id} has no cuts to assemble"));
+    }
+    let mut cuts = scene.cuts.iter().collect::<Vec<_>>();
+    cuts.sort_by_key(|cut| cut.id.cut);
+    let cut_count = cuts.len();
+    let mut missing = Vec::new();
+    let mut selected = Vec::new();
+    for cut in cuts {
+        let take = cut.selected_take.as_ref().and_then(|selected| {
+            cut.takes
+                .iter()
+                .find(|take| take.id == *selected || take.path == *selected)
+        });
+        if let Some(take) = take {
+            selected.push(json!({ "id": cut.id.cut, "video": take.path }));
+        } else {
+            missing.push(cut.id.cut);
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "Select one take for every cut before assembly. Missing: Cut {}.",
+            missing
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", Cut ")
+        ));
+    }
+    let output_path = (1..=1000)
+        .map(|version| {
+            if version == 1 {
+                format!("Final/Scene{scene_id}_master.mp4")
+            } else {
+                format!("Final/Scene{scene_id}_master_v{version}.mp4")
+            }
+        })
+        .find(|relative| !Path::new(&root).join(relative).exists())
+        .ok_or_else(|| "Could not allocate a master output version".to_string())?;
+    let mut inputs = Map::new();
+    inputs.insert("production_path".into(), Value::String("prod.md".into()));
+    inputs.insert("output_path".into(), Value::String(output_path.clone()));
+    // Each entry is a cut, while the legacy assembler's timing metadata is
+    // scene-based. Preserve complete reviewed takes until cut-level metadata lands.
+    inputs.insert("trim".into(), Value::String("full".into()));
+    inputs.insert("caption_mode".into(), Value::String("none".into()));
+    inputs.insert("scenes".into(), Value::Array(selected));
+    let action = DirectorAction {
+        action: ActionKind::RunSpecialist,
+        specialist: Some("assemble".into()),
+        inputs,
+        message: None,
+        op: None,
+        path: None,
+    };
+    let validated =
+        validate_action(action.clone(), Some(&root)).map_err(|error| error.to_string())?;
+    let mut card =
+        format!("Assemble Scene {scene_id}\nCuts: {cut_count}\nMaster: `{output_path}`\n\n");
+    card.push_str(&format_approval_request(&action, &validated));
+    let job_id = state.next_job_id();
+    state.jobs.push(crate::workflow::state::JobRecord {
+        output_path: Some(output_path.clone()),
+        raw_provider_id: Some(format!("scene_{scene_id}")),
+        ..crate::workflow::state::JobRecord::open(job_id, "assemble")
+    });
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_pending(
+        imported,
+        format!("Prepared Scene {scene_id} assembly from {cut_count} selected takes."),
+        card,
+    )
+}
+
+pub fn cmd_mark_cut_version(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let id = post::mark_cut_version(&mut state, scene_id)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!("Marked selected takes as cut version `{id}` for Scene {scene_id}."),
+    )
+}
+
+pub fn cmd_set_cut_version_stage(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let version_id = opt_str(args, "versionId").ok_or_else(|| "Missing versionId".to_string())?;
+    let stage = opt_str(args, "stage")
+        .as_deref()
+        .and_then(post::CutVersionStage::parse)
+        .ok_or_else(|| "Unknown cut version stage".to_string())?;
+    let mut state = import::load_state(Path::new(&root))?;
+    post::set_version_stage(&mut state, scene_id, &version_id, stage)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!("Set `{version_id}` to {}.", stage.label()),
+    )
+}
+
+pub fn cmd_lock_picture(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let version_id = opt_str(args, "versionId").ok_or_else(|| "Missing versionId".to_string())?;
+    let mut state = import::load_state(Path::new(&root))?;
+    post::lock_picture(&mut state, scene_id, &version_id)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!("Picture locked `{version_id}` for Scene {scene_id}."),
+    )
+}
+
+pub fn cmd_set_post_status(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let field = opt_str(args, "field")
+        .as_deref()
+        .and_then(post::PostField::parse)
+        .ok_or_else(|| "Unknown post field".to_string())?;
+    let status = opt_str(args, "status")
+        .as_deref()
+        .and_then(post::PostStatus::parse)
+        .ok_or_else(|| "Unknown post status".to_string())?;
+    let mut state = import::load_state(Path::new(&root))?;
+    post::set_status(&mut state, scene_id, field, status)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!(
+            "Updated Scene {scene_id} post status to {}.",
+            status.label()
+        ),
+    )
+}
+
+pub fn cmd_set_editorial_path(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let path = opt_str(args, "path")
+        .as_deref()
+        .and_then(post::EditorialPath::parse)
+        .ok_or_else(|| "Unknown editorial path".to_string())?;
+    let note = opt_str(args, "note");
+    let mut state = import::load_state(Path::new(&root))?;
+    post::set_editorial(&mut state, scene_id, path, note)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    let decision = match path {
+        post::EditorialPath::HostFfmpeg => "host ffmpeg",
+        post::EditorialPath::ExternalNle => "an external NLE",
+    };
+    result_with_note(
+        imported,
+        format!("Recorded Scene {scene_id} editorial as {decision}."),
+    )
+}
+
+pub fn cmd_check_deliverable(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let deliverable_id =
+        opt_str(args, "deliverableId").ok_or_else(|| "Missing deliverableId".to_string())?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let check = post::check_deliverable(&mut state, scene_id, &deliverable_id)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    let verdict = if check.passed { "passed" } else { "failed" };
+    result_with_note(
+        imported,
+        format!(
+            "Deliverable `{deliverable_id}` {verdict}. {}",
+            check.messages.join(" ")
+        ),
     )
 }
 

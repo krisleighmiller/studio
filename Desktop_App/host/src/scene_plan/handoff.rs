@@ -334,6 +334,9 @@ pub struct CastBinding {
     pub voice_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_name: Option<String>,
+    /// Local clip used when the character has no provider voice id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_sample: Option<String>,
 }
 
 /// Host-owned, recomputed on every validation.

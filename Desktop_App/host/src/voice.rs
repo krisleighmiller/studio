@@ -151,14 +151,13 @@ fn write_profile_files(
     let profile_path = character_directory
         .join("voice")
         .join(format!("{stem}_voice_profile.yaml"));
-    let metadata_path = if let Some(reference) = character_reference_path
+    // The sheet is optional. A guessed or stale path must not block the voice profile.
+    let reference_path = character_reference_path
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        let reference_path = PathBuf::from(reference);
-        if !reference_path.is_file() {
-            return Err("The supplied character reference sheet does not exist.".into());
-        }
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    let metadata_path = if let Some(reference_path) = reference_path {
         append_character_audio_profile(&reference_path, profile)?;
         // Also keep a machine-readable sidecar for pipeline tools.
         let _ = std::fs::write(&profile_path, profile);
@@ -401,6 +400,102 @@ pub struct SaveRecordingRequest {
     pub character_name: String,
     pub sample_text: String,
     pub character_reference_path: Option<String>,
+}
+
+const AUDIO_EXTENSIONS: &[&str] = &["wav", "mp3", "m4a", "ogg", "flac", "aac"];
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachExistingVoiceRequest {
+    pub audio_path: String,
+    pub character_directory: String,
+    pub character_name: String,
+    pub sample_text: String,
+    pub character_reference_path: Option<String>,
+}
+
+fn inside_directory(file: &Path, directory: &Path) -> bool {
+    let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    let directory = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_path_buf());
+    file.starts_with(directory)
+}
+
+/// Register an audio file that is already on disk as this character's voice.
+/// A file already inside the character voice folder stays where it is.
+pub fn voice_attach_existing(
+    request: AttachExistingVoiceRequest,
+) -> Result<SavedVoiceProfile, String> {
+    let character_directory = PathBuf::from(request.character_directory.trim());
+    let source = PathBuf::from(request.audio_path.trim());
+    if !source.is_file() {
+        return Err("That audio file is missing or is no longer available.".into());
+    }
+    let extension = source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !AUDIO_EXTENSIONS.contains(&extension.as_str()) {
+        return Err("Choose a WAV, MP3, M4A, OGG, FLAC, or AAC file.".into());
+    }
+    let voice_directory = voice_dir(&character_directory)?;
+    let audio_path = if inside_directory(&source, &voice_directory) {
+        source
+    } else {
+        let stem = safe_character_name(&request.character_name);
+        let destination = next_audio_path(&voice_directory, &stem, &extension);
+        std::fs::copy(&source, &destination).map_err(|error| {
+            format!("Could not copy the audio file into the voice folder: {error}")
+        })?;
+        destination
+    };
+    let relative_audio_path = audio_path
+        .strip_prefix(&character_directory)
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| {
+            format!(
+                "voice/{}",
+                audio_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("voice_sample.wav")
+            )
+        });
+    let stamp = now_stamp();
+    let profile = format!(
+        "profile_version: 1\n\
+character: {}\n\
+source_mode: existing_file\n\
+provider: null\n\
+model_id: null\n\
+voice_id: null\n\
+voice_name: null\n\
+language: null\n\
+gender: null\n\
+voice_description: \"Existing audio file\"\n\
+settings: {{}}\n\
+prompt: \"\"\n\
+approved_audio:\n\
+  - path: {}\n\
+    purpose: canonical_sample\n\
+    sample_text: {}\n\
+created_at: {}\n\
+updated_at: {}\n",
+        yaml_string(&request.character_name),
+        yaml_string(&relative_audio_path),
+        yaml_string(&request.sample_text),
+        yaml_string(&stamp),
+        yaml_string(&stamp),
+    );
+    write_profile_files(
+        &character_directory,
+        &request.character_name,
+        request.character_reference_path.as_deref(),
+        &profile,
+        &audio_path,
+    )
 }
 
 pub fn voice_save_recording(request: SaveRecordingRequest) -> Result<SavedVoiceProfile, String> {
@@ -658,4 +753,83 @@ updated_at: {}\n",
         &profile,
         &audio_path,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_keeps_a_file_already_in_the_voice_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let character = dir.path().join("Characters/Tom Vale");
+        let voice = character.join("voice");
+        std::fs::create_dir_all(&voice).unwrap();
+        let sample = voice.join("Tom_voice_sample_01.wav");
+        std::fs::write(&sample, b"RIFF").unwrap();
+
+        let saved = voice_attach_existing(AttachExistingVoiceRequest {
+            audio_path: sample.to_string_lossy().into_owned(),
+            character_directory: character.to_string_lossy().into_owned(),
+            character_name: "Tom Vale".into(),
+            sample_text: "Moved sample.".into(),
+            character_reference_path: None,
+        })
+        .unwrap();
+
+        assert_eq!(saved.audio_path, sample.to_string_lossy());
+        let with_missing_sheet = voice_attach_existing(AttachExistingVoiceRequest {
+            audio_path: sample.to_string_lossy().into_owned(),
+            character_directory: character.to_string_lossy().into_owned(),
+            character_name: "Tom Vale".into(),
+            sample_text: "Moved sample.".into(),
+            character_reference_path: Some(
+                character.join("Tom_Vale.md").to_string_lossy().into_owned(),
+            ),
+        });
+        assert!(with_missing_sheet.is_ok(), "{with_missing_sheet:?}");
+        let names: Vec<String> = std::fs::read_dir(&voice)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.iter().any(|name| name == "Tom_voice_sample_01.wav"));
+        assert!(names
+            .iter()
+            .any(|name| name.ends_with("voice_profile.yaml")));
+
+        let tom = crate::scene_plan::assets::AssetRegistry::discover(dir.path())
+            .find_character("Tom")
+            .unwrap()
+            .clone();
+        let voice_asset = tom.voice.expect("voice profile should be discovered");
+        assert!(voice_asset.voice_id.is_empty());
+        assert_eq!(voice_asset.sample_path.as_deref(), Some(sample.as_path()));
+    }
+
+    #[test]
+    fn attach_copies_a_file_from_outside_the_voice_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let character = dir.path().join("Characters/Tom Vale");
+        std::fs::create_dir_all(&character).unwrap();
+        let outside = dir.path().join("old/tom.mp3");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, b"ID3").unwrap();
+
+        let saved = voice_attach_existing(AttachExistingVoiceRequest {
+            audio_path: outside.to_string_lossy().into_owned(),
+            character_directory: character.to_string_lossy().into_owned(),
+            character_name: "Tom Vale".into(),
+            sample_text: String::new(),
+            character_reference_path: None,
+        })
+        .unwrap();
+
+        let audio = PathBuf::from(&saved.audio_path);
+        assert!(audio.is_file());
+        assert!(audio.starts_with(character.join("voice")));
+        assert_ne!(audio, outside);
+        assert!(outside.is_file());
+    }
 }

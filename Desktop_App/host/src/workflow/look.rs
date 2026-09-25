@@ -9,8 +9,8 @@ use crate::director_actions::{
 use crate::scene_plan::assets::name_tokens;
 use crate::workflow::import;
 use crate::workflow::state::{
-    AssetRecord, AssetRole, AssetStatus, CharacterRecord, JobRecord, JobStatus, LookBoard,
-    LookSlot, ProjectState, SceneIntent, SceneRecord,
+    AssetRecord, AssetRole, AssetStatus, CharacterRecord, JobRecord, LookBoard, LookSlot,
+    ProjectState, SceneIntent, SceneRecord,
 };
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -116,13 +116,17 @@ pub fn collect_look_identity_refs(
         if refs.len() >= MAX_LOOK_IDENTITY_REFS {
             break;
         }
-        if let Some(asset) = pick_identity_asset(state, &character.id) {
+        if let Some(asset) = pick_wardrobe_plate(state, scene_id, &character.id, "closeup_front")
+            .or_else(|| pick_identity_asset(state, &character.id))
+        {
             push_unique_ref(&mut refs, character, asset);
         }
         if refs.len() >= MAX_LOOK_IDENTITY_REFS {
             break;
         }
-        if let Some(asset) = pick_body_asset(state, &character.id) {
+        if let Some(asset) = pick_wardrobe_plate(state, scene_id, &character.id, "standing_front")
+            .or_else(|| pick_body_asset(state, &character.id))
+        {
             push_unique_ref(&mut refs, character, asset);
         }
     }
@@ -158,8 +162,19 @@ pub fn collect_approved_look_continuity_refs(
         .iter()
         .filter(|slot| slot.role == AssetRole::WardrobeReference)
         .filter_map(|slot| {
-            let asset_id = slot.approved_asset_id.as_ref()?;
-            let asset = state.asset(asset_id)?;
+            let asset_id = slot.approved_asset_id.clone().or_else(|| {
+                slot.asset_ids
+                    .iter()
+                    .rev()
+                    .find(|id| {
+                        state.asset(id).is_some_and(|asset| {
+                            asset.status == AssetStatus::Approved
+                                && asset.role == AssetRole::WardrobeReference
+                        })
+                    })
+                    .cloned()
+            })?;
+            let asset = state.asset(&asset_id)?;
             if asset.status != AssetStatus::Approved
                 || asset.role != AssetRole::WardrobeReference
                 || !identity_file_exists(root, &asset.path)
@@ -272,6 +287,37 @@ fn whole_word(hay_lower: &str, word: &str) -> bool {
     hay_lower
         .split(|c: char| !c.is_alphanumeric())
         .any(|w| w == word)
+}
+
+fn identity_clothing_instruction(refs: &[LookIdentityRef]) -> String {
+    let plates = refs
+        .iter()
+        .any(|reference| reference.role == AssetRole::WardrobePlate);
+    let sheets = refs
+        .iter()
+        .any(|reference| reference.role != AssetRole::WardrobePlate);
+    if plates && sheets {
+        "Use each attached wardrobe plate for that character's identity and clothing. Keep the plate's garment design, colors, layers, and condition. Where only a model sheet is attached, use it for identity and body proportions, but do not copy its clothes; match the approved scene wardrobe instead.".into()
+    } else if plates {
+        "Use the attached wardrobe plates for identity and clothing. Keep each plate's face, proportions, garment design, colors, layers, and condition. Do not revert to plain or modern clothes.".into()
+    } else {
+        LOOK_IDENTITY_INSTRUCTION.into()
+    }
+}
+
+fn pick_wardrobe_plate<'a>(
+    state: &'a ProjectState,
+    scene_id: u32,
+    character_id: &str,
+    shot: &str,
+) -> Option<&'a AssetRecord> {
+    state.assets.iter().rev().find(|asset| {
+        asset.character_id.as_deref() == Some(character_id)
+            && asset.scene_id == Some(scene_id)
+            && asset.role == AssetRole::WardrobePlate
+            && asset.notes.as_deref() == Some(shot)
+            && asset.status != AssetStatus::Rejected
+    })
 }
 
 fn pick_identity_asset<'a>(state: &'a ProjectState, character_id: &str) -> Option<&'a AssetRecord> {
@@ -719,6 +765,13 @@ pub fn set_asset_status(
         if !slot.asset_ids.iter().any(|id| id == &target) {
             return Err(format!("asset `{target}` is not on look slot `{slot_id}`"));
         }
+        let previous_approved = if status == AssetStatus::Approved {
+            slot.approved_asset_id
+                .clone()
+                .filter(|current| current != &target)
+        } else {
+            None
+        };
         match status {
             AssetStatus::Approved => slot.approved_asset_id = Some(target.clone()),
             AssetStatus::Rejected => {
@@ -728,8 +781,19 @@ pub fn set_asset_status(
             }
             _ => {}
         }
-        target
+        (target, previous_approved)
     };
+    let (target, previous_approved) = target;
+    if let Some(previous) = &previous_approved {
+        if let Some(asset) = state.asset_mut(previous) {
+            asset.status = AssetStatus::Superseded;
+        }
+        crate::workflow::identity::record_version(state, previous, AssetStatus::Superseded);
+        crate::workflow::identity::mark_asset_dependents(state, scene_id, previous);
+    }
+    if status == AssetStatus::Approved {
+        crate::workflow::identity::record_version(state, &target, AssetStatus::Approved);
+    }
     if let Some(asset) = state.asset_mut(&target) {
         asset.status = status;
     }
@@ -754,13 +818,12 @@ pub fn delete_image(
         ));
     }
     let asset = state
-        .asset(asset_id)
+        .assets
+        .iter()
+        .find(|asset| {
+            asset.id == asset_id && asset.role.is_scene_look() && asset.scene_id == Some(scene_id)
+        })
         .ok_or_else(|| format!("look asset `{asset_id}` not found"))?;
-    if !asset.role.is_scene_look() || asset.scene_id != Some(scene_id) {
-        return Err(format!(
-            "asset `{asset_id}` is not a Scene {scene_id} look image"
-        ));
-    }
     if !is_look_rel(&asset.path) {
         return Err(
             "refusing to delete a look asset outside Preproduction/SceneN/references".into(),
@@ -774,7 +837,9 @@ pub fn delete_image(
             .map_err(|error| format!("could not delete `{}`: {error}", path.display()))?;
     }
 
-    state.assets.retain(|asset| asset.id != asset_id);
+    state
+        .assets
+        .retain(|asset| !(asset.id == asset_id && asset.path == rel));
     for asset in &mut state.assets {
         if asset.parent_asset_id.as_deref() == Some(asset_id) {
             asset.parent_asset_id = None;
@@ -854,7 +919,7 @@ pub fn prepare_generate(
     let mut gen_prompt = prompt;
     if !identity_refs.is_empty() {
         gen_prompt.push_str("\n\n");
-        gen_prompt.push_str(LOOK_IDENTITY_INSTRUCTION);
+        gen_prompt.push_str(&identity_clothing_instruction(&identity_refs));
     }
     if !continuity_refs.is_empty() {
         gen_prompt.push_str("\n\n");
@@ -933,21 +998,315 @@ pub fn prepare_generate(
         }
     }
     state.jobs.push(JobRecord {
-        id: job_id,
-        kind: "scene_look".into(),
-        provider: None,
-        model: None,
         input_asset_ids,
-        output_asset_ids: Vec::new(),
-        status: JobStatus::Pending,
         output_path: Some(rel),
         raw_provider_id: Some(slot_id.to_string()),
-        error: None,
+        ..JobRecord::open(job_id, "scene_look")
     });
     Ok((
         card,
         format!("Look generate ready for `{slot_id}`. Approve the still_image plan in chat."),
     ))
+}
+
+const WARDROBE_PLATE_SHOTS: &[(&str, &str)] = &[
+    (
+        "closeup_front",
+        "Close-up from the front, head and shoulders, face fully visible, neutral expression, eyes to camera.",
+    ),
+    (
+        "standing_front",
+        "Full-body standing front view, entire body in frame including the feet, arms relaxed, neutral expression.",
+    ),
+];
+
+struct WardrobePlatePlan {
+    character_id: String,
+    character_name: String,
+    shot: String,
+    identity_id: String,
+    identity_path: String,
+    rel: String,
+    prompt: String,
+}
+
+/// Every missing close-up and standing plate, wearing the scene's approved wardrobe.
+/// One approval generates the whole set.
+pub fn prepare_wardrobe_plate(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+) -> Result<(String, String), String> {
+    let wardrobe = approved_wardrobe(root, state, scene_id)?;
+    let characters = wardrobe_plate_characters(state, scene_id);
+    if characters.is_empty() {
+        return Err(
+            "No named characters to dress. Name them on the wardrobe prompt or in the scene."
+                .into(),
+        );
+    }
+    let mut missing_sheets = Vec::new();
+    let mut plans = Vec::new();
+    for character in &characters {
+        for (shot, framing) in WARDROBE_PLATE_SHOTS {
+            if pick_wardrobe_plate(state, scene_id, &character.id, shot).is_some() {
+                continue;
+            }
+            let identity = if *shot == "standing_front" {
+                pick_body_asset(state, &character.id)
+                    .or_else(|| pick_identity_asset(state, &character.id))
+            } else {
+                pick_identity_asset(state, &character.id)
+                    .or_else(|| pick_body_asset(state, &character.id))
+            };
+            let Some(identity) = identity else {
+                missing_sheets.push(format!("{} ({shot})", character.name));
+                continue;
+            };
+            if !identity_file_exists(root, &identity.path) {
+                missing_sheets.push(format!("{} ({shot}): {}", character.name, identity.path));
+                continue;
+            }
+            let rel = next_plate_rel(root, scene_id, &character.id, shot);
+            let prompt = format!(
+                "Wardrobe plate of {}. {framing} Plain seamless neutral background. One person only. No scenery, no props, no text.\n\
+Keep the same person as the identity image: face, age, hair, and body proportions.\n\
+Dress them only in the clothes from the wardrobe reference: the same garments, colors, layers, wear, and period. Do not keep the identity image's original clothing.",
+                character.name
+            );
+            plans.push(WardrobePlatePlan {
+                character_id: character.id.clone(),
+                character_name: character.name.clone(),
+                shot: (*shot).to_string(),
+                identity_id: identity.id.clone(),
+                identity_path: identity.path.clone(),
+                rel,
+                prompt,
+            });
+        }
+    }
+    if !missing_sheets.is_empty() {
+        return Err(format!(
+            "These wardrobe plates need a model sheet on disk first: {}.",
+            missing_sheets.join(", ")
+        ));
+    }
+    if plans.is_empty() {
+        let names = characters
+            .iter()
+            .map(|character| character.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "Wardrobe plates already exist for {names}. Delete one to rebuild it."
+        ));
+    }
+    let plate_dir = root.join(format!("Preproduction/Scene{scene_id}/wardrobe_plates"));
+    fs::create_dir_all(&plate_dir)
+        .map_err(|error| format!("could not create wardrobe plate folder: {error}"))?;
+    let batch: Vec<Value> = plans
+        .iter()
+        .map(|plan| {
+            json!({
+                "prompt": plan.prompt,
+                "output_path": plan.rel,
+                "aspect_ratio": "3:4",
+                "reference_images": [plan.identity_path, wardrobe.path],
+            })
+        })
+        .collect();
+    let mut inputs = Map::new();
+    inputs.insert("batch".into(), Value::Array(batch));
+    let action = DirectorAction {
+        action: ActionKind::RunSpecialist,
+        specialist: Some("still_image".into()),
+        inputs,
+        message: None,
+        op: None,
+        path: None,
+    };
+    let root_s = root.to_string_lossy().to_string();
+    let validated = validate_action(action.clone(), Some(&root_s)).map_err(|e| e.to_string())?;
+    let mut lines = vec![format!(
+        "Wardrobe plates · Scene {scene_id} · {} stills",
+        plans.len()
+    )];
+    lines.push(
+        "One approval generates every missing close-up and standing plate. The host saves each 3:4 plate, then moves to the next."
+            .into(),
+    );
+    for plan in &plans {
+        lines.push(format!(
+            "- {} · {} → `{}` (identity `{}`)",
+            plan.character_name, plan.shot, plan.rel, plan.identity_path
+        ));
+    }
+    lines.push(format!("Wardrobe lock: `{}`", wardrobe.path));
+    lines.push(String::new());
+    lines.push(format_approval_request(&action, &validated));
+    let wardrobe_id = wardrobe.asset_id.clone();
+    for plan in &plans {
+        let job_id = state.next_job_id();
+        state.jobs.push(JobRecord {
+            input_asset_ids: vec![plan.identity_id.clone(), wardrobe_id.clone()],
+            output_path: Some(plan.rel.clone()),
+            raw_provider_id: Some(format!("{}|{}", plan.character_id, plan.shot)),
+            ..JobRecord::open(job_id, "wardrobe_plate")
+        });
+    }
+    let count = plans.len();
+    let names = plans
+        .iter()
+        .map(|plan| format!("{} {}", plan.character_name, plan.shot.replace('_', " ")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok((
+        lines.join("\n"),
+        format!("{count} wardrobe plates ready ({names}). Approve the still_image plan in chat."),
+    ))
+}
+
+fn approved_wardrobe(
+    root: &Path,
+    state: &ProjectState,
+    scene_id: u32,
+) -> Result<LookContinuityRef, String> {
+    collect_approved_look_continuity_refs(root, state, scene_id, true)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Approve a wardrobe still before building wardrobe plates.".into())
+}
+
+fn wardrobe_plate_characters(state: &ProjectState, scene_id: u32) -> Vec<&CharacterRecord> {
+    let Some(slot) = state
+        .scene(scene_id)
+        .and_then(|scene| scene.look_board.as_ref())
+        .and_then(|board| {
+            board
+                .slots
+                .iter()
+                .find(|slot| slot.role == AssetRole::WardrobeReference)
+        })
+    else {
+        return Vec::new();
+    };
+    mentioned_look_characters(
+        state,
+        scene_id,
+        AssetRole::WardrobeReference,
+        slot.prompt.as_deref().unwrap_or(""),
+        &slot.title,
+    )
+}
+
+fn next_plate_rel(root: &Path, scene_id: u32, character_id: &str, shot: &str) -> String {
+    let mut index = 1u32;
+    loop {
+        let name = if index == 1 {
+            format!("{character_id}_{shot}.png")
+        } else {
+            format!("{character_id}_{shot}_{index:02}.png")
+        };
+        let rel = format!("Preproduction/Scene{scene_id}/wardrobe_plates/{name}");
+        if !root.join(&rel).exists() {
+            return rel;
+        }
+        index += 1;
+    }
+}
+
+pub fn on_wardrobe_plate_saved(project_root: Option<&str>, save_path: &str) -> Option<String> {
+    let root = project_root.filter(|value| !value.trim().is_empty())?;
+    let root_path = Path::new(root);
+    if !root_path.join(crate::workflow::state::STATE_REL).is_file() {
+        return None;
+    }
+    let mut state = import::load_state(root_path).ok()?;
+    let actual = actual_look_path(root_path, save_path)?;
+    let rel = relativize(root_path, &actual.to_string_lossy());
+    if !is_wardrobe_plate_rel(&rel) {
+        return None;
+    }
+    let scene_id = scene_id_from_look_rel(&rel)?;
+    if state.assets.iter().any(|asset| asset.path == rel) {
+        return Some(format!("Wardrobe plate already registered: `{rel}`."));
+    }
+    let (job_id, raw) = state
+        .jobs
+        .iter()
+        .find(|job| {
+            job.kind == "wardrobe_plate"
+                && job
+                    .output_path
+                    .as_deref()
+                    .is_some_and(|path| same_path_stem(path, &rel))
+        })
+        .map(|job| (job.id.clone(), job.raw_provider_id.clone()))?;
+    let (character_id, shot) = raw
+        .as_deref()
+        .and_then(|value| value.split_once('|'))
+        .map(|(character_id, shot)| (character_id.to_string(), shot.to_string()))?;
+    let asset_id = state.push_asset(AssetRecord {
+        id: String::new(),
+        path: rel.clone(),
+        role: AssetRole::WardrobePlate,
+        status: AssetStatus::Approved,
+        scene_id: Some(scene_id),
+        cut_id: None,
+        character_id: Some(character_id.clone()),
+        source_job_id: Some(job_id.clone()),
+        parent_asset_id: None,
+        notes: Some(shot.clone()),
+    });
+    if let Some(character) = state
+        .characters
+        .iter_mut()
+        .find(|character| character.id == character_id)
+    {
+        if !character.asset_ids.contains(&asset_id) {
+            character.asset_ids.push(asset_id.clone());
+        }
+    }
+    if let Some(job) = state.jobs.iter_mut().find(|job| job.id == job_id) {
+        job.finish(Some(&rel), Some(&asset_id));
+    }
+    let _ = import::save_project(root_path, state);
+    Some(format!(
+        "Registered wardrobe plate `{asset_id}` ({shot}) at `{rel}`. Later stills for this scene will use it instead of the bare model sheet."
+    ))
+}
+
+pub fn delete_wardrobe_plate(
+    root: &Path,
+    state: &mut ProjectState,
+    asset_id: &str,
+) -> Result<String, String> {
+    let asset = state
+        .asset(asset_id)
+        .filter(|asset| asset.role == AssetRole::WardrobePlate)
+        .cloned()
+        .ok_or_else(|| format!("wardrobe plate `{asset_id}` not found"))?;
+    if !is_wardrobe_plate_rel(&asset.path) {
+        return Err(
+            "refusing to delete a wardrobe plate outside Preproduction/SceneN/wardrobe_plates"
+                .into(),
+        );
+    }
+    let path = root.join(&asset.path);
+    if path.is_file() {
+        fs::remove_file(&path)
+            .map_err(|error| format!("could not delete `{}`: {error}", path.display()))?;
+    }
+    state.assets.retain(|item| item.id != asset_id);
+    for character in &mut state.characters {
+        character.asset_ids.retain(|id| id != asset_id);
+    }
+    Ok(asset.path)
+}
+
+fn is_wardrobe_plate_rel(rel: &str) -> bool {
+    let normalized = rel.replace('\\', "/");
+    normalized.contains("Preproduction/Scene") && normalized.contains("/wardrobe_plates/")
 }
 
 /// After still_image writes a file under Preproduction/SceneN/references/, register it.
@@ -1009,11 +1368,7 @@ pub fn on_still_saved(project_root: Option<&str>, save_path: &str) -> Option<Str
         .iter_mut()
         .find(|j| job_id.as_deref() == Some(j.id.as_str()))
     {
-        job.status = JobStatus::Completed;
-        if !job.output_asset_ids.contains(&asset_id) {
-            job.output_asset_ids.push(asset_id.clone());
-        }
-        job.output_path = Some(rel.clone());
+        job.finish(Some(&rel), Some(&asset_id));
     }
     let _ = import::save_project(root_path, state);
     Some(format!(
@@ -1046,8 +1401,7 @@ fn complete_matching_job(state: &mut ProjectState, rel: &str) {
             .as_deref()
             .is_some_and(|path| same_path_stem(path, rel))
     }) {
-        job.status = JobStatus::Completed;
-        job.output_path = Some(rel.to_string());
+        job.finish(Some(rel), None);
     }
 }
 
@@ -1168,7 +1522,7 @@ pub fn format_look_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::state::SceneRecord;
+    use crate::workflow::state::{JobStatus, SceneRecord};
     use serde_json::json;
 
     #[test]
@@ -1335,6 +1689,7 @@ mod tests {
             output_path: Some("Preproduction/Scene1/references/interior_1.png".into()),
             raw_provider_id: Some("s1_look_01".into()),
             error: None,
+            attempts: Vec::new(),
         });
         let rel = next_look_rel_for_state(root, &state, 1, AssetRole::InteriorReference, "png");
         assert_eq!(rel, "Preproduction/Scene1/references/interior_2.png");
@@ -1363,6 +1718,7 @@ mod tests {
             output_path: Some(rel.into()),
             raw_provider_id: Some("s1_look_05".into()),
             error: None,
+            attempts: Vec::new(),
         });
         import::save_project(root, state).unwrap();
         let abs = root.join(rel);
@@ -1407,6 +1763,7 @@ mod tests {
             output_path: Some(requested.into()),
             raw_provider_id: Some("s1_look_01".into()),
             error: None,
+            attempts: Vec::new(),
         });
         import::save_project(root, state).unwrap();
         let actual = root.join("Preproduction/Scene1/references/interior_1.jpg");
@@ -1656,6 +2013,105 @@ mod tests {
     }
 
     #[test]
+    fn wardrobe_plate_replaces_the_closeup_model_sheet() {
+        let mut state = tom_pip_state();
+        state.assets.push(AssetRecord {
+            id: "tom_coat".into(),
+            path: "Preproduction/Scene1/wardrobe_plates/tom_vale_closeup_front.png".into(),
+            role: AssetRole::WardrobePlate,
+            status: AssetStatus::Approved,
+            scene_id: Some(1),
+            cut_id: None,
+            character_id: Some("tom_vale".into()),
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: Some("closeup_front".into()),
+        });
+        let refs = collect_look_identity_refs(
+            &state,
+            1,
+            AssetRole::InteriorReference,
+            "Tom Vale and Pip Vale in the carriage",
+            "Interior",
+        );
+        let paths: Vec<&str> = refs
+            .iter()
+            .map(|reference| reference.path.as_str())
+            .collect();
+        assert!(paths.contains(&"Preproduction/Scene1/wardrobe_plates/tom_vale_closeup_front.png"));
+        assert!(!paths.contains(&"Characters/Tom Vale/model_sheet/tom_closeup_front.png"));
+        assert!(paths.contains(&"Characters/Tom Vale/model_sheet/tom_standing_front.png"));
+    }
+
+    #[test]
+    fn prepare_wardrobe_plate_uses_identity_and_approved_wardrobe() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = tom_pip_state();
+        for path in [
+            "Characters/Tom Vale/model_sheet/tom_closeup_front.png",
+            "Characters/Tom Vale/model_sheet/tom_standing_front.png",
+            "Characters/Pip Vale/model_sheet/pip_closeup_front.png",
+            "Characters/Pip Vale/model_sheet/pip_standing_front.png",
+            "Preproduction/Scene1/references/wardrobe_1.png",
+        ] {
+            let abs = root.join(path);
+            fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            fs::write(&abs, b"png").unwrap();
+        }
+        state.assets.push(AssetRecord {
+            id: "wardrobe_lock".into(),
+            path: "Preproduction/Scene1/references/wardrobe_1.png".into(),
+            role: AssetRole::WardrobeReference,
+            status: AssetStatus::Approved,
+            scene_id: Some(1),
+            cut_id: None,
+            character_id: None,
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: None,
+        });
+        let scene = state.scenes.iter_mut().find(|scene| scene.id == 1).unwrap();
+        let mut wardrobe =
+            LookSlot::new("s1_look_03", AssetRole::WardrobeReference, "Travel coats");
+        wardrobe.prompt = Some("Tom Vale and Pip Vale in worn period coats".into());
+        wardrobe.asset_ids.push("wardrobe_lock".into());
+        wardrobe.approved_asset_id = Some("wardrobe_lock".into());
+        scene.look_board.as_mut().unwrap().slots.push(wardrobe);
+
+        let (card, _) = prepare_wardrobe_plate(root, &mut state, 1).unwrap();
+        assert!(card.contains("4 stills"));
+        assert!(card.contains("Tom Vale"));
+        assert!(card.contains("Pip Vale"));
+        assert!(card.contains("closeup_front"));
+        assert!(card.contains("standing_front"));
+        assert!(card.contains("tom_closeup_front.png"));
+        assert!(card.contains("pip_standing_front.png"));
+        assert!(card.contains("wardrobe_1.png"));
+        let action_json = card.split("```json").nth(1).unwrap_or(&card);
+        assert!(action_json.contains("\"batch\""));
+        assert!(
+            action_json.contains("\"aspect_ratio\": \"3:4\"")
+                || action_json.contains("\"aspect_ratio\":\"3:4\"")
+        );
+        let ids: Vec<_> = state
+            .jobs
+            .iter()
+            .filter(|job| job.kind == "wardrobe_plate")
+            .map(|job| job.raw_provider_id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                Some("tom_vale|closeup_front".into()),
+                Some("tom_vale|standing_front".into()),
+                Some("pip_vale|closeup_front".into()),
+                Some("pip_vale|standing_front".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn delete_image_removes_exact_version_file_and_registry_links() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1687,6 +2143,7 @@ mod tests {
             output_path: Some(rel.into()),
             raw_provider_id: Some("s1_look_01".into()),
             error: None,
+            attempts: Vec::new(),
         });
         let scene = state.scene_mut(1, "The last train");
         let mut board = LookBoard::default();

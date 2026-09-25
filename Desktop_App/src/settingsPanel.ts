@@ -80,6 +80,10 @@ function modelsForSlot(
   const models: Array<CatalogModel & { apiId: string }> = [];
   for (const api of draft.apis) {
     const caps = protocolMeta(api.kind).capabilities;
+    // A saved reference WAV needs a model that accepts reference audio.
+    // Direct ElevenLabs TTS requires a registered voice ID instead, so it
+    // belongs in the profile slot and is not a valid voice-clone backend.
+    if (slot.id === "audio.tts_clone" && api.kind === "elevenlabs") continue;
     if (slot.mediaType === "Video" && !caps.video) continue;
     if (slot.mediaType === "Image" && !caps.image) continue;
     if (slot.mediaType === "Audio" && !caps.audio) continue;

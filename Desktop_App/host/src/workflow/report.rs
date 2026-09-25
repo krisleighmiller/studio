@@ -54,6 +54,9 @@ pub struct SceneReport {
     pub cuts_found: usize,
     pub mix: MixCounts,
     pub approved_start_frames: usize,
+    pub planned_visual_sources: usize,
+    pub render_ready_sources: usize,
+    pub unresolved_visual_sources: usize,
     pub production_notes: bool,
     pub scene_intent: bool,
     pub scene_look: bool,
@@ -77,6 +80,8 @@ pub struct ProjectReport {
     pub scenes: Vec<SceneReport>,
     pub warnings: Vec<String>,
     pub summary: String,
+    pub recipe: crate::workflow::recipe::RecipeReport,
+    pub recipes: Vec<crate::workflow::recipe::RecipeChoice>,
 }
 
 fn scene_report(scene: &SceneRecord) -> SceneReport {
@@ -86,6 +91,17 @@ fn scene_report(scene: &SceneRecord) -> SceneReport {
         .iter()
         .filter(|c| c.approved_start_frame.is_some())
         .count();
+    let planned_visual_sources = scene
+        .cuts
+        .iter()
+        .filter(|cut| cut.visual_source_planned())
+        .count();
+    let render_ready_sources = scene
+        .cuts
+        .iter()
+        .filter(|cut| cut.visual_source_ready())
+        .count();
+    let unresolved_visual_sources = planned_visual_sources.saturating_sub(render_ready_sources);
     let production_notes = scene.cuts.iter().any(|c| c.has_production_note());
     let scene_intent = scene.intent.as_ref().is_some_and(|i| !i.is_empty());
     let scene_look = scene.look_board.as_ref().is_some_and(|b| !b.is_empty());
@@ -99,8 +115,13 @@ fn scene_report(scene: &SceneRecord) -> SceneReport {
     let sketch_mix = mix_verdict.mix;
     let strategy = mix_verdict.strategy;
     let mut warnings = Vec::new();
-    if production_notes && approved_start_frames == 0 {
-        warnings.push("0 approved cut-specific start frames; production notes currently use character identity refs".into());
+    if production_notes && planned_visual_sources == 0 {
+        warnings.push("0 approved visual-source strategies; imported production notes currently choose sources outside workflow state".into());
+    }
+    if unresolved_visual_sources > 0 {
+        warnings.push(format!(
+            "{unresolved_visual_sources} planned visual source(s) await a concrete production asset"
+        ));
     }
     if scene.stages.scene_look == StageStatus::Missing {
         warnings.push("scene look board missing".into());
@@ -127,6 +148,9 @@ fn scene_report(scene: &SceneRecord) -> SceneReport {
         format!("- {} cuts found", scene.cuts.len()),
         format!("- {}", mix.display()),
         format!("- {approved_start_frames} approved cut-specific start frames"),
+        format!(
+            "- {planned_visual_sources} source strategies planned; {render_ready_sources} render ready"
+        ),
     ];
     if production_notes {
         lines.push("- production notes exist".into());
@@ -178,6 +202,9 @@ fn scene_report(scene: &SceneRecord) -> SceneReport {
         cuts_found: scene.cuts.len(),
         mix,
         approved_start_frames,
+        planned_visual_sources,
+        render_ready_sources,
+        unresolved_visual_sources,
         production_notes,
         scene_intent,
         scene_look,
@@ -231,6 +258,15 @@ pub fn project_report(state: &ProjectState) -> ProjectReport {
         scenes,
         warnings,
         summary: summary.trim().to_string(),
+        recipe: crate::workflow::recipe::graph(
+            state
+                .profile
+                .as_ref()
+                .map(|profile| profile.recipe)
+                .unwrap_or_default(),
+        )
+        .report(),
+        recipes: crate::workflow::recipe::choices(),
     }
 }
 

@@ -21,6 +21,15 @@ fn cue_id_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^S(\d+)C(\d+)_[A-Za-z0-9]+$").unwrap())
 }
 
+fn nonempty(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 /// Cut id encoded in a cue id, if the id is well-formed (`S01C02_a`).
 pub fn parse_cue_id(id: &str) -> Option<CutId> {
     let caps = cue_id_re().captures(id.trim())?;
@@ -164,9 +173,14 @@ pub fn validate_scene(
             reference_image: character
                 .and_then(|c| c.best_reference_image())
                 .map(|p| p.to_string_lossy().to_string()),
-            voice_provider: voice.map(|v| v.provider.clone()),
-            voice_id: voice.map(|v| v.voice_id.clone()),
+            voice_provider: voice.and_then(|v| nonempty(&v.provider)),
+            voice_id: voice.and_then(|v| nonempty(&v.voice_id)),
             voice_name: voice.and_then(|v| v.voice_name.clone()),
+            voice_sample: voice.and_then(|v| {
+                v.sample_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+            }),
         });
     }
 

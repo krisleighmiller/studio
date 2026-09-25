@@ -9,7 +9,8 @@ use crate::scene_plan::handoff::CutId;
 use crate::workflow::import;
 use crate::workflow::look;
 use crate::workflow::state::{
-    AssetRecord, AssetRole, AssetStatus, CutRecord, JobRecord, JobStatus, ProjectState, SceneRecord,
+    AssetRecord, AssetRole, AssetStatus, CutRecord, JobRecord, ProjectState, SceneRecord,
+    VisualSourceSpec, VisualSourceStrategy,
 };
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -23,6 +24,7 @@ pub struct GenerationRef {
     pub asset_id: String,
     pub path: String,
     pub label: String,
+    pub wardrobe_plate: bool,
 }
 
 pub fn prompt_system_prompt() -> &'static str {
@@ -331,26 +333,34 @@ fn next_frame_rel(root: &Path, state: &ProjectState, scene_id: u32, cut: u32, ex
     frame_rel(scene_id, cut, 1000, ext)
 }
 
-fn cut_ref_haystack(cut: &CutRecord) -> String {
-    let mut parts = Vec::new();
-    if let Some(title) = &cut.title {
-        parts.push(title.clone());
+fn cut_identity_haystack(cut: &CutRecord) -> String {
+    if cut.sketch.as_ref().and_then(|sketch| sketch.mouth_policy)
+        == Some(crate::workflow::state::MouthPolicy::NoPeople)
+    {
+        return String::new();
     }
+    if let Some(on_camera) = cut
+        .sketch
+        .as_ref()
+        .map(|sketch| &sketch.on_camera)
+        .filter(|on_camera| !on_camera.is_empty())
+    {
+        return on_camera.join("\n");
+    }
+    if let Some(prompt) = cut
+        .start_frame_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        return prompt.to_string();
+    }
+    let mut parts = Vec::new();
     if let Some(subject) = &cut.subject {
         parts.push(subject.clone());
     }
-    if let Some(prompt) = &cut.prompt {
-        parts.push(prompt.clone());
-    }
-    if let Some(prompt) = &cut.start_frame_prompt {
-        parts.push(prompt.clone());
-    }
-    for line in &cut.dialogue {
-        parts.push(line.speaker.clone());
-    }
     if let Some(sketch) = &cut.sketch {
         for value in [
-            sketch.title.as_ref(),
             sketch.subject.as_ref(),
             sketch.speaker.as_ref(),
             sketch.visual_prompt.as_ref(),
@@ -360,8 +370,8 @@ fn cut_ref_haystack(cut: &CutRecord) -> String {
         {
             parts.push(value.clone());
         }
-        parts.extend(sketch.on_camera.iter().cloned());
-        parts.extend(sketch.dialogue.iter().map(|line| line.speaker.clone()));
+    } else {
+        parts.extend(cut.dialogue.iter().map(|line| line.speaker.clone()));
     }
     parts.join("\n")
 }
@@ -380,20 +390,28 @@ pub fn generation_refs(
         .iter()
         .find(|cut| cut.id.cut == cut_number)
         .ok_or_else(|| format!("cut {scene_id}.{cut_number} not found"))?;
-    let hay = cut_ref_haystack(cut);
-    let title = cut.title.as_deref().unwrap_or("");
+    let hay = cut_identity_haystack(cut);
     let identity = look::keep_existing_identity_refs(
         root,
-        look::collect_look_identity_refs(state, scene_id, AssetRole::MoodReference, &hay, title),
+        look::collect_look_identity_refs(state, scene_id, AssetRole::MoodReference, &hay, ""),
     );
     let mut refs: Vec<GenerationRef> = identity
         .into_iter()
-        .map(|reference| GenerationRef {
-            asset_id: reference.asset_id,
-            path: reference.path,
-            label: format!("{} {}", reference.character_name, reference.role.label()),
+        .map(|reference| {
+            let wardrobe_plate = reference.role == AssetRole::WardrobePlate;
+            GenerationRef {
+                asset_id: reference.asset_id,
+                path: reference.path,
+                label: if wardrobe_plate {
+                    format!("{} wardrobe plate", reference.character_name)
+                } else {
+                    format!("{} {}", reference.character_name, reference.role.label())
+                },
+                wardrobe_plate,
+            }
         })
         .collect();
+    let has_character_wardrobe_plate = refs.iter().any(|reference| reference.wardrobe_plate);
 
     let requested: Vec<AssetRole> = cut
         .sketch
@@ -404,6 +422,9 @@ pub fn generation_refs(
     if let Some(board) = &scene.look_board {
         let mut scene_refs = Vec::new();
         for slot in &board.slots {
+            if slot.role == AssetRole::WardrobeReference && has_character_wardrobe_plate {
+                continue;
+            }
             let include = slot.role == AssetRole::WardrobeReference
                 || requested.contains(&slot.role)
                 || fallback_to_approved;
@@ -423,6 +444,7 @@ pub fn generation_refs(
                 asset_id: asset.id.clone(),
                 path: asset.path.clone(),
                 label: format!("{} {}", slot.title, slot.role.label()),
+                wardrobe_plate: false,
             });
         }
         scene_refs.sort_by_key(|reference| {
@@ -450,6 +472,21 @@ pub fn prepare_generate(
     scene_id: u32,
     cut_number: u32,
 ) -> Result<(String, String), String> {
+    let cut = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .and_then(|scene| scene.cuts.iter_mut().find(|cut| cut.id.cut == cut_number))
+        .ok_or_else(|| format!("cut {scene_id}.{cut_number} not found"))?;
+    if cut
+        .visual_source
+        .as_ref()
+        .is_none_or(|source| source.strategy != VisualSourceStrategy::PreproductionStartFrame)
+    {
+        cut.visual_source = Some(VisualSourceSpec::new(
+            VisualSourceStrategy::PreproductionStartFrame,
+        ));
+    }
     let (title, prompt, negative) = {
         let scene = state
             .scene(scene_id)
@@ -496,6 +533,11 @@ pub fn prepare_generate(
     let rel = next_frame_rel(root, state, scene_id, cut_number, "png");
     create_parent(root, &rel)?;
     let mut generation_prompt = format!("{prompt}\n\n{START_FRAME_INSTRUCTION}");
+    if refs.iter().any(|reference| reference.wardrobe_plate) {
+        generation_prompt.push_str(
+            "\n\nWhere a wardrobe plate is attached, that plate locks both identity and costume. Copy its garments, colors, layers, and condition. Do not revert to the original model-sheet clothes.",
+        );
+    }
     if let Some(negative) = negative.filter(|value| !value.trim().is_empty()) {
         generation_prompt.push_str("\n\nAvoid: ");
         generation_prompt.push_str(negative.trim());
@@ -682,6 +724,15 @@ pub fn attach_image(
         parent_asset_id,
         notes: Some("attached cut start frame".into()),
     });
+    let cut = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .and_then(|scene| scene.cuts.iter_mut().find(|cut| cut.id.cut == cut_number))
+        .ok_or_else(|| format!("cut {scene_id}.{cut_number} not found"))?;
+    cut.visual_source = Some(VisualSourceSpec::new(
+        VisualSourceStrategy::PreproductionStartFrame,
+    ));
     Ok(asset_id)
 }
 
@@ -700,13 +751,28 @@ pub fn set_status(
         .path
         .clone();
     if status == AssetStatus::Approved {
-        for asset in &mut state.assets {
-            if asset.cut_id == Some(cut_id)
-                && asset.role.is_cut_image()
-                && asset.status == AssetStatus::Approved
-            {
-                asset.status = AssetStatus::Draft;
+        let previous: Vec<String> = state
+            .assets
+            .iter()
+            .filter(|asset| {
+                asset.id != asset_id
+                    && asset.cut_id == Some(cut_id)
+                    && asset.role.is_cut_image()
+                    && asset.status == AssetStatus::Approved
+            })
+            .map(|asset| asset.id.clone())
+            .collect();
+        for id in &previous {
+            if let Some(asset) = state.asset_mut(id) {
+                asset.status = AssetStatus::Superseded;
             }
+            crate::workflow::identity::record_version(state, id, AssetStatus::Superseded);
+        }
+        crate::workflow::identity::record_version(state, asset_id, AssetStatus::Approved);
+        if !previous.is_empty() {
+            crate::workflow::identity::mark_upstream_changed(
+                state, scene_id, cut_number, &previous,
+            );
         }
     }
     state
@@ -720,9 +786,21 @@ pub fn set_status(
         .and_then(|scene| scene.cuts.iter_mut().find(|cut| cut.id.cut == cut_number))
         .ok_or_else(|| format!("cut {scene_id}.{cut_number} not found"))?;
     match status {
-        AssetStatus::Approved => cut.approved_start_frame = Some(path),
+        AssetStatus::Approved => {
+            cut.approved_start_frame = Some(path);
+            let mut source = VisualSourceSpec::new(VisualSourceStrategy::PreproductionStartFrame);
+            source.asset_id = Some(asset_id.to_string());
+            cut.visual_source = Some(source);
+        }
         AssetStatus::Rejected if cut.approved_start_frame.as_deref() == Some(path.as_str()) => {
             cut.approved_start_frame = None;
+            if let Some(source) = &mut cut.visual_source {
+                if source.strategy == VisualSourceStrategy::PreproductionStartFrame
+                    && source.asset_id.as_deref() == Some(asset_id)
+                {
+                    source.asset_id = None;
+                }
+            }
         }
         _ => {}
     }
@@ -772,6 +850,13 @@ pub fn delete_image(
     {
         if cut.approved_start_frame.as_deref() == Some(asset.path.as_str()) {
             cut.approved_start_frame = None;
+        }
+        if let Some(source) = &mut cut.visual_source {
+            if source.asset_id.as_deref() == Some(asset_id) {
+                source.asset_id = None;
+                source.source_take_id = None;
+                source.frame_time_seconds = None;
+            }
         }
     }
     Ok(asset.path)
@@ -842,17 +927,12 @@ fn push_job(
     rel: String,
     input_asset_ids: Vec<String>,
 ) {
+    let job_id = state.next_job_id();
     state.jobs.push(JobRecord {
-        id: state.next_job_id(),
-        kind: kind.into(),
-        provider: None,
-        model: None,
         input_asset_ids,
-        output_asset_ids: Vec::new(),
-        status: JobStatus::Pending,
         output_path: Some(rel),
         raw_provider_id: Some(format!("s{scene_id}_c{cut_number}")),
-        error: None,
+        ..JobRecord::open(job_id, kind)
     });
 }
 
@@ -895,11 +975,7 @@ fn complete_job(state: &mut ProjectState, rel: &str, asset_id: &str) {
             .as_deref()
             .is_some_and(|path| same_stem(path, rel))
     }) {
-        job.status = JobStatus::Completed;
-        job.output_path = Some(rel.to_string());
-        if !job.output_asset_ids.iter().any(|id| id == asset_id) {
-            job.output_asset_ids.push(asset_id.to_string());
-        }
+        job.finish(Some(rel), Some(asset_id));
     }
 }
 
@@ -1008,7 +1084,7 @@ fn relativize(root: &Path, path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::workflow::state::{
-        CharacterRecord, CutSketch, LookBoard, LookSlot, MouthPolicy, ShotRole,
+        CharacterRecord, CutSketch, JobStatus, LookBoard, LookSlot, MouthPolicy, ShotRole,
     };
 
     fn write(root: &Path, rel: &str) {
@@ -1208,6 +1284,76 @@ mod tests {
     }
 
     #[test]
+    fn explicit_on_camera_character_uses_only_their_wardrobe_plates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = fixture(root);
+        for (id, path, notes) in [
+            (
+                "pip_plate_close",
+                "Preproduction/Scene1/wardrobe_plates/pip_vale_closeup_front.png",
+                "closeup_front",
+            ),
+            (
+                "pip_plate_standing",
+                "Preproduction/Scene1/wardrobe_plates/pip_vale_standing_front.png",
+                "standing_front",
+            ),
+        ] {
+            write(root, path);
+            state.assets.push(AssetRecord {
+                id: id.into(),
+                path: path.into(),
+                role: AssetRole::WardrobePlate,
+                status: AssetStatus::Approved,
+                scene_id: Some(1),
+                cut_id: None,
+                character_id: Some("pip_vale".into()),
+                source_job_id: None,
+                parent_asset_id: None,
+                notes: Some(notes.into()),
+            });
+        }
+        state.characters.push(CharacterRecord {
+            id: "pip_vale".into(),
+            name: "Pip Vale".into(),
+            dir: "Characters/Pip Vale".into(),
+            identity_ready: true,
+            voice_ready: false,
+            profile_path: None,
+            model_sheet_manifest_path: None,
+            profile: Default::default(),
+            asset_ids: vec!["pip_plate_close".into(), "pip_plate_standing".into()],
+            notes: Vec::new(),
+        });
+        let cut = &mut state.scenes[0].cuts[0];
+        cut.prompt = Some("Pip speaks while Tom and Nell sit beside him in the carriage.".into());
+        cut.start_frame_prompt =
+            Some("Medium close-up of Pip Vale alone in warm lamplight.".into());
+        cut.sketch.as_mut().unwrap().on_camera = vec!["Pip Vale".into()];
+        cut.sketch.as_mut().unwrap().reference_roles =
+            vec![AssetRole::WardrobeReference, AssetRole::InteriorReference];
+
+        let refs = generation_refs(root, &state, 1, 1).unwrap();
+        let paths: Vec<&str> = refs
+            .iter()
+            .map(|reference| reference.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                "Preproduction/Scene1/wardrobe_plates/pip_vale_closeup_front.png",
+                "Preproduction/Scene1/wardrobe_plates/pip_vale_standing_front.png",
+                "Preproduction/Scene1/references/interior_1.png",
+            ]
+        );
+        assert!(!paths.iter().any(|path| path.contains("Tom Vale")));
+        assert!(!paths
+            .iter()
+            .any(|path| path.ends_with("references/wardrobe_1.png")));
+    }
+
+    #[test]
     fn prepare_generate_creates_host_path_and_pending_job() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1255,6 +1401,7 @@ mod tests {
             output_path: Some("Preproduction/Scene1/start_frames/cut_1_v2.png".into()),
             raw_provider_id: Some("s1_c1".into()),
             error: None,
+            attempts: Vec::new(),
         });
         assert_eq!(
             next_frame_rel(root, &state, 1, 1, "png"),
@@ -1334,5 +1481,66 @@ mod tests {
         let loaded = import::load_state(root).unwrap();
         assert!(loaded.asset(&id).is_none());
         assert!(loaded.scenes[0].cuts[0].approved_start_frame.is_none());
+    }
+
+    #[test]
+    fn approving_a_new_start_frame_keeps_the_previous_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("Preproduction/Scene1/start_frames")).unwrap();
+        let old_rel = "Preproduction/Scene1/start_frames/cut_1_v1.png";
+        let new_rel = "Preproduction/Scene1/start_frames/cut_1_v2.png";
+        let old_bytes = b"version-one-bytes";
+        fs::write(root.join(old_rel), old_bytes).unwrap();
+        fs::write(root.join(new_rel), b"version-two-bytes").unwrap();
+        let mut state = ProjectState::new();
+        state
+            .scene_mut(1, "Scene")
+            .cuts
+            .push(CutRecord::new(CutId::new(1, 1)));
+        let old_id = state.push_asset(AssetRecord {
+            id: String::new(),
+            path: old_rel.into(),
+            role: AssetRole::CutStartFrame,
+            status: AssetStatus::Draft,
+            scene_id: Some(1),
+            cut_id: Some(CutId::new(1, 1)),
+            character_id: None,
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: None,
+        });
+        let new_id = state.push_asset(AssetRecord {
+            id: String::new(),
+            path: new_rel.into(),
+            role: AssetRole::CutStartFrame,
+            status: AssetStatus::Draft,
+            scene_id: Some(1),
+            cut_id: Some(CutId::new(1, 1)),
+            character_id: None,
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: None,
+        });
+        set_status(&mut state, 1, 1, &old_id, AssetStatus::Approved).unwrap();
+        set_status(&mut state, 1, 1, &new_id, AssetStatus::Approved).unwrap();
+
+        let previous = state.asset(&old_id).unwrap();
+        assert_eq!(previous.id, old_id);
+        assert_eq!(previous.path, old_rel);
+        assert_eq!(previous.status, AssetStatus::Superseded);
+        assert_eq!(fs::read(root.join(old_rel)).unwrap(), old_bytes);
+        assert_eq!(state.asset(&new_id).unwrap().status, AssetStatus::Approved);
+        assert_eq!(
+            state.scenes[0].cuts[0].approved_start_frame.as_deref(),
+            Some(new_rel)
+        );
+        let version = state
+            .versions
+            .iter()
+            .find(|version| version.asset_id == old_id)
+            .unwrap();
+        assert_eq!(version.path, old_rel);
+        assert_eq!(version.status, AssetStatus::Superseded);
     }
 }

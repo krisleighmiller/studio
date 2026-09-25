@@ -4222,7 +4222,7 @@ async function boot(): Promise<void> {
       });
       setChatCollapsed(false);
       renderChat();
-      setStatus("Scene look generate", "Approve in chat to spend");
+      setStatus("Generation ready", "Approve in chat to spend");
     },
   });
   try {

@@ -13,7 +13,11 @@ function hostProjectRoot(): string | null {
   return typeof value === "function" ? value() : (value ?? null);
 }
 
-type SourceMode = "recorded" | "library" | "designed";
+type SourceMode = "recorded" | "library" | "designed" | "existing";
+
+type ExistingAudio = { name: string; path: string };
+
+const AUDIO_FILE = /\.(wav|mp3|m4a|ogg|flac|aac)$/i;
 
 type RecordingSource = { id: number; name: string };
 
@@ -57,6 +61,10 @@ const sourceCards: Record<SourceMode, { title: string; description: string }> = 
     title: "Design a voice",
     description: "Set age, gender, pace, and other traits, then compare generated candidates.",
   },
+  existing: {
+    title: "Use an existing file",
+    description: "Register an audio file already in this character’s voice folder, or browse to one.",
+  },
 };
 
 let host: VoiceHost | null = null;
@@ -99,6 +107,9 @@ let designPreviews: DesignPreview[] = [];
 let selectedDesignId: string | null = null;
 let designPreviewUrl: string | null = null;
 let designAutoplay = false;
+
+let existingAudio: ExistingAudio[] = [];
+let selectedExistingPath: string | null = null;
 
 export function bindVoiceHost(next: VoiceHost): void {
   host = next;
@@ -191,7 +202,7 @@ function inferCharacterTarget(projectRoot: string | null, selectedPath: string |
   }
   characterDirectory = normalized;
   characterName = base.replace(/[_-]/g, " ");
-  characterReferencePath = `${normalized}/${base.replace(/\s+/g, "_")}.md`;
+  characterReferencePath = "";
 }
 
 function buildDesignDescription(): string {
@@ -222,7 +233,7 @@ export function renderVoicePanel(): void {
       <header class="voice-header">
         <div>
           <h1>Character Voice</h1>
-          <p class="settings-lede">Record, pick from the ElevenLabs library, or design from traits. Listen first, then save into the project.</p>
+          <p class="settings-lede">Record, pick from the ElevenLabs library, design from traits, or register a file already on disk.</p>
         </div>
       </header>
 
@@ -248,6 +259,7 @@ export function renderVoicePanel(): void {
             </div>
           </label>
         </div>
+        ${existingAudioNotice()}
       </section>
 
       <section class="voice-section">
@@ -382,6 +394,47 @@ function renderModePanel(): string {
     `;
   }
 
+  if (activeMode === "existing") {
+    const browsed =
+      selectedExistingPath && !existingAudio.some((file) => file.path === selectedExistingPath)
+        ? selectedExistingPath
+        : null;
+    const rows = [
+      ...existingAudio.map((file) => ({ name: file.name, path: file.path })),
+      ...(browsed
+        ? [{ name: browsed.split("/").pop() || browsed, path: browsed }]
+        : []),
+    ];
+    return `
+      <h2>Existing file</h2>
+      <p class="settings-help">A file already in the voice folder stays where it is. A file from somewhere else is copied in, then registered as this character’s voice.</p>
+      <div class="voice-actions">
+        <button type="button" class="ghost-button" data-action="refresh-existing" ${busy ? "disabled" : ""}>Refresh folder</button>
+        <button type="button" class="ghost-button" data-action="browse-existing" ${busy ? "disabled" : ""}>Browse…</button>
+      </div>
+      <div class="voice-catalog">
+        ${
+          rows.length
+            ? rows
+                .map(
+                  (file) => `
+            <article class="voice-row ${selectedExistingPath === file.path ? "selected" : ""}">
+              <div class="voice-copy">
+                <strong>${escapeHtml(file.name)}</strong>
+                <p>${escapeHtml(file.path)}</p>
+              </div>
+              <div class="voice-row-actions">
+                <button type="button" class="primary-button" data-attach-existing="${escapeAttr(file.path)}" ${busy ? "disabled" : ""}>Use this file</button>
+              </div>
+            </article>`,
+                )
+                .join("")
+            : `<p class="settings-help">No audio files in this character’s voice folder yet. Browse to the file you moved.</p>`
+        }
+      </div>
+    `;
+  }
+
   return `
     <h2>Design from characteristics</h2>
     <p class="settings-help">Dropdowns build an ElevenLabs voice description. Generate candidates, listen, then choose one.</p>
@@ -433,6 +486,12 @@ function renderModePanel(): string {
   `;
 }
 
+function existingAudioNotice(): string {
+  if (!existingAudio.length || activeMode === "existing") return "";
+  const names = existingAudio.map((file) => file.name).join(", ");
+  return `<p class="settings-help">Audio already in this voice folder: ${escapeHtml(names)}. Choose “Use an existing file” to register one.</p>`;
+}
+
 function renderSelect(label: string, id: string, value: string, options: string[]): string {
   return `
     <label class="settings-field">
@@ -472,6 +531,10 @@ function wireVoiceDom(root: HTMLElement): void {
       setNotice(null);
       if (mode === "recorded") void loadRecordingSources();
       if (mode === "library" && libraryVoices.length === 0) void loadLibrary(false);
+      if (mode === "existing") {
+        void refreshExistingAudio();
+        return;
+      }
       renderVoicePanel();
     });
   }
@@ -481,7 +544,7 @@ function wireVoiceDom(root: HTMLElement): void {
       const selected = await openDialog({ directory: true, multiple: false, defaultPath: characterDirectory || hostProjectRoot() || undefined });
       if (typeof selected === "string") {
         characterDirectory = selected;
-        renderVoicePanel();
+        void refreshExistingAudio();
       }
     })();
   });
@@ -512,6 +575,18 @@ function wireVoiceDom(root: HTMLElement): void {
   root.querySelector('[data-action="save-recording"]')?.addEventListener("click", () => {
     void saveRecording();
   });
+  root.querySelector('[data-action="refresh-existing"]')?.addEventListener("click", () => {
+    void refreshExistingAudio();
+  });
+  root.querySelector('[data-action="browse-existing"]')?.addEventListener("click", () => {
+    void browseExistingAudio();
+  });
+  for (const button of root.querySelectorAll<HTMLButtonElement>("[data-attach-existing]")) {
+    button.addEventListener("click", () => {
+      const path = button.dataset.attachExisting;
+      if (path) void attachExisting(path);
+    });
+  }
   root.querySelector<HTMLSelectElement>("#voice-mic")?.addEventListener("change", (event) => {
     recordingSourceId = Number((event.target as HTMLSelectElement).value);
   });
@@ -904,11 +979,73 @@ async function saveDesign(generatedVoiceId: string): Promise<void> {
   }
 }
 
+async function refreshExistingAudio(): Promise<void> {
+  const directory = characterDirectory.trim().replace(/\/$/, "");
+  if (!directory) {
+    existingAudio = [];
+    renderVoicePanel();
+    return;
+  }
+  try {
+    const entries = await invoke<{ name: string; path: string; isDir: boolean }[]>("list_dir", {
+      path: `${directory}/voice`,
+    });
+    existingAudio = entries
+      .filter((entry) => !entry.isDir && AUDIO_FILE.test(entry.name) && !entry.name.startsWith("."))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    existingAudio = [];
+  }
+  if (!selectedExistingPath && existingAudio.length === 1) {
+    selectedExistingPath = existingAudio[0].path;
+  }
+  renderVoicePanel();
+}
+
+async function browseExistingAudio(): Promise<void> {
+  const selected = await openDialog({
+    multiple: false,
+    defaultPath: characterDirectory ? `${characterDirectory.replace(/\/$/, "")}/voice` : hostProjectRoot() || undefined,
+    filters: [{ name: "Audio", extensions: ["wav", "mp3", "m4a", "ogg", "flac", "aac"] }],
+  });
+  if (typeof selected !== "string") return;
+  selectedExistingPath = selected;
+  renderVoicePanel();
+}
+
+async function attachExisting(path: string): Promise<void> {
+  if (!ensureCharacterReady()) return;
+  try {
+    busy = true;
+    selectedExistingPath = path;
+    renderVoicePanel();
+    const saved = await invoke<SavedVoiceProfile>("voice_attach_existing", {
+      request: {
+        audioPath: path,
+        characterDirectory,
+        characterName,
+        sampleText,
+        characterReferencePath: characterReferencePath.trim() || null,
+      },
+    });
+    setNotice(null, `Registered ${saved.audioPath}`);
+    host?.onStatus("Voice saved", saved.metadataPath);
+    host?.onSaved?.();
+    busy = false;
+    await refreshExistingAudio();
+  } catch (error) {
+    setNotice(String(error));
+    busy = false;
+    renderVoicePanel();
+  }
+}
+
 export function openVoicePanelContext(projectRoot: string | null, selectedPath: string | null): void {
   clearAllPlayback();
   inferCharacterTarget(projectRoot, selectedPath);
   setNotice(null);
+  selectedExistingPath = null;
   if (activeMode === "recorded") void loadRecordingSources();
-  if (activeMode === "library") void loadLibrary(false);
-  renderVoicePanel();
+  if (activeMode === "library" && libraryVoices.length === 0) void loadLibrary(false);
+  void refreshExistingAudio();
 }

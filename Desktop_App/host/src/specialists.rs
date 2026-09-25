@@ -7,7 +7,8 @@ use crate::chat;
 use crate::ctx::HostCtx;
 use crate::director::{DirectorContext, ModelRef};
 use crate::director_actions::{
-    encode_pending_action, resolve_under_project, DirectorAction, ValidatedAction,
+    encode_pending_action, find_pending_action_in_history, resolve_under_project, DirectorAction,
+    ValidatedAction, PENDING_ACTION_START,
 };
 use crate::media;
 use crate::prompts;
@@ -1616,14 +1617,70 @@ fn run_scene_generation(
     let prompt = request.prompt.clone();
     let duration = request.duration_seconds;
     let aspect = request.aspect_ratio.as_str();
+    let resolution = input_str(inputs, &["resolution"]).unwrap_or("1080p");
     let negative = request.negative_prompt.clone().unwrap_or_default();
 
+    let explicit_start =
+        input_str(inputs, &["source_frame", "source_image", "start_frame"]).map(str::to_string);
+    let workflow_source = if explicit_start.is_none() {
+        project_root
+            .filter(|root| {
+                Path::new(root)
+                    .join(crate::workflow::state::STATE_REL)
+                    .is_file()
+            })
+            .map(|root| {
+                let state = crate::workflow::import::load_state(Path::new(root))?;
+                crate::workflow::sources::resolve_render_source(&state, request.id)
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let start_frame = explicit_start.or_else(|| match &workflow_source {
+        Some(crate::workflow::sources::RenderSourceResolution::Bound(path)) => Some(path.clone()),
+        Some(crate::workflow::sources::RenderSourceResolution::NoStartFrame) => None,
+        Some(crate::workflow::sources::RenderSourceResolution::Unplanned) | None => {
+            request.start_frame.clone()
+        }
+    });
     let mut ref_paths = input_path_list(inputs, &["reference_assets", "reference_images"]);
-    if ref_paths.is_empty() {
+    let explicit_references = !ref_paths.is_empty();
+    if ref_paths.is_empty()
+        && !matches!(
+            &workflow_source,
+            Some(crate::workflow::sources::RenderSourceResolution::Bound(_))
+        )
+    {
         ref_paths = request.reference_images.clone();
     }
+    // An approved workflow start frame is the concrete visual source. Do not
+    // silently add stale model-sheet references from an older handoff.
+    if !explicit_references
+        && matches!(
+            &workflow_source,
+            Some(crate::workflow::sources::RenderSourceResolution::Bound(_))
+        )
+    {
+        ref_paths.clear();
+    }
+    if let Some(old_start) = &request.start_frame {
+        ref_paths.retain(|path| path != old_start);
+    }
+    if let Some(start_frame) = &start_frame {
+        ref_paths.retain(|path| path != start_frame);
+        ref_paths.insert(0, start_frame.clone());
+    }
 
-    let lane = request.lane;
+    let lane = if start_frame.is_some()
+        && matches!(
+            request.lane,
+            RenderLane::TextToVideo | RenderLane::ReferenceToVideo
+        ) {
+        RenderLane::ImageToVideo
+    } else {
+        request.lane
+    };
     let model = match lane {
         RenderLane::AudioDrivenI2v => capability_model(context, "video.lip_sync_text_narration")
             .ok_or_else(|| "Set Settings → Video → Lip sync for audio-driven cuts.".to_string())?,
@@ -1651,6 +1708,7 @@ fn run_scene_generation(
         "prompt": prompt,
         "duration": duration,
         "aspect_ratio": aspect,
+        "resolution": resolution,
     });
     if !negative.is_empty() {
         params["negative_prompt"] = json!(negative);
@@ -1662,6 +1720,11 @@ fn run_scene_generation(
         params["image"] = json!(uploaded_urls[0]);
         params["image_url"] = json!(uploaded_urls[0]);
         params["reference_image"] = json!(uploaded_urls[0]);
+        if start_frame.is_some() {
+            params["start_image"] = json!(uploaded_urls[0]);
+            params["start_image_url"] = json!(uploaded_urls[0]);
+            params["starting_visual_input"] = json!(uploaded_urls[0]);
+        }
     }
 
     app.emit(
@@ -1794,6 +1857,9 @@ pub fn still_image_approval_notes(
     inputs: &Map<String, Value>,
     project_root: Option<&str>,
 ) -> String {
+    if let Some(items) = inputs.get("batch").and_then(|value| value.as_array()) {
+        return still_image_batch_approval_notes(context, items, project_root);
+    }
     let (source, refs) = still_image_sources(inputs);
     let out = input_str(inputs, &["output_path", "save_path"]).unwrap_or("(output_path)");
     let brief = input_str(inputs, &["edit_brief", "prompt", "brief"]).unwrap_or("(brief)");
@@ -1836,6 +1902,138 @@ pub fn still_image_approval_notes(
     body
 }
 
+fn still_image_batch_approval_notes(
+    context: &DirectorContext,
+    items: &[Value],
+    project_root: Option<&str>,
+) -> String {
+    let first = items.first().and_then(|item| item.as_object());
+    let (model_line, slot_line) = match first {
+        Some(item) => match resolve_still_image_model(context, item) {
+            Ok((model, lane, slot)) => (
+                format!("- **model:** `{}`\n", model.model_id),
+                format!("- Settings slot: `{slot}` ({lane})\n"),
+            ),
+            Err(error) => (format!("- model: **unset** ({error})\n"), String::new()),
+        },
+        None => ("- model: **unset** (empty batch)\n".into(), String::new()),
+    };
+    let routing = if context.adult_routing_requested {
+        "- routing: **adult/nsfw** (Adult image slot when set)\n"
+    } else {
+        "- routing: main Generation defaults\n"
+    };
+    let mut body = format!(
+        "### Still image plan\n\
+{routing}\
+{model_line}\
+{slot_line}\
+- stills: {}\n",
+        items.len()
+    );
+    for (index, item) in items.iter().enumerate() {
+        let output = item
+            .get("output_path")
+            .and_then(|value| value.as_str())
+            .unwrap_or("(output_path)");
+        body.push_str(&format!("- {index}. `{output}`\n"));
+    }
+    body.push_str(
+        "\nReply **Approved** to generate every still in this plan with the Settings model, or change the slot in Settings.",
+    );
+    let _ = project_root;
+    body
+}
+
+fn run_still_image_batch(
+    app: &HostCtx,
+    context: &DirectorContext,
+    validated: &ValidatedAction,
+    project_root: Option<&str>,
+) -> Result<SpecialistResult, String> {
+    let Some(items) = validated
+        .action
+        .inputs
+        .get("batch")
+        .and_then(|value| value.as_array())
+        .cloned()
+    else {
+        return Err("still_image batch must be a list of stills".into());
+    };
+    let mut collect = validated
+        .action
+        .inputs
+        .get("collect_prediction_id")
+        .cloned();
+    let mut pending_items = items;
+    let mut saved = Vec::new();
+    while !pending_items.is_empty() {
+        let Some(item) = pending_items[0].as_object().cloned() else {
+            return Err("still_image batch item must be an object".into());
+        };
+        let mut one = validated.clone();
+        one.action.inputs = item;
+        one.action.inputs.remove("batch");
+        if let Some(prediction_id) = collect.take() {
+            one.action
+                .inputs
+                .insert("collect_prediction_id".into(), prediction_id);
+        }
+        match run_still_image(app, context, &one, project_root) {
+            Ok(result) if result.continue_suggested => {
+                let pending = find_pending_action_in_history(&[(
+                    "assistant".to_string(),
+                    result.message.clone(),
+                )]);
+                let Some(pending) = pending else {
+                    return Ok(result);
+                };
+                let mut first = pending.inputs;
+                let prediction = first.remove("collect_prediction_id");
+                let mut batch = vec![Value::Object(first)];
+                batch.extend(pending_items.into_iter().skip(1));
+                let mut action = validated.action.clone();
+                action.inputs = Map::new();
+                action.inputs.insert("batch".into(), Value::Array(batch));
+                if let Some(prediction) = prediction {
+                    action
+                        .inputs
+                        .insert("collect_prediction_id".into(), prediction);
+                }
+                let notice = result
+                    .message
+                    .split(PENDING_ACTION_START)
+                    .next()
+                    .unwrap_or(result.message.as_str())
+                    .trim();
+                let mut message = notice.to_string();
+                if !saved.is_empty() {
+                    message.push_str("\n\nSaved so far:\n");
+                    message.push_str(&saved.join("\n\n"));
+                }
+                message.push_str("\n\n");
+                message.push_str(&encode_pending_action(&action));
+                return Ok(SpecialistResult::cont(message));
+            }
+            Ok(result) => {
+                saved.push(result.message);
+                pending_items.remove(0);
+            }
+            Err(error) => {
+                if saved.is_empty() {
+                    return Err(error);
+                }
+                return Err(format!("{error}\n\nAlready saved:\n{}", saved.join("\n\n")));
+            }
+        }
+    }
+    Ok(SpecialistResult::done(format!(
+        "Still image batch finished ({} stills).\n\n{}",
+        saved.len(),
+        saved.join("\n\n")
+    )))
+}
+
 fn run_still_image(
     app: &HostCtx,
     context: &DirectorContext,
@@ -1843,6 +2041,13 @@ fn run_still_image(
     project_root: Option<&str>,
 ) -> Result<SpecialistResult, String> {
     let inputs = &validated.action.inputs;
+    if inputs
+        .get("batch")
+        .and_then(|value| value.as_array())
+        .is_some()
+    {
+        return run_still_image_batch(app, context, validated, project_root);
+    }
 
     // Resume download for a prediction that timed out inside the wait window.
     if let Some(prediction_id) = input_str(inputs, &["collect_prediction_id"]) {
@@ -1890,6 +2095,15 @@ fn run_still_image(
     };
     if let Some(ar) = input_str(inputs, &["aspect_ratio"]) {
         params["aspect_ratio"] = json!(ar);
+        if source.is_none() && !refs.is_empty() {
+            let prompt = params
+                .get("prompt")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            params["prompt"] = json!(format!(
+                "{prompt}\n\nOutput frame is {ar}. Keep that aspect ratio. Do not copy the aspect ratio of the reference images."
+            ));
+        }
     }
     if let Some(res) = input_str(inputs, &["resolution"]) {
         params["resolution"] = json!(res);
@@ -1949,6 +2163,11 @@ fn maybe_register_workflow_still(
     mut result: SpecialistResult,
 ) -> Result<SpecialistResult, String> {
     if !result.continue_suggested {
+        if let Some(note) = crate::workflow::look::on_wardrobe_plate_saved(project_root, save_path)
+        {
+            result.message.push_str("\n\n");
+            result.message.push_str(&note);
+        }
         if let Some(note) = crate::workflow::look::on_still_saved(project_root, save_path) {
             result.message.push_str("\n\n");
             result.message.push_str(&note);
@@ -2254,13 +2473,6 @@ fn run_text_sync(
     let yaml = yaml.unwrap_or(json!({}));
     let body = extract_yaml_body(&handoff_text);
 
-    if body.contains("previous_selected_out_frame") {
-        return Err(
-            "text_sync rejects continuity out-frame start locks (`previous_selected_out_frame`). Talking shots are standalone new_setups."
-                .into(),
-        );
-    }
-
     let (cue_text, delivery) = extract_first_speech_cue(&body).ok_or_else(|| {
         "text_sync handoff missing speech.cues[].text (visible speaker cue)".to_string()
     })?;
@@ -2327,6 +2539,29 @@ fn run_text_sync(
     let mut character_image =
         input_str(inputs, &["character_image", "source_frame", "source_image"])
             .map(|s| s.to_string());
+    if character_image.is_none() {
+        if let Some(root) = project_root.filter(|root| {
+            Path::new(root)
+                .join(crate::workflow::state::STATE_REL)
+                .is_file()
+        }) {
+            let request = RenderRequest::from_document(&handoff_text)
+                .map_err(|error| format!("Text-sync handoff is not a validated cut: {error}"))?;
+            let state = crate::workflow::import::load_state(Path::new(root))?;
+            match crate::workflow::sources::resolve_render_source(&state, request.id)? {
+                crate::workflow::sources::RenderSourceResolution::Bound(path) => {
+                    character_image = Some(path);
+                }
+                crate::workflow::sources::RenderSourceResolution::NoStartFrame => {
+                    return Err(format!(
+                        "Cut {} uses `no_start_frame`, but text-sync requires an image source. Change its execution strategy or visual-source strategy.",
+                        request.id.cut
+                    ));
+                }
+                crate::workflow::sources::RenderSourceResolution::Unplanned => {}
+            }
+        }
+    }
     if character_image.is_none() {
         if let Some(cr) = headers.get("character_reference") {
             if cr != "none" && !cr.trim().is_empty() {

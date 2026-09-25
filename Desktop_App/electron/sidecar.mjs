@@ -67,24 +67,28 @@ export class Sidecar {
     this.#bin = bin;
     this.#binMtime = fs.statSync(bin).mtimeMs;
     console.error(`[workbench-host] using ${bin}`);
-    this.#child = spawn(bin, [], {
+    const child = spawn(bin, [], {
       stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,
         WORKBENCH_SETTINGS_DIR: this.#settingsDir,
       },
     });
+    this.#child = child;
 
-    this.#child.stderr.on("data", (chunk) => {
+    child.stderr.on("data", (chunk) => {
       const text = chunk.toString().trim();
       if (text) console.error(`[workbench-host] ${text}`);
     });
 
-    const rl = createInterface({ input: this.#child.stdout });
+    const rl = createInterface({ input: child.stdout });
     rl.on("line", (line) => this.#onLine(line));
 
-    this.#child.on("exit", (code, signal) => {
+    child.on("exit", (code, signal) => {
       console.error(`workbench-host exited code=${code} signal=${signal}`);
+      // A development rebuild can replace this process before its asynchronous
+      // exit event arrives. Never let the retired process clear the replacement.
+      if (this.#child !== child) return;
       const err = new Error(`workbench-host exited (code=${code})`);
       for (const [, pending] of this.#pending) {
         pending.reject(err);
@@ -121,6 +125,10 @@ export class Sidecar {
 
   invoke(cmd, args = {}) {
     this.#restartIfBinaryChanged();
+    if (!this.#child) {
+      console.error("[workbench-host] host unavailable — starting replacement sidecar");
+      this.start();
+    }
     if (!this.#child || !this.#child.stdin.writable) {
       return Promise.reject(new Error("workbench-host is not running"));
     }

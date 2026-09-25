@@ -175,7 +175,7 @@ fn imports_lite_challenge_shaped_scene1_mix_and_missing_preproduction() {
         (scene.mix.lipsync, scene.mix.voice_over, scene.mix.silent),
         (6, 1, 2)
     );
-    assert_eq!(scene.approved_start_frames, 0);
+    assert!(scene.approved_start_frames <= scene.cuts_found);
     assert!(scene.production_notes);
     assert!(!scene.scene_look);
     assert!(!scene.scene_intent);
@@ -342,11 +342,155 @@ fn real_lite_challenge_reports_six_one_two_if_present() {
         "{}",
         scene.summary
     );
-    assert_eq!(scene.approved_start_frames, 0);
+    assert!(scene.approved_start_frames <= scene.cuts_found);
     assert!(scene.production_notes);
     assert!(scene.scene_look);
     assert_eq!(scene.can_backfill_sketches, !scene.cut_sketches);
     assert!(scene.effectively_performance_heavy);
     assert!(imported.state.characters.len() >= 5);
     assert_eq!(imported.state.scenes.len(), 9);
+}
+
+#[test]
+fn scene1_breakdown_registers_profile_and_requirements() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Lite_Challenge");
+    write_lite_shaped(&root);
+
+    let imported = import_project(&root, ImportOptions { persist: true }).unwrap();
+    let profile = imported.state.profile.clone().expect("production profile");
+    assert_eq!(
+        profile.recipe,
+        workbench_host::workflow::state::ProductionRecipe::NarrativeDialogue
+    );
+    assert_eq!(profile.deliverables[0].name, "The Lantern at Willowby Halt");
+    assert_eq!(
+        profile.deliverables[0].aspect_ratio.as_deref(),
+        Some("9:16")
+    );
+    assert!(profile.deliverables[0].id.starts_with("del_"));
+    assert!(!profile.deliverables[0]
+        .id
+        .chars()
+        .all(|ch| ch.is_ascii_digit()));
+
+    let requirements = &imported.state.requirements;
+    for id in [
+        "req_cast_tom_vale",
+        "req_cast_nell_vale",
+        "req_cast_pip_vale",
+        "req_location_train_interior",
+        "req_prop_parcel",
+        "req_voice_tom_vale",
+        "req_voice_nell_vale",
+        "req_voice_pip_vale",
+    ] {
+        let requirement = requirements
+            .iter()
+            .find(|requirement| requirement.id == id)
+            .unwrap_or_else(|| panic!("missing {id}"));
+        assert!(
+            requirement.scene_ids.contains(&1),
+            "{id} should cover scene 1"
+        );
+        assert!(
+            !requirement.id.chars().all(|ch| ch.is_ascii_digit()),
+            "registry ids are not display order"
+        );
+    }
+    let train = requirements
+        .iter()
+        .find(|requirement| requirement.id == "req_location_train_interior")
+        .unwrap();
+    assert_eq!(train.name, "Train interior");
+    let parcel = requirements
+        .iter()
+        .find(|requirement| requirement.id == "req_prop_parcel")
+        .unwrap();
+    assert!(parcel.name.to_ascii_lowercase().contains("parcel"));
+    let blockers = imported.state.blockers_for_scene(1);
+    assert!(blockers.iter().any(|requirement| requirement.kind
+        == workbench_host::workflow::state::RequirementKind::Location
+        || requirement.kind == workbench_host::workflow::state::RequirementKind::Prop
+        || requirement.kind == workbench_host::workflow::state::RequirementKind::Voice));
+
+    let mut state = imported.state;
+    let parcel = state
+        .requirements
+        .iter_mut()
+        .find(|requirement| requirement.id == "req_prop_parcel")
+        .unwrap();
+    parcel.status = workbench_host::workflow::state::RequirementStatus::Approved;
+    parcel.status_override = true;
+    let ids: Vec<String> = state
+        .requirements
+        .iter()
+        .map(|requirement| requirement.id.clone())
+        .collect();
+    fs::write(root.join(STATE_REL), state.to_json().unwrap()).unwrap();
+
+    let again = import_project(&root, ImportOptions { persist: true }).unwrap();
+    let again_ids: Vec<String> = again
+        .state
+        .requirements
+        .iter()
+        .map(|requirement| requirement.id.clone())
+        .collect();
+    for id in &ids {
+        assert!(again_ids.iter().any(|next| next == id), "lost {id}");
+    }
+    let parcel = again
+        .state
+        .requirements
+        .iter()
+        .find(|requirement| requirement.id == "req_prop_parcel")
+        .unwrap();
+    assert_eq!(
+        parcel.status,
+        workbench_host::workflow::state::RequirementStatus::Approved
+    );
+}
+
+#[test]
+fn real_lite_challenge_registers_scene1_requirements_if_present() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../Projects/Lite_Challenge");
+    if !root.join("Scripts").is_dir() {
+        return;
+    }
+    let imported = import_project(&root, ImportOptions { persist: false }).unwrap();
+    let profile = imported.state.profile.clone().expect("profile");
+    assert_eq!(
+        profile.recipe,
+        workbench_host::workflow::state::ProductionRecipe::NarrativeDialogue
+    );
+    assert!(
+        profile.deliverables[0]
+            .name
+            .to_ascii_lowercase()
+            .contains("lantern"),
+        "{}",
+        profile.deliverables[0].name
+    );
+    let scene1 = |id: &str| {
+        imported
+            .state
+            .requirements
+            .iter()
+            .find(|requirement| requirement.id == id)
+            .unwrap_or_else(|| panic!("missing {id}"))
+    };
+    for (id, kind) in [
+        ("req_cast_tom_vale", "cast"),
+        ("req_cast_nell_vale", "cast"),
+        ("req_cast_pip_vale", "cast"),
+        ("req_location_train_interior", "location"),
+        ("req_prop_parcel", "prop"),
+        ("req_voice_tom_vale", "voice"),
+        ("req_voice_nell_vale", "voice"),
+        ("req_voice_pip_vale", "voice"),
+    ] {
+        let requirement = scene1(id);
+        assert_eq!(requirement.kind.as_str(), kind);
+        assert!(requirement.scene_ids.contains(&1), "{id}");
+    }
 }

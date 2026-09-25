@@ -91,6 +91,9 @@ export type SceneReport = {
   cuts_found: number;
   mix: MixCounts;
   approved_start_frames: number;
+  planned_visual_sources: number;
+  render_ready_sources: number;
+  unresolved_visual_sources: number;
   production_notes: boolean;
   scene_intent: boolean;
   scene_look: boolean;
@@ -113,6 +116,8 @@ export type ProjectReport = {
   scenes: SceneReport[];
   warnings: string[];
   summary: string;
+  recipe?: RecipeView;
+  recipes?: RecipeChoice[];
 };
 
 export type StageMap = Record<StageId, StageStatus>;
@@ -125,6 +130,49 @@ export type DialogueLine = {
 export type CutId = {
   source_scene: number;
   cut: number;
+};
+
+export type AnimaticShot = {
+  id: string;
+  cut_id: CutId;
+  duration_seconds: number;
+  scratch_audio_path?: string | null;
+};
+
+export type CoverageWarning = {
+  id: string;
+  kind: string;
+  message: string;
+};
+
+export type SceneAnimatic = {
+  id: string;
+  approved?: boolean;
+  shots?: AnimaticShot[];
+  warnings?: CoverageWarning[];
+};
+
+export type VisualSourceStrategy =
+  | "preproduction_start_frame"
+  | "previous_selected_take_exit_frame"
+  | "shared_reference"
+  | "no_start_frame"
+  | "deferred_manual";
+
+export type VisualSourceSpec = {
+  strategy: VisualSourceStrategy;
+  predecessor?: CutId | null;
+  asset_id?: string | null;
+  source_take_id?: string | null;
+  frame_time_seconds?: number | null;
+  predecessor_shot_id?: string | null;
+};
+
+export type TakeRecord = {
+  id: string;
+  path: string;
+  status: string;
+  notes?: string | null;
 };
 
 export type CutRecord = {
@@ -143,8 +191,12 @@ export type CutRecord = {
   start_frame_prompt?: string | null;
   start_frame_negative_prompt?: string | null;
   sketch?: CutSketch | null;
-  takes?: unknown[];
+  visual_source?: VisualSourceSpec | null;
+  takes?: TakeRecord[];
   selected_take?: string | null;
+  stable_id?: string;
+  dependency_state?: "stale" | "needs_review" | "invalid" | "keep" | null;
+  package_needs_review?: boolean;
 };
 
 export type SceneRecord = {
@@ -165,6 +217,63 @@ export type SceneRecord = {
   look_board?: LookBoard | null;
   cuts: CutRecord[];
   stages: StageMap;
+  stable_id?: string;
+  animatic?: SceneAnimatic | null;
+  post?: ScenePost | null;
+};
+
+export type CutVersionStage = "selects" | "assembly" | "fine_cut" | "picture_lock";
+
+export type PostStatus = "not_started" | "in_progress" | "needs_review" | "approved";
+
+export type EditorialPath = "host_ffmpeg" | "external_nle";
+
+export type PostField =
+  | "audio_mix"
+  | "vfx"
+  | "compositing"
+  | "captions"
+  | "mastering"
+  | "qc";
+
+export type VersionShot = {
+  shot_id: string;
+  cut_label: number;
+  take_id: string;
+  path: string;
+};
+
+export type CutVersion = {
+  id: string;
+  label: string;
+  stage: CutVersionStage;
+  assembly_path?: string | null;
+  shots: VersionShot[];
+  editorial_path?: EditorialPath;
+};
+
+export type DeliverableCheck = {
+  deliverable_id: string;
+  version_id?: string | null;
+  passed: boolean;
+  resolution_ok: boolean;
+  aspect_ok: boolean;
+  missing_shots?: { shot_id: string; cut_label: number; reason: string }[];
+  messages?: string[];
+};
+
+export type ScenePost = {
+  versions?: CutVersion[];
+  picture_locked_id?: string | null;
+  editorial_path?: EditorialPath;
+  external_nle_note?: string | null;
+  audio_mix?: PostStatus;
+  vfx?: PostStatus;
+  compositing?: PostStatus;
+  captions?: PostStatus;
+  mastering?: PostStatus;
+  qc?: PostStatus;
+  last_check?: DeliverableCheck | null;
 };
 
 export type LookSlot = {
@@ -218,6 +327,13 @@ export type CharacterProfile = {
   identity_prompt?: string | null;
 };
 
+export type JobAttempt = {
+  id: string;
+  status?: string;
+  error?: string | null;
+  output_asset_ids?: string[];
+};
+
 export type JobRecord = {
   id: string;
   kind: string;
@@ -227,6 +343,85 @@ export type JobRecord = {
   error?: string | null;
   output_path?: string | null;
   output_asset_ids?: string[];
+  attempts?: JobAttempt[];
+};
+
+export type ProductionRecipe = "narrative_dialogue" | "montage";
+
+export type RecipeStageView = {
+  id: StageId;
+  label: string;
+  depends_on: StageId[];
+  required_roles: string[];
+};
+
+export type RecipeView = {
+  id: string;
+  label: string;
+  stages: RecipeStageView[];
+};
+
+export type RecipeChoice = {
+  id: string;
+  label: string;
+};
+
+export type RequirementKind =
+  | "cast"
+  | "location"
+  | "prop"
+  | "wardrobe"
+  | "sound"
+  | "graphic"
+  | "risky_shot"
+  | "deferred"
+  | "voice"
+  | "plate";
+
+export type RequirementStatus = "missing" | "draft" | "present" | "approved" | "deferred";
+
+export type DeliverableRecord = {
+  id: string;
+  name: string;
+  audience?: string | null;
+  platforms?: string[];
+  runtime?: string | null;
+  aspect_ratio?: string | null;
+  resolution?: string | null;
+  frame_rate?: string | null;
+  language?: string | null;
+};
+
+export type ProductionProfile = {
+  recipe: ProductionRecipe;
+  deliverables?: DeliverableRecord[];
+  audience?: string | null;
+  platforms?: string[];
+  runtime?: string | null;
+  aspect_ratios?: string[];
+  resolution?: string | null;
+  frame_rate?: string | null;
+  language?: string | null;
+  medium?: string | null;
+  style_notes?: string | null;
+  audio_plan?: string | null;
+  continuity_rules?: string[];
+  safety_constraints?: string[];
+  budget?: string | null;
+  schedule?: string | null;
+  rights_notes?: string | null;
+};
+
+export type RequirementRecord = {
+  id: string;
+  kind: RequirementKind;
+  name: string;
+  status: RequirementStatus;
+  scene_ids?: number[];
+  character_id?: string | null;
+  notes?: string | null;
+  status_override?: boolean;
+  user_added?: boolean;
 };
 
 export type ProjectState = {
@@ -237,6 +432,8 @@ export type ProjectState = {
   scenes: SceneRecord[];
   assets?: AssetRecord[];
   jobs?: JobRecord[];
+  profile?: ProductionProfile | null;
+  requirements?: RequirementRecord[];
   notes?: string[];
 };
 
@@ -285,6 +482,20 @@ export const SCENE_STRATEGIES: { id: SceneStrategy; label: string }[] = [
   { id: "atmosphere_heavy", label: "Atmosphere heavy" },
 ];
 
+export const VISUAL_SOURCE_STRATEGIES: {
+  id: VisualSourceStrategy;
+  label: string;
+}[] = [
+  { id: "preproduction_start_frame", label: "Generated or attached start frame" },
+  {
+    id: "previous_selected_take_exit_frame",
+    label: "Previous selected take’s exit frame",
+  },
+  { id: "shared_reference", label: "Approved shared scene reference" },
+  { id: "no_start_frame", label: "No start frame" },
+  { id: "deferred_manual", label: "Deferred manual source" },
+];
+
 export const WORKFLOW_STAGES: { id: StageId; label: string }[] = [
   { id: "script", label: "Script" },
   { id: "characters", label: "Characters" },
@@ -296,4 +507,25 @@ export const WORKFLOW_STAGES: { id: StageId; label: string }[] = [
   { id: "render", label: "Render" },
   { id: "take_review", label: "Take Review" },
   { id: "assemble", label: "Assemble" },
+];
+
+export const REQUIREMENT_KINDS: { id: RequirementKind; label: string }[] = [
+  { id: "cast", label: "Cast" },
+  { id: "voice", label: "Voice" },
+  { id: "location", label: "Location" },
+  { id: "prop", label: "Prop" },
+  { id: "wardrobe", label: "Wardrobe" },
+  { id: "plate", label: "Plate" },
+  { id: "sound", label: "Sound" },
+  { id: "graphic", label: "Graphic" },
+  { id: "risky_shot", label: "Risky shot" },
+  { id: "deferred", label: "Deferred" },
+];
+
+export const REQUIREMENT_STATUSES: { id: RequirementStatus; label: string }[] = [
+  { id: "missing", label: "Missing" },
+  { id: "draft", label: "Draft" },
+  { id: "present", label: "Present" },
+  { id: "approved", label: "Approved" },
+  { id: "deferred", label: "Deferred" },
 ];

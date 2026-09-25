@@ -13,7 +13,7 @@ use crate::script::{aspect_from_text, extract_scenes, ParsedScene};
 use crate::workflow::report::{project_report, ProjectReport};
 use crate::workflow::state::{
     character_id, role_for_shot_id, AssetRecord, AssetRole, AssetStatus, CharacterRecord,
-    ProjectState, ScriptRecord, StageStatus, STATE_REL, WORKFLOW_VERSION,
+    ProjectState, ScriptRecord, StageStatus, TakeRecord, TakeStatus, STATE_REL, WORKFLOW_VERSION,
 };
 use regex::Regex;
 use std::collections::HashSet;
@@ -208,12 +208,31 @@ fn import_characters(root: &Path, state: &mut ProjectState) {
             );
         }
         if let Some(v) = &c.voice {
+            let note = if v.voice_id.trim().is_empty() {
+                let file = v
+                    .sample_path
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("sample");
+                format!("local sample {file}")
+            } else {
+                format!("{} {}", v.provider, v.voice_id)
+            };
             push(
                 state,
                 v.profile_path.clone(),
                 AssetRole::VoiceProfile,
-                Some(format!("{} {}", v.provider, v.voice_id)),
+                Some(note),
             );
+            if let Some(sample) = &v.sample_path {
+                push(
+                    state,
+                    sample.clone(),
+                    AssetRole::VoiceSample,
+                    Some("canonical sample".into()),
+                );
+            }
         }
         let identity_ready = c.lipsync_ready();
         let voice_ready = c.voice.is_some();
@@ -435,9 +454,10 @@ fn import_takes(root: &Path, state: &mut ProjectState) {
                     let scene = state.scene_mut(scene_id, &format!("Scene {scene_id}"));
                     let _ = scene.cut_mut(id.cut);
                 }
-                state.push_asset(AssetRecord {
+                let path = rel(root, &file);
+                let asset_id = state.push_asset(AssetRecord {
                     id: String::new(),
-                    path: rel(root, &file),
+                    path: path.clone(),
                     role,
                     status: AssetStatus::Present,
                     scene_id: Some(scene_id),
@@ -447,82 +467,32 @@ fn import_takes(root: &Path, state: &mut ProjectState) {
                     parent_asset_id: None,
                     notes: None,
                 });
+                if role == AssetRole::VideoTake {
+                    if let Some(cut_id) = cut_id {
+                        let cut = state
+                            .scene_mut(scene_id, &format!("Scene {scene_id}"))
+                            .cut_mut(cut_id.cut);
+                        if !cut.takes.iter().any(|take| take.path == path) {
+                            cut.takes.push(TakeRecord {
+                                id: asset_id,
+                                path,
+                                status: TakeStatus::Unreviewed,
+                                notes: None,
+                            });
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 pub(crate) fn refresh_stage_flags(state: &mut ProjectState) {
-    let any_characters = !state.characters.is_empty();
-    for scene in &mut state.scenes {
-        if scene.source_excerpt.is_some() || !scene.dialogue.is_empty() {
-            scene.stages.script = StageStatus::Present;
-        }
-        scene.stages.characters = if any_characters {
-            StageStatus::Present
-        } else {
-            StageStatus::Missing
-        };
-        scene.stages.scene_intent = if scene.intent.as_ref().is_some_and(|i| !i.is_empty()) {
-            if scene.intent_approved {
-                StageStatus::Approved
-            } else {
-                StageStatus::Draft
-            }
-        } else {
-            StageStatus::Missing
-        };
-        scene.stages.scene_look = {
-            let board = scene.look_board.as_ref();
-            if board.map(|b| b.is_empty()).unwrap_or(true) {
-                StageStatus::Missing
-            } else if board.is_some_and(|b| b.approved_count() > 0) {
-                StageStatus::Approved
-            } else {
-                StageStatus::Draft
-            }
-        };
-        let sketches = scene
-            .cuts
-            .iter()
-            .filter(|c| c.sketch.as_ref().is_some_and(|s| !s.is_empty()))
-            .count();
-        scene.stages.cut_sketches = if sketches == 0 {
-            StageStatus::Missing
-        } else if sketches == scene.cuts.len() {
-            StageStatus::Draft
-        } else {
-            StageStatus::Draft
-        };
-        let start_frames = scene
-            .cuts
-            .iter()
-            .filter(|c| c.approved_start_frame.is_some())
-            .count();
-        scene.stages.reference_images = if start_frames == 0 {
-            StageStatus::Missing
-        } else {
-            StageStatus::Present
-        };
-        scene.stages.production_notes = if scene.cuts.iter().any(|c| c.has_production_note()) {
-            StageStatus::Present
-        } else {
-            StageStatus::Missing
-        };
-        scene.stages.render = if scene.cuts.iter().any(|c| !c.takes.is_empty()) {
-            StageStatus::Present
-        } else {
-            StageStatus::Missing
-        };
-        scene.stages.take_review = if scene.cuts.iter().any(|c| c.selected_take.is_some()) {
-            StageStatus::Present
-        } else {
-            StageStatus::Missing
-        };
-    }
+    crate::workflow::recipe::apply_stages(state);
 }
 
 fn merge_preserved(previous: ProjectState, state: &mut ProjectState) {
+    let saved = previous.clone();
     for old_scene in previous.scenes {
         let scene = state.scene_mut(old_scene.id, &old_scene.title);
         if scene.intent.is_none() {
@@ -541,6 +511,14 @@ fn merge_preserved(previous: ProjectState, state: &mut ProjectState) {
             scene.look_board = old_scene.look_board;
         }
         for old_cut in old_scene.cuts {
+            let old_selected = old_cut.selected_take.clone();
+            let old_selected_path = old_selected.as_ref().and_then(|selected| {
+                old_cut
+                    .takes
+                    .iter()
+                    .find(|take| take.id == *selected || take.path == *selected)
+                    .map(|take| take.path.clone())
+            });
             let cut = scene.cut_mut(old_cut.id.cut);
             if cut.sketch.is_none() {
                 cut.sketch = old_cut.sketch;
@@ -554,24 +532,52 @@ fn merge_preserved(previous: ProjectState, state: &mut ProjectState) {
             if cut.start_frame_negative_prompt.is_none() {
                 cut.start_frame_negative_prompt = old_cut.start_frame_negative_prompt;
             }
-            if cut.takes.is_empty() {
-                cut.takes = old_cut.takes;
+            if cut.visual_source.is_none() {
+                cut.visual_source = old_cut.visual_source;
+            }
+            for old_take in old_cut.takes {
+                if let Some(current) = cut.takes.iter_mut().find(|take| take.path == old_take.path)
+                {
+                    current.status = old_take.status;
+                    current.notes = old_take.notes;
+                } else {
+                    cut.takes.push(old_take);
+                }
             }
             if cut.selected_take.is_none() {
-                cut.selected_take = old_cut.selected_take;
+                cut.selected_take = old_selected_path
+                    .as_ref()
+                    .and_then(|path| {
+                        cut.takes
+                            .iter()
+                            .find(|take| take.path == *path)
+                            .map(|take| take.id.clone())
+                    })
+                    .or(old_selected);
             }
+            if !cut.package_needs_review {
+                cut.package_needs_review = old_cut.package_needs_review;
+            }
+        }
+        if scene.animatic.is_none() {
+            scene.animatic = old_scene.animatic;
+        }
+        if scene.post.is_none() {
+            scene.post = old_scene.post;
         }
     }
     if state.jobs.is_empty() {
         state.jobs = previous.jobs;
     }
-    if previous
-        .assets
-        .iter()
-        .any(|asset| asset.role.is_scene_look() || asset.role.is_cut_image())
-    {
+    if previous.assets.iter().any(|asset| {
+        asset.role.is_scene_look()
+            || asset.role.is_cut_image()
+            || asset.role == AssetRole::WardrobePlate
+    }) {
         for old in previous.assets {
-            if (old.role.is_scene_look() || old.role.is_cut_image())
+            if (old.role.is_scene_look()
+                || old.role.is_cut_image()
+                || old.role == AssetRole::WardrobePlate)
                 && !state
                     .assets
                     .iter()
@@ -581,6 +587,8 @@ fn merge_preserved(previous: ProjectState, state: &mut ProjectState) {
             }
         }
     }
+    uniquify_duplicate_asset_ids(state);
+    crate::workflow::identity::adopt(state, &saved);
 }
 
 fn prune_missing_scene_look_assets(project_root: &Path, state: &mut ProjectState) -> bool {
@@ -636,6 +644,18 @@ fn prune_missing_scene_look_assets(project_root: &Path, state: &mut ProjectState
             {
                 cut.approved_start_frame = None;
             }
+            if cut
+                .visual_source
+                .as_ref()
+                .and_then(|source| source.asset_id.as_ref())
+                .is_some_and(|id| missing.contains(id))
+            {
+                if let Some(source) = &mut cut.visual_source {
+                    source.asset_id = None;
+                    source.source_take_id = None;
+                    source.frame_time_seconds = None;
+                }
+            }
         }
     }
     for job in &mut state.jobs {
@@ -643,6 +663,370 @@ fn prune_missing_scene_look_assets(project_root: &Path, state: &mut ProjectState
         job.output_asset_ids.retain(|id| !missing.contains(id));
     }
     true
+}
+
+/// A reimport can assign a character file the same `asset_N` already used by a
+/// scene still. Keep the first record and give each later duplicate a fresh id,
+/// then point look slots and jobs at the still they actually named.
+fn uniquify_duplicate_asset_ids(state: &mut ProjectState) -> bool {
+    let mut seen = HashSet::new();
+    let mut next = state
+        .assets
+        .iter()
+        .filter_map(|asset| asset.id.strip_prefix("asset_")?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut moves = Vec::new();
+    for (index, asset) in state.assets.iter_mut().enumerate() {
+        if seen.insert(asset.id.clone()) {
+            continue;
+        }
+        let old = asset.id.clone();
+        let new_id = format!("asset_{next}");
+        next += 1;
+        asset.id = new_id.clone();
+        let moved_is_board = asset.role.is_scene_look()
+            || asset.role.is_cut_image()
+            || asset.role == AssetRole::WardrobePlate;
+        moves.push((
+            old,
+            new_id,
+            index,
+            asset.role,
+            asset.scene_id,
+            asset.character_id.clone(),
+            moved_is_board,
+        ));
+    }
+    if moves.is_empty() {
+        return false;
+    }
+    for (old, new_id, _index, role, scene_id, character_id, moved_is_board) in moves {
+        let kept_character = state.assets.iter().any(|asset| {
+            asset.id == old && asset.character_id.is_some() && asset.character_id == character_id
+        });
+        if moved_is_board {
+            for scene in &mut state.scenes {
+                let Some(board) = &mut scene.look_board else {
+                    continue;
+                };
+                for slot in &mut board.slots {
+                    if slot.role != role || scene_id != Some(scene.id) {
+                        continue;
+                    }
+                    for id in &mut slot.asset_ids {
+                        if *id == old {
+                            *id = new_id.clone();
+                        }
+                    }
+                    if slot.approved_asset_id.as_deref() == Some(old.as_str()) {
+                        slot.approved_asset_id = Some(new_id.clone());
+                    }
+                }
+                board.sync_asset_ids();
+            }
+            for job in &mut state.jobs {
+                for id in job
+                    .input_asset_ids
+                    .iter_mut()
+                    .chain(job.output_asset_ids.iter_mut())
+                {
+                    if *id == old {
+                        *id = new_id.clone();
+                    }
+                }
+            }
+            for asset in &mut state.assets {
+                if asset.parent_asset_id.as_deref() == Some(old.as_str())
+                    && (asset.role.is_scene_look()
+                        || asset.role.is_cut_image()
+                        || asset.role == AssetRole::WardrobePlate)
+                {
+                    asset.parent_asset_id = Some(new_id.clone());
+                }
+            }
+            for scene in &mut state.scenes {
+                for cut in &mut scene.cuts {
+                    if cut
+                        .visual_source
+                        .as_ref()
+                        .and_then(|source| source.asset_id.as_deref())
+                        == Some(old.as_str())
+                    {
+                        if let Some(source) = &mut cut.visual_source {
+                            source.asset_id = Some(new_id.clone());
+                        }
+                    }
+                }
+            }
+        } else if let Some(character_id) = character_id {
+            if !kept_character {
+                for character in &mut state.characters {
+                    if character.id != character_id {
+                        continue;
+                    }
+                    for id in &mut character.asset_ids {
+                        if *id == old {
+                            *id = new_id.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The still can be status=approved while the slot pointer is empty. The desk
+/// and plate builder both follow the pointer, so restore it from the still.
+fn restore_approved_look_pointers(state: &mut ProjectState) -> bool {
+    let mut changed = false;
+    for scene in &mut state.scenes {
+        let Some(board) = &mut scene.look_board else {
+            continue;
+        };
+        for slot in &mut board.slots {
+            if slot.approved_asset_id.is_some() {
+                continue;
+            }
+            let approved = slot.asset_ids.iter().rev().find(|id| {
+                state.assets.iter().any(|asset| {
+                    &asset.id == *id
+                        && asset.role == slot.role
+                        && asset.status == AssetStatus::Approved
+                })
+            });
+            if let Some(id) = approved {
+                slot.approved_asset_id = Some(id.clone());
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+fn restore_visual_sources(state: &mut ProjectState) -> bool {
+    let approved: Vec<(CutId, String, String)> = state
+        .assets
+        .iter()
+        .filter(|asset| {
+            asset.role == AssetRole::CutStartFrame && asset.status == AssetStatus::Approved
+        })
+        .filter_map(|asset| Some((asset.cut_id?, asset.id.clone(), asset.path.clone())))
+        .collect();
+    let existing_ids: HashSet<String> = state.assets.iter().map(|asset| asset.id.clone()).collect();
+    let mut changed = false;
+    for scene in &mut state.scenes {
+        for cut in &mut scene.cuts {
+            if let Some(source) = &mut cut.visual_source {
+                let invalid_start_frame_binding = source.strategy
+                    == crate::workflow::state::VisualSourceStrategy::PreproductionStartFrame
+                    && source.asset_id.as_ref().is_some_and(|id| {
+                        !approved.iter().any(|(cut_id, asset_id, path)| {
+                            *cut_id == cut.id
+                                && asset_id == id
+                                && cut
+                                    .approved_start_frame
+                                    .as_ref()
+                                    .is_none_or(|approved_path| approved_path == path)
+                        })
+                    });
+                if source
+                    .asset_id
+                    .as_ref()
+                    .is_some_and(|id| !existing_ids.contains(id) || invalid_start_frame_binding)
+                {
+                    source.asset_id = None;
+                    source.source_take_id = None;
+                    source.frame_time_seconds = None;
+                    changed = true;
+                }
+                if source.strategy
+                    == crate::workflow::state::VisualSourceStrategy::PreproductionStartFrame
+                    && source.asset_id.is_none()
+                {
+                    let approved_for_cut = approved
+                        .iter()
+                        .filter(|(cut_id, _, _)| *cut_id == cut.id)
+                        .find(|(_, _, path)| {
+                            cut.approved_start_frame.as_deref() == Some(path.as_str())
+                        })
+                        .or_else(|| approved.iter().find(|(cut_id, _, _)| *cut_id == cut.id));
+                    if let Some((_, asset_id, path)) = approved_for_cut {
+                        source.asset_id = Some(asset_id.clone());
+                        cut.approved_start_frame = Some(path.clone());
+                        changed = true;
+                    }
+                }
+                continue;
+            }
+            let Some((_, asset_id, path)) =
+                approved.iter().find(|(cut_id, _, _)| *cut_id == cut.id)
+            else {
+                continue;
+            };
+            let mut source = crate::workflow::state::VisualSourceSpec::new(
+                crate::workflow::state::VisualSourceStrategy::PreproductionStartFrame,
+            );
+            source.asset_id = Some(asset_id.clone());
+            cut.approved_start_frame = Some(path.clone());
+            cut.visual_source = Some(source);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn restore_wardrobe_plate_assets(project_root: &Path, state: &mut ProjectState) -> bool {
+    let jobs: Vec<(String, String, String, Option<String>)> = state
+        .jobs
+        .iter()
+        .filter(|job| job.kind == "wardrobe_plate")
+        .filter_map(|job| {
+            Some((
+                job.id.clone(),
+                job.output_path.clone()?,
+                job.raw_provider_id.clone()?,
+                job.output_asset_ids.first().cloned(),
+            ))
+        })
+        .collect();
+    let mut changed = false;
+    for (job_id, requested, raw, preferred_id) in jobs {
+        let Some((character_id, shot)) = raw.split_once('|') else {
+            continue;
+        };
+        let Some(actual) = existing_media_path(project_root, &requested) else {
+            continue;
+        };
+        let actual_rel = rel(project_root, &actual);
+        let scene_id = scene_id_from_preproduction_path(&actual_rel);
+        let asset_id = if let Some(existing) = state
+            .assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::WardrobePlate && asset.path == actual_rel)
+            .map(|asset| asset.id.clone())
+        {
+            existing
+        } else {
+            let id = preferred_id
+                .filter(|id| state.asset(id).is_none())
+                .unwrap_or_default();
+            let id = state.push_asset(AssetRecord {
+                id,
+                path: actual_rel.clone(),
+                role: AssetRole::WardrobePlate,
+                status: AssetStatus::Approved,
+                scene_id,
+                cut_id: None,
+                character_id: Some(character_id.to_string()),
+                source_job_id: Some(job_id.clone()),
+                parent_asset_id: None,
+                notes: Some(shot.to_string()),
+            });
+            changed = true;
+            id
+        };
+        if let Some(character) = state
+            .characters
+            .iter_mut()
+            .find(|character| character.id == character_id)
+        {
+            if !character.asset_ids.contains(&asset_id) {
+                character.asset_ids.push(asset_id.clone());
+                changed = true;
+            }
+        }
+        if let Some(job) = state.jobs.iter_mut().find(|job| job.id == job_id) {
+            if job.status != crate::workflow::state::JobStatus::Completed {
+                job.status = crate::workflow::state::JobStatus::Completed;
+                changed = true;
+            }
+            if job.output_path.as_deref() != Some(actual_rel.as_str()) {
+                job.output_path = Some(actual_rel.clone());
+                changed = true;
+            }
+            if !job.output_asset_ids.contains(&asset_id) {
+                job.output_asset_ids.push(asset_id);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+fn restore_render_jobs(project_root: &Path, state: &mut ProjectState) -> bool {
+    let jobs: Vec<(String, String)> = state
+        .jobs
+        .iter()
+        .filter(|job| job.kind == "render")
+        .filter_map(|job| Some((job.id.clone(), job.output_path.clone()?)))
+        .collect();
+    let mut changed = false;
+    for (job_id, requested) in jobs {
+        let Some(actual) = existing_media_path(project_root, &requested) else {
+            continue;
+        };
+        let actual_rel = rel(project_root, &actual);
+        let Some(asset_id) = state
+            .assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::VideoTake && asset.path == actual_rel)
+            .map(|asset| asset.id.clone())
+        else {
+            continue;
+        };
+        if let Some(asset) = state.asset_mut(&asset_id) {
+            if asset.source_job_id.as_deref() != Some(job_id.as_str()) {
+                asset.source_job_id = Some(job_id.clone());
+                changed = true;
+            }
+        }
+        if let Some(job) = state.jobs.iter_mut().find(|job| job.id == job_id) {
+            if job.status != crate::workflow::state::JobStatus::Completed {
+                job.status = crate::workflow::state::JobStatus::Completed;
+                changed = true;
+            }
+            if job.output_path.as_deref() != Some(actual_rel.as_str()) {
+                job.output_path = Some(actual_rel);
+                changed = true;
+            }
+            if !job.output_asset_ids.contains(&asset_id) {
+                job.output_asset_ids.push(asset_id);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+fn existing_media_path(root: &Path, requested: &str) -> Option<PathBuf> {
+    let requested = {
+        let path = PathBuf::from(requested);
+        if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        }
+    };
+    if requested.is_file() {
+        return Some(requested);
+    }
+    let parent = requested.parent()?;
+    let stem = requested.file_stem()?;
+    fs::read_dir(parent)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.is_file() && path.file_stem() == Some(stem))
+}
+
+fn scene_id_from_preproduction_path(path: &str) -> Option<u32> {
+    let normalized = path.replace('\\', "/");
+    let rest = normalized.split("Preproduction/Scene").nth(1)?;
+    let number: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    number.parse().ok()
 }
 
 pub(crate) fn sort_state(state: &mut ProjectState) {
@@ -671,9 +1055,11 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
 
     let plan = load_plan_state(project_root);
     let scripts = discover_scripts(project_root);
+    let mut script_texts = Vec::new();
     for path in &scripts {
         let text = fs::read_to_string(path)
             .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        script_texts.push(text.clone());
         let rel_path = rel(project_root, path);
         if state.scripts.iter().all(|s| s.path != rel_path) {
             let title = text.lines().find_map(|line| {
@@ -709,10 +1095,27 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
         import_prod_md(project_root, &prod, &mut state);
     }
     import_takes(project_root, &mut state);
+    let (old_profile, old_requirements) = previous
+        .as_ref()
+        .map(|prev| (prev.profile.clone(), prev.requirements.clone()))
+        .unwrap_or_else(|| (None, Vec::new()));
+    if let Some(recipe) = old_profile.as_ref().map(|profile| profile.recipe) {
+        state
+            .profile
+            .get_or_insert_with(crate::workflow::state::ProductionProfile::default)
+            .recipe = recipe;
+    }
     if let Some(prev) = previous {
         merge_preserved(prev, &mut state);
     }
+    restore_wardrobe_plate_assets(project_root, &mut state);
+    restore_render_jobs(project_root, &mut state);
     prune_missing_scene_look_assets(project_root, &mut state);
+    restore_visual_sources(&mut state);
+    crate::workflow::breakdown::apply(&mut state, &script_texts);
+    crate::workflow::breakdown::merge_preserved(&mut state, old_profile, old_requirements);
+    crate::workflow::identity::assign(&mut state);
+    crate::workflow::animatic::sync(&mut state);
     refresh_stage_flags(&mut state);
     sort_state(&mut state);
 
@@ -749,8 +1152,27 @@ pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
         let text = fs::read_to_string(&path)
             .map_err(|e| format!("could not read {}: {e}", path.display()))?;
         let mut state = ProjectState::from_json(&text)?;
+        let mut repaired = uniquify_duplicate_asset_ids(&mut state);
+        repaired |= restore_approved_look_pointers(&mut state);
+        repaired |= restore_wardrobe_plate_assets(project_root, &mut state);
+        repaired |= restore_render_jobs(project_root, &mut state);
         prune_missing_scene_look_assets(project_root, &mut state);
+        repaired |= restore_visual_sources(&mut state);
+        if state.profile.is_none() {
+            let texts = state
+                .scripts
+                .iter()
+                .filter_map(|script| fs::read_to_string(project_root.join(&script.path)).ok())
+                .collect::<Vec<_>>();
+            crate::workflow::breakdown::apply(&mut state, &texts);
+            repaired = true;
+        }
+        repaired |= crate::workflow::identity::assign(&mut state);
+        repaired |= crate::workflow::animatic::sync(&mut state);
         refresh_stage_flags(&mut state);
+        if repaired {
+            let _ = persist_state(project_root, &state);
+        }
         let report = project_report(&state);
         return Ok(ImportResult {
             state,
@@ -772,6 +1194,8 @@ pub fn persist_state(project_root: &Path, state: &ProjectState) -> Result<PathBu
 }
 
 pub fn save_project(project_root: &Path, mut state: ProjectState) -> Result<ImportResult, String> {
+    crate::workflow::identity::assign(&mut state);
+    crate::workflow::animatic::sync(&mut state);
     refresh_stage_flags(&mut state);
     sort_state(&mut state);
     let persisted_path = persist_state(project_root, &state)?;
@@ -785,4 +1209,263 @@ pub fn save_project(project_root: &Path, mut state: ProjectState) -> Result<Impo
 
 pub fn load_state(project_root: &Path) -> Result<ProjectState, String> {
     Ok(load_or_import(project_root)?.state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflow::state::{
+        AssetRecord, AssetRole, AssetStatus, CharacterRecord, JobRecord, JobStatus, LookBoard,
+        LookSlot,
+    };
+
+    #[test]
+    fn duplicate_look_id_stays_on_the_character_and_the_still_gets_a_new_id() {
+        let mut state = ProjectState::new();
+        state.assets.push(AssetRecord {
+            id: "asset_74".into(),
+            path: "Characters/Tom Vale/model_sheet/tom_expression_excited.png".into(),
+            role: AssetRole::ExpressionReference,
+            status: AssetStatus::Present,
+            scene_id: None,
+            cut_id: None,
+            character_id: Some("tom_vale".into()),
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: Some("expression_excited".into()),
+        });
+        state.assets.push(AssetRecord {
+            id: "asset_74".into(),
+            path: "Preproduction/Scene1/references/exterior_2.jpg".into(),
+            role: AssetRole::ExteriorReference,
+            status: AssetStatus::Draft,
+            scene_id: Some(1),
+            cut_id: None,
+            character_id: None,
+            source_job_id: Some("job_4".into()),
+            parent_asset_id: None,
+            notes: None,
+        });
+        state.characters.push(CharacterRecord {
+            id: "tom_vale".into(),
+            name: "Tom Vale".into(),
+            dir: "Characters/Tom Vale".into(),
+            identity_ready: true,
+            voice_ready: true,
+            profile_path: None,
+            model_sheet_manifest_path: None,
+            profile: Default::default(),
+            asset_ids: vec!["asset_74".into()],
+            notes: Vec::new(),
+        });
+        let scene = state.scene_mut(1, "The last train");
+        let mut board = LookBoard::default();
+        let mut slot = LookSlot::new("s1_look_02", AssetRole::ExteriorReference, "Exterior");
+        slot.asset_ids.push("asset_74".into());
+        slot.approved_asset_id = Some("asset_74".into());
+        board.slots.push(slot);
+        scene.look_board = Some(board);
+        state.jobs.push(JobRecord {
+            id: "job_4".into(),
+            kind: "scene_look".into(),
+            provider: None,
+            model: None,
+            input_asset_ids: vec!["asset_74".into()],
+            output_asset_ids: vec!["asset_74".into()],
+            status: JobStatus::Completed,
+            output_path: Some("Preproduction/Scene1/references/exterior_2.jpg".into()),
+            raw_provider_id: None,
+            error: None,
+            attempts: Vec::new(),
+        });
+
+        assert!(uniquify_duplicate_asset_ids(&mut state));
+        assert_eq!(state.assets[0].id, "asset_74");
+        assert_eq!(
+            state.assets[0].path,
+            "Characters/Tom Vale/model_sheet/tom_expression_excited.png"
+        );
+        assert_ne!(state.assets[1].id, "asset_74");
+        assert_eq!(
+            state.assets[1].path,
+            "Preproduction/Scene1/references/exterior_2.jpg"
+        );
+        let still_id = state.assets[1].id.clone();
+        assert_eq!(state.characters[0].asset_ids, vec!["asset_74".to_string()]);
+        let slot = &state.scenes[0].look_board.as_ref().unwrap().slots[0];
+        assert_eq!(slot.asset_ids, vec![still_id.clone()]);
+        assert_eq!(slot.approved_asset_id.as_deref(), Some(still_id.as_str()));
+        assert_eq!(state.jobs[0].output_asset_ids, vec![still_id.clone()]);
+        assert_eq!(state.jobs[0].input_asset_ids, vec![still_id]);
+        assert!(!uniquify_duplicate_asset_ids(&mut state));
+    }
+
+    #[test]
+    fn approved_still_restores_a_missing_slot_pointer() {
+        let mut state = ProjectState::new();
+        state.assets.push(AssetRecord {
+            id: "asset_86".into(),
+            path: "Preproduction/Scene1/references/wardrobe_1.png".into(),
+            role: AssetRole::WardrobeReference,
+            status: AssetStatus::Approved,
+            scene_id: Some(1),
+            cut_id: None,
+            character_id: None,
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: None,
+        });
+        let scene = state.scene_mut(1, "The last train");
+        let mut board = LookBoard::default();
+        let mut slot = LookSlot::new("s1_look_03", AssetRole::WardrobeReference, "Wardrobe");
+        slot.asset_ids.push("asset_86".into());
+        board.slots.push(slot);
+        scene.look_board = Some(board);
+
+        assert!(restore_approved_look_pointers(&mut state));
+        assert_eq!(
+            state.scenes[0].look_board.as_ref().unwrap().slots[0]
+                .approved_asset_id
+                .as_deref(),
+            Some("asset_86")
+        );
+        assert!(!restore_approved_look_pointers(&mut state));
+    }
+
+    #[test]
+    fn completed_wardrobe_job_restores_a_missing_plate_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel = "Preproduction/Scene1/wardrobe_plates/pip_vale_closeup_front.png";
+        let path = dir.path().join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"png").unwrap();
+        let mut state = ProjectState::new();
+        state.characters.push(CharacterRecord {
+            id: "pip_vale".into(),
+            name: "Pip Vale".into(),
+            dir: "Characters/Pip Vale".into(),
+            identity_ready: true,
+            voice_ready: false,
+            profile_path: None,
+            model_sheet_manifest_path: None,
+            profile: Default::default(),
+            asset_ids: Vec::new(),
+            notes: Vec::new(),
+        });
+        state.jobs.push(JobRecord {
+            id: "job_24".into(),
+            kind: "wardrobe_plate".into(),
+            provider: None,
+            model: None,
+            input_asset_ids: Vec::new(),
+            output_asset_ids: vec!["asset_93".into()],
+            status: JobStatus::Completed,
+            output_path: Some(rel.into()),
+            raw_provider_id: Some("pip_vale|closeup_front".into()),
+            error: None,
+            attempts: Vec::new(),
+        });
+
+        assert!(restore_wardrobe_plate_assets(dir.path(), &mut state));
+        let plate = state
+            .assets
+            .iter()
+            .find(|asset| asset.role == AssetRole::WardrobePlate)
+            .unwrap();
+        assert_eq!(plate.id, "asset_93");
+        assert_eq!(plate.character_id.as_deref(), Some("pip_vale"));
+        assert_eq!(plate.scene_id, Some(1));
+        assert_eq!(plate.notes.as_deref(), Some("closeup_front"));
+        assert!(state.characters[0].asset_ids.contains(&"asset_93".into()));
+        assert!(!restore_wardrobe_plate_assets(dir.path(), &mut state));
+    }
+
+    #[test]
+    fn rendered_take_completes_its_pending_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel = "Scenes/Scene1/Cut2/S01C02.mp4";
+        let path = dir.path().join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"video").unwrap();
+        let mut state = ProjectState::new();
+        state.assets.push(AssetRecord {
+            id: "asset_7".into(),
+            path: rel.into(),
+            role: AssetRole::VideoTake,
+            status: AssetStatus::Present,
+            scene_id: Some(1),
+            cut_id: Some(crate::scene_plan::handoff::CutId::new(1, 2)),
+            character_id: None,
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: None,
+        });
+        state.jobs.push(JobRecord {
+            id: "job_3".into(),
+            kind: "render".into(),
+            provider: Some("atlascloud".into()),
+            model: None,
+            input_asset_ids: Vec::new(),
+            output_asset_ids: Vec::new(),
+            status: JobStatus::Pending,
+            output_path: Some(rel.into()),
+            raw_provider_id: Some("S01C02".into()),
+            error: None,
+            attempts: Vec::new(),
+        });
+
+        assert!(restore_render_jobs(dir.path(), &mut state));
+        assert_eq!(state.jobs[0].status, JobStatus::Completed);
+        assert_eq!(state.jobs[0].output_asset_ids, vec!["asset_7"]);
+        assert_eq!(state.assets[0].source_job_id.as_deref(), Some("job_3"));
+        assert!(!restore_render_jobs(dir.path(), &mut state));
+    }
+
+    #[test]
+    fn stale_start_frame_asset_id_rebinds_to_the_approved_path() {
+        let mut state = ProjectState::new();
+        state.assets.push(AssetRecord {
+            id: "asset_78".into(),
+            path: "Preproduction/Scene1/start_frames/cut_1_v4.png".into(),
+            role: AssetRole::CutStartFrame,
+            status: AssetStatus::Approved,
+            scene_id: Some(1),
+            cut_id: Some(crate::scene_plan::handoff::CutId::new(1, 1)),
+            character_id: None,
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: None,
+        });
+        state.assets.push(AssetRecord {
+            id: "asset_82".into(),
+            path: "Preproduction/Scene1/start_frames/cut_2_v2.png".into(),
+            role: AssetRole::CutStartFrame,
+            status: AssetStatus::Approved,
+            scene_id: Some(1),
+            cut_id: Some(crate::scene_plan::handoff::CutId::new(1, 2)),
+            character_id: None,
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: None,
+        });
+        let cut = state.scene_mut(1, "Scene 1").cut_mut(1);
+        cut.approved_start_frame = Some("Preproduction/Scene1/start_frames/cut_1_v4.png".into());
+        cut.visual_source = Some(crate::workflow::state::VisualSourceSpec {
+            strategy: crate::workflow::state::VisualSourceStrategy::PreproductionStartFrame,
+            predecessor: None,
+            asset_id: Some("asset_82".into()),
+            source_take_id: None,
+            frame_time_seconds: None,
+            predecessor_shot_id: None,
+        });
+
+        assert!(restore_visual_sources(&mut state));
+        assert_eq!(
+            state.scenes[0].cuts[0]
+                .visual_source
+                .as_ref()
+                .and_then(|source| source.asset_id.as_deref()),
+            Some("asset_78")
+        );
+    }
 }

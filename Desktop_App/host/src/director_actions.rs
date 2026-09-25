@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 pub const PENDING_ACTION_START: &str = "<!--workbench_pending_action";
 pub const PENDING_ACTION_END: &str = "-->";
+pub const ACTION_CONSUMED: &str = "<!--workbench_action_consumed-->";
 
 pub const SPECIALISTS: &[&str] = &[
     "script",
@@ -498,6 +499,70 @@ fn require_existing_files(
     Ok(())
 }
 
+fn validate_still_batch(
+    inputs: &Map<String, Value>,
+    project_root: Option<&str>,
+    resolved_paths: &mut Vec<(String, PathBuf)>,
+) -> Result<(), ActionError> {
+    let Some(Value::Array(items)) = inputs.get("batch") else {
+        return Err(ActionError::Validate(
+            "still_image `batch` must be a list of stills".into(),
+        ));
+    };
+    if items.is_empty() {
+        return Err(ActionError::Validate("still_image `batch` is empty".into()));
+    }
+    for (index, item) in items.iter().enumerate() {
+        let Some(obj) = item.as_object() else {
+            return Err(ActionError::Validate(format!(
+                "still_image batch[{index}] must be an object"
+            )));
+        };
+        let has_brief = ["prompt", "brief", "edit_brief"].iter().any(|key| {
+            obj.get(*key)
+                .and_then(|value| value.as_str())
+                .is_some_and(|text| !text.trim().is_empty())
+        });
+        if !has_brief {
+            return Err(ActionError::Validate(format!(
+                "still_image batch[{index}] needs prompt, brief, or edit_brief"
+            )));
+        }
+        let Some(output) = obj
+            .get("output_path")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            return Err(ActionError::Validate(format!(
+                "still_image batch[{index}] needs output_path"
+            )));
+        };
+        let resolved = resolve_under_project(output, project_root)?;
+        resolved_paths.push((format!("batch[{index}].output_path"), resolved));
+        let mut files = Map::new();
+        for key in [
+            "source_frame",
+            "source_image",
+            "reference_images",
+            "reference_assets",
+        ] {
+            if let Some(value) = obj.get(key) {
+                files.insert(key.to_string(), value.clone());
+            }
+        }
+        require_existing_files(&files, project_root, &["source_frame", "source_image"]).map_err(
+            |error| match error {
+                ActionError::Validate(message) => {
+                    ActionError::Validate(format!("batch[{index}]: {message}"))
+                }
+                other => other,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Validate an action and resolve project-relative paths.
 pub fn validate_action(
     action: DirectorAction,
@@ -592,12 +657,16 @@ edit: existing source_frame + edit_brief). The host picks the slot model and out
             // unless the user named one; do not require the model to invent them.
             match specialist {
                 "still_image" => {
-                    require_any(&action.inputs, &["prompt", "brief", "edit_brief"])?;
-                    require_existing_files(
-                        &action.inputs,
-                        project_root,
-                        &["source_frame", "source_image"],
-                    )?;
+                    if action.inputs.contains_key("batch") {
+                        validate_still_batch(&action.inputs, project_root, &mut resolved_paths)?;
+                    } else {
+                        require_any(&action.inputs, &["prompt", "brief", "edit_brief"])?;
+                        require_existing_files(
+                            &action.inputs,
+                            project_root,
+                            &["source_frame", "source_image"],
+                        )?;
+                    }
                 }
                 "scene_generation" => {
                     let has_handoff = action.inputs.contains_key("handoff_path")
@@ -808,6 +877,7 @@ fn allowed_input_keys(specialist: &str) -> HashSet<&'static str> {
             "aspect_ratio",
             "resolution",
             "collect_prediction_id",
+            "batch",
         ],
         "scene_generation" => &[
             "handoff_path",
@@ -825,6 +895,7 @@ fn allowed_input_keys(specialist: &str) -> HashSet<&'static str> {
             "reference_assets",
             "duration",
             "aspect_ratio",
+            "resolution",
             "collect_prediction_id",
         ],
         "text_sync" => &[
@@ -988,6 +1059,12 @@ pub fn find_pending_action_in_history(messages: &[(String, String)]) -> Option<D
                     return Some(action);
                 }
             }
+        }
+        if content.contains(ACTION_CONSUMED)
+            || content.contains("finished (host-run).")
+            || content.starts_with("Host could not execute pending action:")
+        {
+            return None;
         }
     }
     None
@@ -1210,4 +1287,53 @@ Character sheet (host loads Character Creation contract; local file write):
 </director_action>
 "#
     )
+}
+
+#[cfg(test)]
+mod pending_action_tests {
+    use super::*;
+
+    #[test]
+    fn consumed_action_is_not_replayed_by_a_later_approval() {
+        let action = DirectorAction {
+            action: ActionKind::RunSpecialist,
+            specialist: Some("text_sync".into()),
+            inputs: Map::new(),
+            message: None,
+            op: None,
+            path: None,
+        };
+        let history = vec![
+            ("assistant".into(), encode_pending_action(&action)),
+            ("user".into(), "Approved".into()),
+            (
+                "assistant".into(),
+                format!("Text-sync finished.\n\n{ACTION_CONSUMED}"),
+            ),
+            ("user".into(), "Approved".into()),
+        ];
+        assert!(find_pending_action_in_history(&history).is_none());
+    }
+
+    #[test]
+    fn legacy_host_completion_also_stops_replay() {
+        let action = DirectorAction {
+            action: ActionKind::RunSpecialist,
+            specialist: Some("text_sync".into()),
+            inputs: Map::new(),
+            message: None,
+            op: None,
+            path: None,
+        };
+        let history = vec![
+            ("assistant".into(), encode_pending_action(&action)),
+            ("user".into(), "Approved".into()),
+            (
+                "assistant".into(),
+                "Text-sync talking shot finished (host-run).".into(),
+            ),
+            ("user".into(), "Approved".into()),
+        ];
+        assert!(find_pending_action_in_history(&history).is_none());
+    }
 }

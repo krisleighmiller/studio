@@ -1313,7 +1313,7 @@ button {
 
 .voice-source-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
 }
 
@@ -1453,6 +1453,170 @@ button {
   flex: 1;
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.workflow-project {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.workflow-profile-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.workflow-profile-recipe {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.workflow-profile-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.workflow-profile-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workflow-profile-form label {
+  display: grid;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.workflow-profile-form label.wide {
+  grid-column: 1 / -1;
+}
+
+.workflow-profile-form input,
+.workflow-profile-form textarea,
+.workflow-requirement-add input,
+.workflow-requirement-add select,
+.workflow-requirement-status {
+  width: 100%;
+  font-size: 12px;
+}
+
+.workflow-profile-form textarea {
+  min-height: 52px;
+  resize: vertical;
+}
+
+.workflow-requirements h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.workflow-requirements h2 span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.workflow-requirements-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 4px;
+  max-height: 168px;
+  margin: 6px 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.workflow-requirement {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "kind name status"
+    "scenes scenes status";
+  gap: 2px 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.workflow-requirement.in-scene {
+  border-color: var(--accent);
+}
+
+.workflow-requirement.blocking {
+  border-color: #b8862a;
+  background: #fbf6ea;
+}
+
+.workflow-requirement.empty {
+  display: block;
+  color: var(--text-muted);
+}
+
+.workflow-requirement-kind {
+  grid-area: kind;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.workflow-requirement-name {
+  grid-area: name;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.workflow-requirement-scenes {
+  grid-area: scenes;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-requirement-status {
+  grid-area: status;
+  width: auto;
+}
+
+.workflow-requirement-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.workflow-requirement-add input {
+  flex: 1 1 auto;
+}
+
+.workflow-requirement-add select {
+  flex: 0 0 140px;
 }
 
 .workflow-stage-rail {
@@ -1736,6 +1900,24 @@ button {
   font-size: 14px;
 }
 
+.workflow-start-frame-card.embedded {
+  margin-top: 4px;
+  background: var(--bg-panel);
+}
+
+.workflow-source-controls,
+.workflow-direct-start-frame {
+  display: grid;
+  gap: 10px;
+}
+
+.workflow-source-controls {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-muted);
+}
+
 .workflow-start-frame-versions {
   display: flex;
   align-items: flex-start;
@@ -1795,6 +1977,27 @@ button {
   max-width: 720px;
 }
 
+.workflow-take-review,
+.workflow-take-row {
+  display: grid;
+  gap: 10px;
+}
+
+.workflow-take-row {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.workflow-take-path {
+  padding: 0;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
 .workflow-field input[type="text"] {
   width: 100%;
   padding: 8px 10px;
@@ -1819,7 +2022,8 @@ button {
 }
 
 .workflow-field textarea,
-.workflow-field select {
+.workflow-field select,
+.workflow-field input {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--border);
@@ -1828,6 +2032,85 @@ button {
   background: var(--bg-elevated);
   font: inherit;
   font-weight: 400;
+}
+
+.workflow-post-statuses {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.workflow-animatic {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.workflow-animatic h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.workflow-animatic-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workflow-animatic-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px minmax(120px, 180px);
+  gap: 6px 8px;
+  align-items: center;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.workflow-animatic-label,
+.workflow-animatic-scratch {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.workflow-animatic-scratch {
+  color: var(--text-muted);
+}
+
+.workflow-animatic-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workflow-rough-cut-stage {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--bg-muted);
+}
+
+.workflow-rough-cut-stage[hidden] {
+  display: none;
+}
+
+.workflow-rough-cut-stage h3,
+.workflow-rough-cut-stage p {
+  margin: 0;
+}
+
+.workflow-rough-cut-stage img {
+  width: min(100%, 280px);
+  border-radius: 6px;
 }
 
 .workflow-sketch-toolbar {
@@ -1900,6 +2183,51 @@ button {
   margin: -6px 0 0;
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.workflow-production-notes {
+  display: grid;
+  gap: 14px;
+}
+
+.workflow-production-note-card .workflow-field textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.workflow-production-dialogue {
+  margin: 2px 0 10px;
+  padding: 9px 11px;
+  border-left: 2px solid var(--accent);
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.workflow-production-takes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 320px));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.workflow-production-take {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.workflow-production-take video {
+  width: 100%;
+  max-height: 480px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #000;
+}
+
+.workflow-production-take figcaption {
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .workflow-check {

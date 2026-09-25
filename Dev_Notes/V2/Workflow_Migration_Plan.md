@@ -1,735 +1,277 @@
-# Desktop App V2 Workflow Migration Plan
+# Desktop App Migration Plan
 
-Date: 2026-09-17  
-Status: Working migration plan  
-Scope: `Desktop_App`, starting with `Lite_Challenge` as the proving project
+Date: 2026-09-23  
+Status: Baseline frozen 2026-09-24. Steps 1–6 are on the desk. Open gaps are in the baseline section below, and they close in the UI redo foundation gate.  
+Scope: `Desktop_App`, with `Lite_Challenge` as the narrative proving project  
+Governs: `Dev_Notes/V2/Traditional_Studio_Production_Model.md`  
+Next: `Dev_Notes/V2/Production_Studio_UI_Redo_Plan.md`
+
+This revision replaces the 2026-09-17 stage list in this file. That list is kept below only as history. Section 5 is the record of the migration. The baseline section is the current status. Do not read earlier “missing” language as still open.
 
 ---
 
-## 1. Why This Migration Exists
+## 1. Why This Revision Exists
 
-The current Desktop App is still too chat-shaped. The Director can call specialists and the host has begun reclaiming mechanical responsibilities, but the user experience still asks one open-ended prompt to solve too many production stages at once.
+The September 17 plan fixed a real failure: Scene Plan wrote canonical production notes before a scene had intent, a look, or cut-specific images, so cinematic-balanced requests collapsed into `source_video_lipsync`.
 
-That is why a request like:
+The desk followed that plan. By 2026-09-23 it had typed workflow state, an importer, a stage rail, scene intent, cut sketches, strategy mix checks, a scene look board, wardrobe plates, and cut start frames.
 
-> Scene Strategy cinematic balanced
+At that date the work had stopped at the planning half of one narrative recipe. The production model, written after that plan, is the product direction. It treats the linear stage list as a useful backbone for narrative dialogue, not as the Workbench kernel.
 
-can still produce mostly `source_video_lipsync` cuts. The model is asked to create production notes before the visual world of the scene exists. The only concrete visual assets it can reliably use are character model-sheet closeups under `Characters/`, so every eligible dialogue line collapses into a talking shot.
+Continuing to add look roles, plate types, character editors, or closed stage enums is the drift. The job this revision set was to finish one narrative production on the desk, then widen the state model in the order the production model already sets. That widening is the frozen baseline below.
 
-The deeper issue is not only prompt wording. It is that the app currently treats generic character references as if they were scene-specific production sources.
-
-This migration changes the product shape from:
+Target, unchanged:
 
 ```text
-chat prompt -> production notes -> render
+one authoritative project
++ visible production artifacts
++ scoped creative agents
++ host-owned mechanics
++ human approval at meaningful gates
 ```
 
-to:
+---
+
+## 2. Baseline — 2026-09-24
+
+Checked before the Studio UI rewrite. The current Production Desk stays runnable as the comparison surface.
+
+Verification:
+
+- Frontend `npm run build` (`tsc && vite build`) succeeded. Vite 6.4.3 transformed 15 modules and wrote `dist/` in 373ms.
+- Host `cargo test --manifest-path Desktop_App/host/Cargo.toml` passed: 228 tests, 0 failed (211 library, 10 `scene_plan_commit_flow`, 7 `workflow_import`). Existing unused-assignment warnings in `luma.rs`, `replicate.rs`, `runway.rs`, and an unused import in `fs_ops.rs` remain.
+- `Lite_Challenge` Scene 1 is the fixture: approved planning, nine selected takes, and a continuity frame from Cut 8 to Cut 9.
+- `Dev_Notes/V2/UI_Redo.jpg` is visual direction for the UI stage. It is not a field-level data contract.
+
+Mapped to the production model’s lifecycle:
+
+| Production-model phase | On the desk at this checkpoint |
+| --- | --- |
+| Development and greenlight | Present. The production profile stores recipe, deliverables, audience, platforms, runtime, aspect ratios, resolution, frame rate, language, medium, style notes, audio plan, continuity rules, safety constraints, budget, schedule, and rights notes. Projects still open as a folder plus `Preproduction/workflow_state.json`. |
+| Script and breakdown | Present. Script import, per-scene beats, and a requirements registry. Characters are one requirement kind. Scene 1 registers cast, the train interior, the parcel, and voices with stable IDs. |
+| Casting and production design | Present. Character profiles, identity refs, voices, scene look slots, wardrobe plates, and artifact versions. Approving a replacement keeps the previous version. |
+| Storyboard, previz, animatic | Present. Ordered shot timing, scratch audio, coverage warnings, and animatic approval. A timing change marks later shot packages for review and keeps existing renders. |
+| Shot packages | Present. Approved sketches and visual-source strategies compile to canonical shot specifications through host derivation. A cut can declare a predecessor without a concrete path. Stable scene and shot IDs survive reorder. |
+| Production / shoot | Present. A ready cut can be sent to Scene Generation or Text-Sync. The result is a job and an unreviewed take. |
+| Dailies and take review | Present. Take Review can mark selected, alternate, rejected, needs edit, needs rerender, or used in assembly. |
+| Editorial and post | Partial. Assemble prepares a versioned master from selected takes and records an assembly job. Cut versions, picture lock, post status, editorial path, and deliverable checks exist. A successful assemble output is not reconciled back into workflow state, so Assemble cannot become complete from that output, and the review export cannot be opened from the desk. |
+| QC, delivery, archive | Partial. A deliverable check compares a cut version against resolution, aspect, and missing shots. How strict picture lock and QC should be is still the open question in section 9. |
+
+Stable IDs are durable identity. Scene and cut numbers are labels.
+
+`WorkflowStage` is still the closed ten-value enum (`script` through `assemble`). Recipes select and relabel those stages. They do not add variants. Montage skips characters and mouth policy. The recipe graph describes stages, not UI work-area grouping.
+
+Chat specialists remain the execution layer. The desk and chat share one job ledger and one selected-take record.
+
+Still open, and owned by the UI redo foundation gate rather than a new migration step:
+
+- Reconcile a successful assembly into a completed job, a review-export artifact, and Assemble readiness.
+- Open that review export from the desk.
+- Let the user choose a continuity frame time. Extraction still picks a near-final decoded frame automatically.
+- Carry the selected stable shot, asset, look slot, or requirement in Director context. Context today is the selected scene and stage.
+- Add job timestamps, elapsed time, and cost. Unknown timing and cost must not become zero.
+- Keep `workflowDesk.ts` and `main.ts` coupled until the presentation layer replaces the desk one surface at a time.
+
+---
+
+## 3. What Stays
+
+Keep, and do not rebuild:
+
+- Project folder as source of truth, with `Preproduction/workflow_state.json` as the typed map.
+- Import of existing `Scripts/`, `Characters/`, `prod.md`, and `Scene_Prompts/` without forcing a folder rename.
+- Scene intent, cut sketches, shot roles, mouth policies, and host-side cinematic-balanced / performance-heavy / atmosphere-heavy checks.
+- Scene look roles and the rule that an approved visual-source strategy determines the video source. When the strategy is a preproduction still, the approved cut image—not a character model-sheet closeup—is the source.
+- Wardrobe plates as the scene-specific identity input for later start frames. Do not add more plate pipelines.
+- Host-owned paths, IDs, schemas, provider calls, and approvals. Agents draft; the host commits.
+- `source_video_lipsync` only for deliberate performance cuts.
+- Existing chat specialists as the execution layer until the desk calls them and records the result. Do not replace them with new department agents.
+- `Lite_Challenge` Scene 1 as the narrative proving scene.
+
+The old opt-out modes (full pre-production, fast draft, direct production notes, manual assets) stay available as narrative shortcuts. Direct production notes remains a labeled shortcut. It is not the default, and it is not a second product.
+
+---
+
+## 4. What to Stop
+
+These limits still hold:
+
+- Add `WorkflowStage` variants, recipe enums, or style flags (`is_claymation`, `is_anime`, `is_live_action`).
+- Add look roles, wardrobe-plate variants, or another character-generation pipeline.
+- Grow the character editor, voice tab, or look board into a department UI.
+- Write a new Scene Plan prompt to paper over take review, selection, or identity. Those are host state.
+- Treat a successful provider call as a completed shot.
+- Require every concrete start image to exist before production notes. Some sources can only be derived from selected takes during production.
+- Reopen storyboard, animatic, production-profile, or recipe work as new pipelines. Steps 2–5 are in the baseline.
+- Force non-dialogue projects through scene, dialogue, mouth, and character primitives. Those stay inside the narrative recipe.
+
+---
+
+## 5. Implementation Order
+
+This is the production model’s order. The status line on each step is the 2026-09-24 reading. The paragraphs under it are the original work order.
+
+### Step 1 — Finish the narrative vertical slice
+
+Status: Done for planning, render, take review, selected takes, and the Cut 8 to Cut 9 continuity frame on `Lite_Challenge` Scene 1. Still open: a reviewed frame time, reconciling a successful assemble into workflow state, and opening the review export from the desk.
+
+Prove the desk can complete a production, not only plan one.
+
+Chain:
 
 ```text
-script -> characters -> scene intent -> scene look -> cut sketches -> reference/start images -> production notes -> render -> take review
+approved intent + look + sketches + visual-source strategies
+-> canonical shot specifications with declared dependencies
+-> render currently ready shots
+-> take registration
+-> take review
+-> selected take
+-> exit-frame selection / continuity-frame binding
+-> dependent shots become render ready
+-> assembly
+-> review export
 ```
 
-The goal is not full autopilot. The goal is a stoppable production desk where each stage has visible artifacts, user review points, and host-owned mechanics.
+Use `Lite_Challenge` Scene 1. Use the artifacts that already exist. Do not insert a new stage.
+
+Work:
+
+- Give each cut an approved visual-source strategy: approved preproduction start frame, previous selected take’s exit frame, shared reference, no start frame, or deferred manual source.
+- Let a cut declare a predecessor dependency without inventing a path for an artifact that does not exist yet. A declared dependency counts as planned; it does not count as render ready.
+- Generate the canonical shot specification from the approved cut sketch plus its source strategy, through the existing host derivation in `scene_plan` (IDs, aspect ratio, lane, timing, provider). The model fills creative fields only. Reaction and insert cuts do not become `source_video_lipsync`.
+- Keep the shot specification provider-neutral. Compile the concrete provider request immediately before execution, after every required source has been bound.
+- Write `prod.md` and sidecars from that typed state so the production-note mix matches the approved sketch mix.
+- From the desk, send one approved and currently ready cut to the existing Scene Generation or Text-Sync specialist.
+- Record the provider call on the cut as a job and a take. A returned file is a take.
+- On Take Review, play the take and set `selected`, `alternate`, `rejected`, `needs_edit`, or `needs_rerender`.
+- For a continuity-linked successor, let the user select a usable exit frame from the selected predecessor take. Default to the last usable frame, not blindly to the last decoded frame. Extract and register that frame as the successor’s concrete continuity asset.
+- Unlock the dependent cut only after its continuity asset is bound. If the predecessor selection changes during this slice, require the successor source to be rebound before another render. Step 4 generalizes this into versioned stale-dependency propagation.
+- Assemble the scene from selected takes with the existing ffmpeg assemble path. The host reads selection and order from workflow state. The model does not reconstruct the scene list.
+- Write a review export the user can open from the desk.
+
+Done when:
+
+- Scene 1 can move from approved sketches and source strategies to a review export without a chat detour that bypasses workflow state.
+- A cut can be production-note ready while its declared continuity source is unresolved, but it cannot render until that source is bound.
+- Selecting Cut 1’s take and exit frame can unlock a continuity-linked Cut 2.
+- The jobs drawer shows that render, not only look and start-frame stills.
+- Take Review is the place a take becomes selected.
+- Assemble uses `selected_take`, not a hand-written `Final/final_prompt.txt` scene list, for this slice.
+
+Numeric scene and cut IDs are acceptable for this step only. Do not migrate them here.
+
+### Step 2 — Production profile and script breakdown
+
+Status: Done. Opening a project shows the recipe, deliverables, and requirement list. Registry records use stable IDs.
+
+Make project-wide constraints explicit, and stop treating characters as the only requirement type.
+
+Production profile, stored with the project, not as a style branch:
+
+- Recipe (narrative dialogue is the only built-in recipe at this step).
+- Deliverables, audience, platforms.
+- Runtime, aspect ratios, resolution, frame rate, language.
+- Medium and style notes, including clay or any other look as profile values.
+- Audio plan, continuity rules, safety constraints, budget, schedule, rights notes.
+
+Breakdown:
+
+- A typed requirements registry for the script: cast, locations, props, wardrobe, sound, graphics, risky shots, and deferred items.
+- Characters remain one requirement. A scene may be blocked on a location, prop, voice, or plate instead.
+
+Done when:
+
+- Opening a project shows recipe, deliverable, and the requirement list.
+- Scene 1’s characters, train interior, parcel, and voices are registry entries with status, not only folders the importer happened to find.
+
+New registry records get stable IDs immediately. Do not key them by display order.
+
+### Step 3 — Storyboard and animatic state
+
+Status: Done. Scene 1 can be reviewed as a timed rough cut. A timing change marks later shot packages for review without deleting renders.
+
+Add the missing preproduction proof: the sequence works roughly before more final generation.
+
+- Ordered shot timing on top of cut sketches.
+- Scratch or temporary audio when the scene has dialogue.
+- Coverage warnings: missing reactions, inserts, establishing shots, unplanned beats.
+- A rough review the user can approve before treating shot packages as ready to shoot.
+
+Cut sketches stay the shot cards. The animatic is their timing and order, not a second copy of the prompts.
+
+Done when:
+
+- Scene 1 can be reviewed as a timed rough cut, and a timing change marks later shot packages for review without deleting renders.
+
+### Step 4 — Stabilize IDs, versions, artifacts, and jobs
+
+Status: Done for stable IDs, artifact versions, the shared job ledger, and stale-dependency marking. Jobs still have no timestamps, elapsed time, or cost.
+
+Do this before recipe graphs or post-production state. Otherwise every new stage deepens the current coupling.
+
+- Stable IDs for sources, sequences, scenes, shots, characters, assets, versions, jobs, attempts, takes, edits, and deliverables. Scene and cut numbers become labels.
+- An approval points at an artifact version. Replacing an approved still or take creates a new version.
+- One job ledger for look generation, start frames, video, audio, and local ffmpeg. Same job, attempt, error, and output registration the desk already started for stills.
+- Provider-neutral shot specs stay separate from provider request bodies. Adapters compile late.
+- Shot dependencies and source bindings use stable IDs. The symbolic “previous selected take” relation resolves to an exact take and continuity-frame artifact version at execution time.
+- Changing an approved upstream artifact marks dependents stale, needs review, invalid, or safe to keep. It does not delete downstream files.
+
+Done when:
+
+- Reordering Scene 1’s cuts does not change their IDs.
+- Approving a new start frame does not overwrite the previously approved version in place.
+- A render and a look generation show up as the same kind of job record.
+
+### Step 5 — Recipe-defined stage graphs
+
+Status: Done in the host. Narrative dialogue and montage are recipe graphs, and montage skips characters and lip-sync without a dead stage. The graph does not group stages into UI work areas. No second fixture production was added.
+
+The narrative dialogue path remains the first recipe. The kernel reads stages, dependencies, required roles, and readiness from the recipe.
+
+Prove one non-dialogue recipe before calling the abstraction done. The production model’s montage or music-video path is the smallest contrast: no character registry and no mouth policy required.
+
+Do not add a stage enum or a UI switch per recipe.
+
+Done when:
+
+- Narrative dialogue still runs the slice from step 1.
+- A second fixture can skip characters and lip-sync without dead stages or special-case branches in the host.
+
+### Step 6 — Post-production and delivery state
+
+Status: The records exist: cut versions, picture lock, audio, VFX, captions, QC, and deliverable checks. A successful assembly is not yet written back as a completed job and review-export artifact, so Assemble cannot become complete from output alone.
+
+Represent, without building an NLE:
+
+- Cut versions from selects through picture lock.
+- Audio mix status.
+- VFX and compositing status.
+- Captions, mastering, QC, and named deliverables.
+
+Straightforward ffmpeg stays in the host. Taste-heavy or frame-specific editorial work opens an external NLE, and the project stores that decision.
+
+Done when:
+
+- A selected-take assembly can be marked as a cut version, and a deliverable can be checked against resolution, aspect, and missing shots.
+
+### Step 7 — Fixture productions
+
+Status: Not started. This stays after the UI redo. The next product stage is the Studio shell, not another workflow-state expansion.
+
+Only after steps 1–6. Use fixtures to test breadth, not to invent features during the slice:
+
+- Clay dialogue comedy (style lives in the production profile).
+- No-dialogue atmospheric montage.
+- Presenter explainer.
+- Product advertisement with no character registry.
+- Documentary from existing footage and voice-over.
+- Abstract animation driven by music.
 
 ---
 
-## 2. Product Principle
+## 6. Desk Shape
 
-Chat remains useful, but it should not be the primary workflow container.
-
-V2 should be workflow-first:
-
-- The UI shows the current stage, scene, cuts, assets, jobs, and approvals.
-- Chat operates on the selected stage/cut/asset instead of the whole project at once.
-- Specialists become named actions behind buttons and menus.
-- The project folder remains the source of truth.
-- The host owns paths, IDs, schemas, timing, provider routing, approvals, and state transitions.
-- The LLM owns creative judgment inside a bounded stage.
-
-In short:
-
-```text
-UI = production desk
-Host = workflow/state/mechanics
-LLM = bounded creative collaborator
-Providers = replaceable execution layer
-```
-
----
-
-## 3. Target Workflow
-
-### Stage 1: Script
-
-Purpose: import or create the source material.
-
-User-facing actions:
-
-- Import script.
-- Create script.
-- Edit script.
-- Split into scenes.
-- Extract dialogue/action/sound/transition beats.
-
-Host-owned outputs:
-
-- Scene list.
-- Scene text.
-- Dialogue list per scene.
-- Action beats per scene.
-- Sound/transition notes per scene.
-- Stable scene IDs.
-
-LLM-owned work:
-
-- Drafting or rewriting script prose when asked.
-- Summarizing scene beats.
-- Suggesting scene titles or structure.
-
-Important rule:
-
-Production notes should not be generated directly from raw script unless the user explicitly chooses a fast-path opt-out.
-
----
-
-### Stage 2: Characters
-
-Purpose: define identity, voice, and continuity traits for recurring characters.
-
-User-facing actions:
-
-- Create character profile.
-- Generate identity references.
-- Attach existing references.
-- Create voice profile.
-- Mark reference/voice readiness.
-
-Asset roles:
-
-- `identity_reference`
-- `body_reference`
-- `expression_reference`
-- `voice_sample`
-- `voice_profile`
-
-Host-owned outputs:
-
-- Typed character metadata.
-- Reference image registry.
-- Voice registry.
-- Readiness state.
-
-LLM-owned work:
-
-- Character description.
-- Wardrobe/personality continuity notes.
-- Suggested reference prompts.
-
-Important rule:
-
-Character model-sheet images are identity inputs. They are not automatically cut start frames and should not be treated as production sources for every dialogue line.
-
----
-
-### Stage 3: Scene Intent
-
-Purpose: decide what the scene must accomplish before generating visual references.
-
-This is the missing planning layer between script and image generation.
-
-For each scene, capture:
-
-- Narrative purpose.
-- Emotional purpose.
-- Character focus.
-- Visual contrast.
-- Important props.
-- Continuity constraints.
-- Sound and transition requirements.
-- What must be clear to the audience by the end.
-
-Example for `Lite_Challenge` Scene 1:
-
-- The children are vulnerable but purposeful.
-- Tom is trying to be steady.
-- Pip's hunger and hope soften the scene.
-- Nell is alert to danger.
-- The brown paper parcel matters.
-- The train interior is temporary warmth.
-- The rain outside is hostile.
-- The scene should end by moving from train safety into exposed platform danger.
-
-Host-owned outputs:
-
-- `scene_intent.yaml` or equivalent typed state.
-- Scene-level constraints passed to later stages.
-
-LLM-owned work:
-
-- Drafting the intent summary from script.
-- Suggesting emotional/visual priorities.
-
-User-owned work:
-
-- Approving or editing intent before scene look and cut sketches.
-
----
-
-### Stage 4: Scene Look / Reference Board
-
-Purpose: create the still-image foundation for the scene before production notes.
-
-This stage should generate or attach scene-level references such as:
-
-- Location.
-- Wardrobe.
-- Props.
-- Mood.
-- Lighting.
-- Composition.
-- Group poses.
-- Exterior views.
-- Interior views.
-- Period detail.
-
-Asset roles:
-
-- `location_reference`
-- `wardrobe_reference`
-- `prop_reference`
-- `mood_reference`
-- `lighting_reference`
-- `composition_reference`
-- `group_reference`
-- `exterior_reference`
-- `interior_reference`
-
-For the train scene, this might include:
-
-- Kids in period clothes sitting in a narrow train carriage.
-- Rain-streaked carriage window with warm yellow light.
-- Brown paper parcel on Tom's knees.
-- Exterior two-carriage night train in rain.
-- Willowby Halt platform/red lantern mood reference.
-- Swinging corridor lamp detail.
-
-User-facing actions:
-
-- Draft scene reference prompts.
-- Generate selected references.
-- Attach existing images.
-- Send selected image for edit.
-- Approve / reject / regenerate.
-- Promote image to a scene role.
-
-Host-owned outputs:
-
-- Scene reference registry.
-- Image versions.
-- Approval status.
-- Provider job history.
-- Mapping from images to roles.
-
-LLM-owned work:
-
-- Drafting image prompts.
-- Suggesting which references are useful.
-- Writing edit briefs from user changes.
-
-Important rule:
-
-The host should choose where generated references are saved and how they are registered. The model should not invent output paths.
-
----
-
-### Stage 5: Cut Sketches
-
-Purpose: plan the scene as editable cut cards before canonical production notes.
-
-Cut sketches are intentionally lighter than production handoffs. They should contain just enough information to generate or choose reference/start images and later produce final notes.
-
-Each cut sketch should include:
-
-- Source scene ID.
-- Cut number.
-- Title.
-- Dialogue covered.
-- Action beat covered.
-- Location.
-- Shot role.
-- Subject.
-- Speaker, if any.
-- On-camera intent.
-- Mouth policy.
-- Rough duration/pace.
-- Suggested visual prompt.
-- Suggested negative prompt.
-- Suggested reference image roles.
-- Transition idea.
-
-Suggested shot roles:
-
-- `performance`
-- `reaction`
-- `insert`
-- `atmosphere`
-- `establishing`
-- `transition`
-- `action`
-- `detail`
-
-Suggested mouth policies:
-
-- `speaking_visible`
-- `closed_or_not_visible`
-- `off_camera`
-- `no_people`
-
-Example sketch:
-
-```yaml
-source_scene: 1
-cut: 2
-title: Pip watches the parcel
-shot_role: reaction
-subject: Pip
-location: train_interior
-dialogue:
-  - speaker: Tom
-    text: "We shall be there before supper."
-    heard_as: voice_over
-on_camera:
-  - Pip
-mouth_policy: closed_or_not_visible
-pace: natural
-visual_prompt: >-
-  Pip sits close beside Tom in the warm, narrow train carriage, watching the
-  brown paper parcel while rain runs down the black window behind him.
-references:
-  - group_reference
-  - prop_reference
-  - interior_reference
-negative_prompt: "lip movement, modern clothing, extra passengers"
-```
-
-Host-owned outputs:
-
-- Typed cut-sketch state.
-- Dialogue coverage.
-- Cut numbering.
-- Mix visibility.
-- Validation of strategy goals.
-
-LLM-owned work:
-
-- Proposed cut boundaries.
-- Shot role and framing suggestions.
-- Prompt language.
-- Creative continuity.
-
-User-owned work:
-
-- Edit/reorder/split/merge cuts.
-- Change shot role.
-- Change prompt.
-- Mark whether a cut needs a generated start frame.
-
-Important rule:
-
-The app should be able to show, before production notes, whether a scene is becoming lip-sync heavy, reaction heavy, or atmosphere heavy.
-
----
-
-### Stage 6: Reference Images / Start Frames
-
-Purpose: create scene-specific visual sources for cuts.
-
-This is where the current manual workflow should become first-class.
-
-Each cut can have:
-
-- Generated start frame.
-- Edited start frame.
-- Attached still.
-- Continuity frame extracted from prior video.
-- Approved performance source.
-- Approved reaction plate.
-
-Asset roles:
-
-- `cut_start_frame`
-- `performance_source`
-- `reaction_plate`
-- `insert_plate`
-- `continuity_frame`
-- `last_frame`
-- `edit_source`
-
-User-facing actions:
-
-- Generate start frame from cut sketch.
-- Attach image.
-- Send image for edit.
-- Extract last frame from prior render.
-- Compare versions.
-- Approve image for production notes.
-
-Host-owned outputs:
-
-- Cut image registry.
-- Version history.
-- Approval status.
-- Link from cut sketch to approved visual source.
-
-LLM-owned work:
-
-- Image prompt drafting.
-- Edit brief drafting.
-
-Important rule:
-
-Generic character identity refs can seed image generation, but approved cut-specific images should become the visual source for video generation.
-
----
-
-### Stage 7: Production Notes
-
-Purpose: create canonical generation handoffs only after the scene/cut visual foundation exists.
-
-Production notes should be generated from:
-
-- Script scene.
-- Scene intent.
-- Scene look board.
-- Cut sketches.
-- Approved cut start frames / references.
-- Character and voice registries.
-- Host config and provider capabilities.
-
-The final production handoff should not be where the model invents:
-
-- Paths.
-- Provider.
-- Stage.
-- Aspect ratio.
-- Cue IDs.
-- Timing buckets.
-- Source mode.
-- Generation path.
-- Required capabilities.
-- Reference image paths.
-
-Host-owned outputs:
-
-- `prod.md`.
-- Sidecars.
-- Canonical YAML.
-- Derived timing.
-- Render lane.
-- Asset bindings.
-
-LLM-owned work:
-
-- Polished final prompt.
-- Continuity narration.
-- Delivery notes.
-- Negative prompt.
-- Creative shot language.
-
-Important rule:
-
-`source_video_lipsync` should be reserved for deliberate performance cuts. A character being lip-sync ready should never be enough by itself.
-
----
-
-### Stage 8: Render
-
-Purpose: execute approved production notes.
-
-User-facing actions:
-
-- Render selected cut.
-- Render ready scene.
-- Render video-only.
-- Render audio/text-sync.
-- Retry failed job.
-- Reveal output.
-
-Host-owned outputs:
-
-- Provider job records.
-- Output files.
-- Render metadata.
-- Cost/approval log.
-- Failure details.
-
-LLM-owned work:
-
-- None during provider execution.
-- Optional diagnosis or edit suggestions after failure.
-
-Important rule:
-
-Provider calls are jobs with approval and history. They should not be hidden behind a single chat reply.
-
----
-
-### Stage 9: Take Review
-
-Purpose: choose what footage survives.
-
-This stage is necessary because generative video produces takes, not guaranteed final shots.
-
-Statuses:
-
-- `selected`
-- `alternate`
-- `rejected`
-- `needs_edit`
-- `needs_rerender`
-- `used_in_assembly`
-
-User-facing actions:
-
-- Play take.
-- Compare takes.
-- Mark selected.
-- Send frame for edit.
-- Extract last frame.
-- Request rerender.
-- Promote to assembly.
-
-Host-owned outputs:
-
-- Take registry.
-- Selected clip per cut.
-- Alternate clips.
-- Rejection notes.
-- Continuity frames.
-
-LLM-owned work:
-
-- Optional review summary.
-- Suggested edit/rerender brief.
-
----
-
-### Stage 10: Assemble
-
-Purpose: assemble selected takes into a scene or full piece.
-
-Host-owned work:
-
-- Discover selected takes.
-- Read production state.
-- Read transitions.
-- Use ffprobe/ffmpeg.
-- Build assemble plan.
-- Apply handles/trims.
-- Export drafts.
-
-LLM-owned work:
-
-- Optional music/caption/finish suggestions.
-- Optional natural-language change request parsing.
-
-Important rule:
-
-Assemble should not depend on the model reconstructing a scene list the host already has.
-
----
-
-## 4. Opt-Out Modes
-
-The workflow should support different project sizes and user patience levels.
-
-### Full Pre-Production
-
-Best for serious shorts, recurring series, multipart stories, or any scene where continuity matters.
-
-Flow:
-
-```text
-script -> characters -> scene intent -> scene look -> cut sketches -> start images -> production notes -> render
-```
-
-### Fast Draft
-
-Best for quick exploration.
-
-Flow:
-
-```text
-script -> cut sketches -> production notes
-```
-
-The app should warn when visual references are missing and make it clear that output may drift.
-
-### Direct Production Notes
-
-Best for compatibility with the current workflow.
-
-Flow:
-
-```text
-script -> production notes
-```
-
-This should remain available, but it should be labeled as a shortcut and should not be the default for projects that need continuity.
-
-### Manual Assets
-
-Best when the user already has references from outside tools.
-
-Flow:
-
-```text
-script -> characters -> attach scene/cut refs -> production notes
-```
-
----
-
-## 5. Proposed Project Layout
-
-Keep compatibility with existing project folders, but introduce a logical V2 layout the app can migrate toward.
-
-```text
-project/
-├── Scripts/
-│   └── story.md
-├── Characters/
-│   └── Tom Vale/
-│       ├── character.yaml
-│       ├── model_sheet/
-│       └── voice/
-├── Preproduction/
-│   ├── workflow_state.json
-│   └── Scene1/
-│       ├── scene_intent.yaml
-│       ├── scene_look.yaml
-│       ├── cut_sketches.yaml
-│       ├── references/
-│       └── start_frames/
-├── Prod_Notes/
-│   ├── prod.md
-│   └── Scene1/
-│       └── Cut1.txt
-├── Renders/
-│   └── Scene1/
-│       └── Cut1/
-│           ├── takes/
-│           └── selected.yaml
-└── Final/
-```
-
-Existing paths like `Scene_Prompts/` can remain supported during migration.
-
-The app should not require users to rename old projects immediately. It should detect what exists, map it into workflow state, and offer normalization later.
-
----
-
-## 6. Core State Model
-
-The new UI needs explicit workflow state. This can start as a single JSON file and become typed Rust structs.
-
-Top-level concepts:
-
-```text
-ProjectState
-├── scripts
-├── characters
-├── scenes
-├── assets
-├── jobs
-└── settings snapshot / capability slots
-```
-
-Scene state:
-
-```text
-SceneState
-├── id
-├── title
-├── source_path
-├── source_excerpt
-├── intent
-├── look_board
-├── cut_sketches
-├── production_notes
-├── renders
-└── stage statuses
-```
-
-Cut state:
-
-```text
-CutState
-├── id
-├── title
-├── dialogue coverage
-├── shot_role
-├── subject
-├── mouth_policy
-├── pace
-├── sketch_prompt
-├── approved_start_frame
-├── production_handoff
-├── render_lane
-├── takes
-└── selected_take
-```
-
-Asset state:
-
-```text
-AssetState
-├── path
-├── role
-├── scene_id
-├── cut_id
-├── character_id
-├── source_job_id
-├── parent_asset_id
-├── status
-└── notes
-```
-
-Job state:
-
-```text
-JobState
-├── id
-├── kind
-├── provider
-├── model
-├── input assets
-├── output assets
-├── cost/approval status
-├── started/finished timestamps
-├── raw provider id
-└── error/retry info
-```
-
----
-
-## 7. UI Migration
-
-The UI should move from chat-first to stage-first.
-
-### Minimum V2 UI
-
-Start with:
-
-- Left project tree.
-- Stage rail.
-- Scene list.
-- Main panel for selected stage.
-- Right inspector for selected scene/cut/asset.
-- Jobs drawer.
-- Chat drawer scoped to current selection.
-
-Stage rail:
+The narrative slice is closed except for the gaps in the baseline section. This stage rail stays on screen as the comparison surface for the UI rewrite. It is a narrative view, not the architecture.
 
 ```text
 Script
@@ -744,530 +286,122 @@ Take Review
 Assemble
 ```
 
-The first UI does not need to be beautiful. It needs to make state visible.
-
-### Chat's New Role
-
-Chat should answer and assist, but action buttons should drive the workflow.
-
-Examples:
-
-- In Scene Intent: "Tighten the emotional purpose."
-- In Scene Look: "Make the train feel poorer and older."
-- In Cut Sketches: "Turn Cut 2 into a reaction shot."
-- In Reference Images: "Send this image for edit; Pip should look colder."
-- In Production Notes: "Regenerate prompt from the approved start frame."
-
-The Director should receive the current selected stage/cut/asset as context and should not have to infer the whole universe from free text.
-
----
-
-## 8. Migration From Current Projects
-
-Existing projects should be importable into V2 state.
-
-For `Lite_Challenge`, the importer should read:
-
-- Script files under `Scripts/`.
-- Character folders under `Characters/`.
-- Existing `prod.md`.
-- Existing `Scene_Prompts/SceneN/CutM.txt`.
-- Any generated images/renders if present.
-
-Then it should create draft V2 state:
-
-- Scene records from the script and/or production notes.
-- Cut records from existing handoffs.
-- Current speech-mode mix.
-- Existing prompts.
-- Existing reference paths.
-- Missing start-frame warnings.
-- Missing scene-look-board warnings.
-
-The migrated UI should be able to say:
+These are views over shared production state, not a one-way waterfall. A continuity-linked cut legitimately crosses them:
 
 ```text
-Scene 1:
-- 9 cuts found
-- 6 lip-sync / 1 voice-over / 2 silent
-- 0 approved cut-specific start frames
-- production notes exist
-- scene look board missing
-- cut sketches can be backfilled from production notes
+Reference Images: source strategy approved; predecessor frame pending
+Production Notes: shot specification approved; concrete source unresolved
+Render: blocked until predecessor selection
+Take Review: predecessor take and exit frame selected
+Render: continuity source bound; dependent cut ready
 ```
 
-That gives the user a way to recover the current work without pretending it was produced by the new workflow.
+For step 1, Production Notes, Render, Take Review, and Assemble become working panels. Each Cut Sketch card also embeds that cut’s visual-source strategy, start-frame prompt, image versions, and approval actions, so planning and source work do not require tab switching. Reference Images remains as a filtered scene-wide review queue and can show a correctly planned but unresolved continuity source.
+
+Chat stays a drawer scoped to the selected stage, scene, cut, or asset. Buttons own the known transitions: draft intent, draft sketches, choose a source strategy, generate a preproduction start frame, bind a production-derived continuity frame, write a shot specification, render, mark take, assemble.
+
+The production desk should be able to answer, for the open scene:
+
+- What is approved?
+- What is blocked?
+- Which take is selected?
+- What has been spent?
+- What would go stale if this still changes?
 
 ---
 
-## 9. Strategy Handling
+## 7. Asset and Take Rules That Already Apply
 
-Strategy should stop being only prompt advice.
+These rules are in force. Step 1 must not weaken them.
 
-The host should track scene strategy in state and validate the cut sketch mix before production notes.
+Identity assets establish who someone is. Scene look assets establish the world. A cut’s source strategy establishes how its opening image will be obtained. A concrete cut asset may exist in preproduction or may be derived later from a selected take. Render outputs are takes until review says otherwise.
 
-Suggested strategy policies:
+A character being lip-sync ready is not a reason to shoot them speaking.
 
-### Performance Heavy
+Take statuses already in state:
 
-- Most character dialogue may be `performance`.
-- Lip-sync is expected for eligible pivotal lines.
-- Silent/insert cuts are still allowed for action beats.
+- `selected`
+- `alternate`
+- `rejected`
+- `needs_edit`
+- `needs_rerender`
+- `used_in_assembly`
 
-### Cinematic Balanced
+Step 1 uses those values. It does not invent a parallel status in chat or in `prod.md`.
 
-- Must include a mix of performance, reaction, insert/atmosphere/action cuts when the scene has enough material.
-- Should not allow every eligible character line to become a performance/lip-sync cut.
-- Should require at least some dialogue to be carried as voice-over or off-camera when there are multiple lines.
-- Should surface a warning or rejection if the sketch is effectively performance-heavy.
+---
 
-### Atmosphere Heavy
+## 8. Testing
 
-- Most dialogue should play over reaction, insert, atmosphere, or action shots.
-- Lip-sync should be reserved for one or two pivotal lines.
+Step 1 tests, before any new stage:
 
-The exact ratios can start simple and evolve with use.
+- Handoff generation uses the approved visual-source strategy.
+- A direct-start-frame cut binds its approved preproduction still.
+- A continuity-linked cut preserves a symbolic predecessor dependency in its shot specification and is blocked from rendering while that dependency is unresolved.
+- Selecting a predecessor take and exit frame registers a continuity-frame asset and makes the dependent cut render ready.
+- Replacing the predecessor selection requires the dependent source to be rebound before another render.
+- A character model sheet is not the video source unless it was explicitly approved as that cut’s source.
+- A reaction or insert sketch does not become `source_video_lipsync`.
+- The host derives timing, lane, paths, refs, provider, and IDs.
+- A completed provider call creates a take and a job, and leaves the cut unselected until review.
+- Assemble order follows selected takes.
 
-Example initial rule:
+Keep the existing importer and strategy tests. They guard the planning half that is already built.
+
+Later steps add their own tests. Do not block step 1 on recipe or ID-migration coverage.
+
+---
+
+## 9. Decisions
+
+Settled by the production model:
+
+- One shared project state. Departments are responsibilities, not separate agent memories.
+- Clay and other looks are production-profile values.
+- Display numbers are labels. Stable IDs are required before new stages accumulate, and are introduced in step 4. Records created in steps 2 and 3 use stable IDs from the start.
+- Workflow state stays in `Preproduction/workflow_state.json` until step 4. Do not split per-scene files during the slice.
+- Scene intent and cut sketches stay editable as forms that write typed state.
+- Cinematic-balanced validation stays in the host: warn on a lip-sync-heavy mix, reject only the obvious all-performance case, and keep an explicit override.
+- Generated scene references are approved before they are treated as canonical. Cut sketches may be drafted earlier. Production notes require an approved visual-source strategy, not necessarily an already-existing concrete image.
+- Start frames are generated for cuts that need an independent still source, not blindly for every cut. Continuity-linked cuts declare their predecessor during preproduction and receive their concrete frame after a predecessor take is selected.
+- A shot specification may be approved with an unresolved production-derived source. A provider request may not execute until that source is bound to an exact artifact.
+- The jobs drawer is the job history UI. It does not become an asset manager.
+- External NLE remains the escape hatch.
+
+Still open, and not required to start step 1:
+
+- How strict picture-lock and QC need to be in step 6.
+- Which non-dialogue recipe is the second fixture in step 5.
+- Whether scratch dialogue for the animatic is recorded, generated, or both.
+
+---
+
+## 10. Near-Term Recommendation
+
+Stop extending workflow state.
+
+The chain below is on the desk through selected takes and a bound continuity frame. Assembly reconciliation, a reviewed frame time, and opening the review export are the remaining gaps, and they belong to the UI redo foundation gate:
 
 ```text
-For cinematic-balanced scenes with 4+ dialogue lines and 3+ cut sketches:
-- reject if every reference-ready dialogue line is marked performance/speaking_visible
-- warn if lip-sync/performance cuts exceed 60% of dialogue cuts
-- require at least one non-performance dialogue cut unless explicitly overridden
+approved sketches + approved source strategies
+-> canonical shot specifications
+-> render ready predecessor
+-> register and review takes
+-> selected take + selected exit frame
+-> bind continuity frame and unlock dependent cut
+-> render dependent cut
+-> scene assembly
+-> review export
 ```
 
-This belongs in host validation, not only in the prompt.
+Next implementation target: `Dev_Notes/V2/Production_Studio_UI_Redo_Plan.md`, starting with the foundation gate after this baseline.
 
 ---
 
-## 10. Asset Semantics
+## Appendix: September 17 Plan
 
-The single word "reference" is too vague. V2 must make roles explicit.
+The previous plan’s diagnosis still holds. Its stage sequence is what the desk implemented through start frames, and what this revision stops extending.
 
-Identity assets:
+It specified ten stages: Script, Characters, Scene Intent, Scene Look, Cut Sketches, Reference Images, Production Notes, Render, Take Review, Assemble. Phases 0–5 of that plan are in the app (state, importer, stage UI, intent, sketches, strategy checks, look board, start frames). Phases 6–8 (handoffs from approved sketches, desk render and take review, assemble from selected takes) were step 1 above. Render, take review, and selected-take assembly preparation are now on the desk. Reconciling the assemble output and opening the review export are still open, and they are listed in the baseline section.
 
-- `identity_reference`
-- `body_reference`
-- `expression_reference`
-
-Scene look assets:
-
-- `location_reference`
-- `wardrobe_reference`
-- `prop_reference`
-- `mood_reference`
-- `lighting_reference`
-- `composition_reference`
-- `group_reference`
-
-Cut assets:
-
-- `cut_start_frame`
-- `performance_source`
-- `reaction_plate`
-- `insert_plate`
-- `continuity_frame`
-- `last_frame`
-- `edit_source`
-
-Render outputs:
-
-- `video_take`
-- `audio_take`
-- `selected_take`
-- `assembly_draft`
-- `final_export`
-
-Key rule:
-
-`Characters/` assets establish identity. `Preproduction/SceneN/start_frames/` assets establish the actual cut image. Production notes should prefer cut-specific approved images over generic character closeups.
-
----
-
-## 11. Specialist Boundary Changes
-
-V2 should split the current scene-plan behavior into smaller stage-specific runners.
-
-### Scene Intent Runner
-
-Input:
-
-- Script scene.
-- Project style.
-- User direction.
-
-Output:
-
-- Typed scene intent.
-
-### Scene Look Runner
-
-Input:
-
-- Scene intent.
-- Script scene.
-- Character summaries.
-
-Output:
-
-- Reference-board prompt suggestions.
-- Suggested asset roles.
-
-### Cut Sketch Runner
-
-Input:
-
-- Script scene.
-- Dialogue coverage.
-- Scene intent.
-- Scene look summary.
-- Strategy.
-
-Output:
-
-- Typed cut sketches.
-
-### Reference Prompt Runner
-
-Input:
-
-- Scene look or cut sketch.
-- Selected asset roles.
-- Character identity refs.
-
-Output:
-
-- Image prompt/edit brief.
-
-### Production Notes Runner
-
-Input:
-
-- Approved cut sketch.
-- Approved start frame / scene references.
-- Character/voice registries.
-- Host config.
-
-Output:
-
-- Canonical handoff creative fields only.
-
-Host derives:
-
-- File paths.
-- IDs.
-- Aspect ratio.
-- Provider/model.
-- Render lane.
-- Timing.
-- Reference paths.
-- Approval requirements.
-
----
-
-## 12. Implementation Phases
-
-### Phase 0: Stabilize Current Branch
-
-Goal: make sure the current ownership work stays green.
-
-Tasks:
-
-- Keep restored settings files.
-- Keep Tier 1/Tier 2 ownership changes passing.
-- Confirm host tests.
-- Avoid starting Tier 3 assemble work until V2 workflow direction is captured.
-
-Done when:
-
-- Current host tests pass.
-- This migration plan exists under `Dev_Notes/V2`.
-
----
-
-### Phase 1: Define V2 State and Importer
-
-Goal: represent the new workflow without UI complexity.
-
-Tasks:
-
-- Add typed state structs for project/scene/cut/assets/jobs.
-- Add migration/import code for existing `Scripts/`, `Characters/`, `prod.md`, and `Scene_Prompts`.
-- Add tests using `Lite_Challenge`-shaped fixtures.
-- Surface current scene mix and missing-reference warnings.
-
-Done when:
-
-- Existing production notes can be imported into V2 state.
-- The app can report scene/cut status without generating anything.
-
----
-
-### Phase 2: Minimal Workflow UI
-
-Goal: make stages visible.
-
-Tasks:
-
-- Add stage rail.
-- Add scene list.
-- Add selected-scene inspector.
-- Add cut list/cards.
-- Add job/status drawer placeholder.
-- Keep existing chat available as a drawer/panel.
-
-Done when:
-
-- User can open `Lite_Challenge`.
-- User can see Scene 1, its cuts, current mix, and missing preproduction artifacts.
-
----
-
-### Phase 3: Scene Intent + Cut Sketches
-
-Goal: prove the planning layer fixes the lip-sync monoculture before adding image generation.
-
-Tasks:
-
-- Implement scene intent generation/editing.
-- Implement cut sketch generation/editing.
-- Add strategy validation at cut-sketch level.
-- Add UI controls for shot role and mouth policy.
-- Backfill sketches from existing production notes.
-
-Done when:
-
-- `Scene Strategy cinematic balanced` produces a mixed cut sketch plan.
-- The UI warns/rejects performance-heavy output when balanced is requested.
-- User can manually change a cut from performance to reaction/insert/atmosphere.
-
----
-
-### Phase 4: Scene Look Board
-
-Goal: generate and manage scene-level reference prompts/assets.
-
-Tasks:
-
-- Add scene look state.
-- Add reference prompt generation.
-- Add attach-existing-image flow.
-- Add generated-reference job records.
-- Add approve/reject/version states.
-
-Done when:
-
-- Scene 1 can have approved train interior, exterior, wardrobe, prop, and mood references.
-- These assets are available to cut sketches and reference-image generation.
-
----
-
-### Phase 5: Cut Start Frames / Image Edits
-
-Goal: replace manual start-frame creation and reference swapping.
-
-Tasks:
-
-- Generate cut-specific start frame prompts from cut sketches.
-- Use character identity refs plus scene look refs.
-- Save outputs under host-derived paths.
-- Add send-for-edit workflow.
-- Add image compare/version approval UI.
-- Mark approved start frame per cut.
-
-Done when:
-
-- A cut can move from sketch to approved start frame without hand-editing paths.
-- The approved start frame, not the model-sheet closeup, becomes the video source.
-
----
-
-### Phase 6: Production Notes From Approved Sketches
-
-Goal: make production notes downstream of approved planning artifacts.
-
-Tasks:
-
-- Generate canonical handoff from cut sketch + approved visual source.
-- Preserve host-owned derivations from Tier 2.
-- Keep `source_video_lipsync` limited to performance cuts.
-- Prefer `voice_over`/I2V for reaction and insert cuts.
-- Write `prod.md` and sidecars from typed state.
-
-Done when:
-
-- Scene 1 can be regenerated from sketches/images into production notes.
-- The production-note mix matches the approved cut-sketch mix.
-- The model cannot turn every ready character into lip-sync during this stage.
-
----
-
-### Phase 7: Render + Take Review
-
-Goal: make generation outputs reviewable.
-
-Tasks:
-
-- Render from selected production notes.
-- Track provider jobs.
-- Store takes per cut.
-- Add selected/alternate/rejected statuses.
-- Add rerender/edit-from-take actions.
-- Support last-frame extraction into continuity assets.
-
-Done when:
-
-- User can render one approved cut, review takes, select one, and feed its last frame into a later cut.
-
----
-
-### Phase 8: Assemble From Selected Takes
-
-Goal: make assemble host-planned.
-
-Tasks:
-
-- Discover selected takes.
-- Build assemble plan from state.
-- Apply transition/trim policy.
-- Export draft.
-- Record assembly outputs.
-
-Done when:
-
-- User can assemble a scene without asking the LLM to reconstruct scene order.
-
----
-
-## 13. First Vertical Slice
-
-Use `Lite_Challenge` Scene 1.
-
-The first useful slice should be:
-
-```text
-Import current project -> show Scene 1 status -> create/edit scene intent -> create/edit cut sketches -> validate cinematic-balanced mix
-```
-
-Do not start with provider image generation. First prove that the workflow can create a better plan.
-
-Success criteria:
-
-- The app imports existing `prod.md` / `Scene_Prompts`.
-- Scene 1 shows `6 lip-sync / 1 voice-over / 2 silent`.
-- The app flags that as effectively performance-heavy for a cinematic-balanced request.
-- A new cut-sketch pass can propose reaction/insert/atmosphere dialogue coverage.
-- The user can edit those sketches before production notes exist.
-
-Only after this works should the app generate scene references or start frames.
-
----
-
-## 14. Testing Strategy
-
-Tests should be stage-specific.
-
-Importer tests:
-
-- Reads existing `prod.md`.
-- Reads sidecars.
-- Reconstructs cuts.
-- Preserves current prompts.
-- Reports missing V2 artifacts.
-
-Strategy tests:
-
-- Cinematic-balanced rejects all-performance dialogue scenes.
-- Atmosphere-heavy allows only limited performance cuts.
-- Performance-heavy allows mostly lip-sync.
-- Explicit opt-out bypasses strategy mix checks with a warning.
-
-State tests:
-
-- Cut IDs remain stable.
-- Asset roles round-trip.
-- Approved start frame is selected over identity reference.
-- Generated output paths are host-derived.
-
-Production-note tests:
-
-- Handoff generation uses approved start frame.
-- Character model sheet is not used as video source unless explicitly approved as a cut source.
-- Reaction/insert cut does not become `source_video_lipsync`.
-- Host derives timing, lane, paths, refs, provider, and IDs.
-
-UI smoke tests:
-
-- Project opens.
-- Scene list renders.
-- Cut cards render.
-- Stage status updates after action.
-- Job drawer records local/generated jobs.
-
----
-
-## 15. Risks
-
-### Risk: Overbuilding Before the Workflow Is Proven
-
-Mitigation:
-
-Start with `Lite_Challenge` Scene 1 and no provider generation. Validate state, UI, and cut sketches first.
-
-### Risk: Too Many New File Formats
-
-Mitigation:
-
-Start with one workflow state file and typed structs. Split into per-scene files later only if useful.
-
-### Risk: The UI Becomes a Heavy NLE
-
-Mitigation:
-
-Keep it as a production desk, not a timeline editor. Use external NLEs as the escape hatch.
-
-### Risk: Chat and UI Fight Each Other
-
-Mitigation:
-
-Chat must always be scoped to current selection and stage. Stage buttons own known workflow transitions.
-
-### Risk: Existing Projects Break
-
-Mitigation:
-
-Import and map existing layouts. Do not force folder normalization on first open.
-
-### Risk: Strategy Rules Become Too Rigid
-
-Mitigation:
-
-Warn first, reject only the most obvious violations, and include explicit opt-outs.
-
----
-
-## 16. Open Decisions
-
-- Should V2 workflow state live in one `Preproduction/workflow_state.json` file, or in per-scene YAML files?
-- Should scene intent and cut sketches be editable as forms, YAML, or both?
-- How strict should cinematic-balanced validation be?
-- Should generated scene references require approval before cut sketches, or only before production notes?
-- Should start-frame generation be per cut by default, or only for cuts marked as needing one?
-- How should the UI expose image versions without becoming a full asset manager?
-- What is the minimum viable job-history schema needed before provider calls move into this workflow?
-
----
-
-## 17. Near-Term Recommendation
-
-Pause further Tier 3+ ownership work until the V2 workflow foundation is started.
-
-Next implementation target:
-
-```text
-V2 state + Lite_Challenge importer + minimal stage UI + scene intent + cut sketches + strategy mix validation
-```
-
-That is the smallest change that attacks the real problem: the app currently creates final production notes before the visual planning layer exists.
-
+The previous plan’s lip-sync rule, asset roles, host and model split, and `Lite_Challenge` importer remain in force. Its assumption that the ten-stage rail is the V2 product does not.

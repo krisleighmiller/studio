@@ -239,6 +239,26 @@ pub fn save_settings(app: HostCtx, settings: Value) -> Result<(), String> {
     {
         return Err("Settings must include at least one API.".into());
     }
+    if let Some(clone_api_id) = migrated
+        .pointer("/capabilityDefaults/audio.tts_clone/apiId")
+        .and_then(Value::as_str)
+    {
+        let clone_api_kind = migrated
+            .get("apis")
+            .and_then(Value::as_array)
+            .and_then(|apis| {
+                apis.iter()
+                    .find(|api| api.get("id").and_then(Value::as_str) == Some(clone_api_id))
+            })
+            .and_then(|api| api.get("kind"))
+            .and_then(Value::as_str);
+        if clone_api_kind == Some("elevenlabs") {
+            return Err(
+                "TTS (voice clone) cannot use direct ElevenLabs TTS because it requires a registered voice ID, not a reference WAV. Select a reference-audio cloning model such as Atlas Cloud → Seed Audio 1.0; use ElevenLabs under TTS (voice profile)."
+                    .into(),
+            );
+        }
+    }
     let path = settings_path(&app)?;
     let raw = serde_json::to_string_pretty(&migrated)
         .map_err(|error| format!("Could not serialize settings: {error}"))?;

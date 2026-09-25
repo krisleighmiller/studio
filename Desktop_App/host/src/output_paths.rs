@@ -158,7 +158,12 @@ pub fn ensure_output_paths(
     project_root: Option<&str>,
 ) {
     match specialist {
-        "still_image" => ensure_file(inputs, project_root, still_image_rel(inputs), false),
+        "still_image" => {
+            if inputs.contains_key("batch") {
+                return;
+            }
+            ensure_file(inputs, project_root, still_image_rel(inputs), false);
+        }
         "scene_generation" => {
             if first_input_str(inputs, &["handoff_path", "handoff"]).is_some() {
                 return;

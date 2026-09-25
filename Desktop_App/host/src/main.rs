@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use workbench_host::ctx::HostCtx;
-use workbench_host::voice::RecorderState;
 use workbench_host::dispatch;
+use workbench_host::voice::RecorderState;
 
 #[derive(Debug, Deserialize)]
 struct Request {

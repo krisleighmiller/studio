@@ -77,6 +77,18 @@ pub fn sidecar_document(handoff: &SceneHandoff, canonical_yaml: &str) -> String 
         "none".to_string()
     } else if handoff.cast.is_empty() {
         handoff.distinct_speakers().join(", ")
+    } else if let [only] = handoff.cast.as_slice() {
+        match &only.voice_id {
+            Some(v) => format!(
+                "{} ({} {v})",
+                only.character,
+                only.voice_provider.as_deref().unwrap_or("voice")
+            ),
+            None => only
+                .voice_sample
+                .clone()
+                .unwrap_or_else(|| format!("{} (no voice on file)", only.character)),
+        }
     } else {
         handoff
             .cast

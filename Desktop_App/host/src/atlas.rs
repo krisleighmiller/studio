@@ -449,6 +449,91 @@ fn collect_url_list(params: &Map<String, Value>, keys: &[&str]) -> Vec<String> {
     out
 }
 
+fn parse_aspect_ratio(raw: &str) -> Option<(u32, u32)> {
+    let raw = raw.trim().trim_matches('"').to_ascii_lowercase();
+    let raw = match raw.as_str() {
+        "vertical" | "portrait" => "9:16",
+        "horizontal" | "landscape" => "16:9",
+        "square" => "1:1",
+        other => other,
+    };
+    let mut parts = raw.split(|c: char| c == ':' || c == '/' || c == 'x' || c == '*');
+    let width: u32 = parts.next()?.trim().parse().ok()?;
+    let height: u32 = parts.next()?.trim().parse().ok()?;
+    if parts.next().is_some() || width == 0 || height == 0 {
+        return None;
+    }
+    Some((width, height))
+}
+
+fn parse_pixel_size(raw: &str) -> Option<(u32, u32)> {
+    let raw = raw.trim().to_ascii_lowercase().replace('×', "*");
+    parse_aspect_ratio(&raw)
+}
+
+fn push_size_choices(choices: &mut Vec<String>, value: &Value) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    for item in items {
+        if let Some(text) = item.as_str() {
+            if parse_pixel_size(text).is_some() {
+                choices.push(text.to_string());
+            }
+        }
+    }
+}
+
+fn size_choices(prop: &Value) -> Vec<String> {
+    let mut choices = Vec::new();
+    if let Some(value) = prop.get("enum") {
+        push_size_choices(&mut choices, value);
+    }
+    if choices.is_empty() {
+        if let Some(value) = prop.pointer("/items/enum") {
+            push_size_choices(&mut choices, value);
+        }
+    }
+    choices
+}
+
+fn synthesized_size(aspect: (u32, u32)) -> String {
+    let long = 2048u32;
+    let (width, height) = if aspect.0 >= aspect.1 {
+        let height = ((long as u64 * aspect.1 as u64) / aspect.0 as u64) as u32;
+        (long, height.max(16))
+    } else {
+        let width = ((long as u64 * aspect.0 as u64) / aspect.1 as u64) as u32;
+        (width.max(16), long)
+    };
+    format!("{}*{}", (width / 16).max(1) * 16, (height / 16).max(1) * 16)
+}
+
+/// Closest allowed `WIDTH*HEIGHT`. Equal ratios prefer the larger preset.
+fn best_size_for_aspect(aspect: (u32, u32), options: &[String]) -> String {
+    let target = aspect.0 as f64 / aspect.1 as f64;
+    let mut best: Option<(f64, u64, String)> = None;
+    for option in options {
+        let Some((width, height)) = parse_pixel_size(option) else {
+            continue;
+        };
+        let error = ((width as f64 / height as f64) - target).abs();
+        let pixels = width as u64 * height as u64;
+        let replace = match &best {
+            None => true,
+            Some((best_error, best_pixels, _)) => {
+                error + 1e-6 < *best_error
+                    || ((error - best_error).abs() < 1e-4 && pixels > *best_pixels)
+            }
+        };
+        if replace {
+            best = Some((error, pixels, format!("{width}*{height}")));
+        }
+    }
+    best.map(|(_, _, size)| size)
+        .unwrap_or_else(|| synthesized_size(aspect))
+}
+
 /// Map common aliases (`image`, `media_files`, …) onto the model's real schema fields
 /// and drop keys the schema does not accept. Host specialists and LLMs often shotgun
 /// aliases; Grok reference-to-video wants `image_urls`, not `image`/`media_files`.
@@ -530,6 +615,25 @@ fn remap_params_to_schema(
             if props.contains_key(key) && !out.contains_key(key) {
                 out.insert(key.into(), json!(&audio_urls[0]));
             }
+        }
+    }
+
+    // Edit models such as Seedream and Flux take `size` (`WIDTH*HEIGHT`) and have
+    // no `aspect_ratio` field. Leaving the ratio unmapped makes the model pick
+    // its own canvas, usually 16:9 or square, even when the project is 9:16.
+    if params.contains_key("aspect_ratio")
+        && !props.contains_key("aspect_ratio")
+        && props.contains_key("size")
+        && !out.contains_key("size")
+    {
+        if let Some(aspect) = params
+            .get("aspect_ratio")
+            .and_then(|value| value.as_str())
+            .and_then(parse_aspect_ratio)
+        {
+            let options = props.get("size").map(size_choices).unwrap_or_default();
+            let size = best_size_for_aspect(aspect, &options);
+            out.insert("size".into(), json!(size));
         }
     }
 
@@ -1512,5 +1616,53 @@ mod tests {
         let prompt = out.get("prompt").and_then(|v| v.as_str()).unwrap();
         assert!(prompt.contains("<IMAGE_1>"));
         assert!(prompt.contains("<IMAGE_2>"));
+    }
+
+    #[test]
+    fn reference_edit_size_follows_aspect_ratio_when_schema_has_no_aspect_field() {
+        let mut props = Map::new();
+        props.insert("prompt".into(), json!({"type": "string"}));
+        props.insert("images".into(), json!({"type": "array"}));
+        props.insert(
+            "size".into(),
+            json!({
+                "type": "string",
+                "enum": [
+                    "2048*2048",
+                    "2720*1530",
+                    "1530*2720",
+                    "2048*1152",
+                    "1152*2048",
+                    "1728*2304"
+                ]
+            }),
+        );
+        let params = json!({
+            "prompt": "rainy train compartment",
+            "aspect_ratio": "9:16",
+            "images": ["https://cdn.example/tom.png"]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let out = remap_params_to_schema(&params, &props);
+        assert!(out.get("aspect_ratio").is_none());
+        assert_eq!(out.get("size"), Some(&json!("1530*2720")));
+    }
+
+    #[test]
+    fn freeform_size_is_synthesized_for_vertical_aspect() {
+        let mut props = Map::new();
+        props.insert("prompt".into(), json!({"type": "string"}));
+        props.insert("size".into(), json!({"type": "string"}));
+        let params = json!({
+            "prompt": "platform at night",
+            "aspect_ratio": "9:16"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let out = remap_params_to_schema(&params, &props);
+        assert_eq!(out.get("size"), Some(&json!("1152*2048")));
     }
 }

@@ -566,7 +566,7 @@ fn director_turn_inner(
 ) -> Result<DirectorTurnResponse, String> {
     use crate::director_actions::{
         find_pending_action_in_history, format_approval_request, parse_actions,
-        planner_system_prompt, validate_action, ActionKind,
+        planner_system_prompt, validate_action, ActionKind, ACTION_CONSUMED,
     };
     use crate::specialists::{self, specialist_requires_approval, SpecialistLlm};
 
@@ -713,7 +713,7 @@ fn director_turn_inner(
                                     .unwrap_or_else(|| format!("{:?}", validated.action.action))
                             ));
                             return Ok(DirectorTurnResponse {
-                                reply: result.message,
+                                reply: format!("{}\n\n{}", result.message, ACTION_CONSUMED),
                                 model,
                                 tool_events,
                                 continue_suggested: result.continue_suggested,
@@ -722,7 +722,9 @@ fn director_turn_inner(
                         Ok(None) => {}
                         Err(error) => {
                             return Ok(DirectorTurnResponse {
-                                reply: format!("Host could not execute pending action: {error}"),
+                                reply: format!(
+                                    "Host could not execute pending action: {error}\n\n{ACTION_CONSUMED}"
+                                ),
                                 model,
                                 tool_events,
                                 continue_suggested: false,

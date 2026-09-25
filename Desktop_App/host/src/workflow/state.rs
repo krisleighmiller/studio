@@ -27,6 +27,36 @@ pub enum WorkflowStage {
     Assemble,
 }
 
+impl WorkflowStage {
+    pub const ALL: [Self; 10] = [
+        Self::Script,
+        Self::Characters,
+        Self::SceneIntent,
+        Self::SceneLook,
+        Self::CutSketches,
+        Self::ReferenceImages,
+        Self::ProductionNotes,
+        Self::Render,
+        Self::TakeReview,
+        Self::Assemble,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Script => "script",
+            Self::Characters => "characters",
+            Self::SceneIntent => "scene_intent",
+            Self::SceneLook => "scene_look",
+            Self::CutSketches => "cut_sketches",
+            Self::ReferenceImages => "reference_images",
+            Self::ProductionNotes => "production_notes",
+            Self::Render => "render",
+            Self::TakeReview => "take_review",
+            Self::Assemble => "assemble",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StageStatus {
@@ -167,6 +197,8 @@ pub enum AssetRole {
     VoiceProfile,
     LocationReference,
     WardrobeReference,
+    /// Scene-specific close-up or standing plate wearing the approved wardrobe.
+    WardrobePlate,
     PropReference,
     MoodReference,
     LightingReference,
@@ -285,6 +317,7 @@ impl AssetRole {
             Self::VoiceProfile => "voice_profile",
             Self::LocationReference => "location_reference",
             Self::WardrobeReference => "wardrobe_reference",
+            Self::WardrobePlate => "wardrobe_plate",
             Self::PropReference => "prop_reference",
             Self::MoodReference => "mood_reference",
             Self::LightingReference => "lighting_reference",
@@ -313,6 +346,7 @@ impl AssetRole {
             Self::ExteriorReference => "Exterior",
             Self::LocationReference => "Location",
             Self::WardrobeReference => "Wardrobe",
+            Self::WardrobePlate => "Wardrobe plate",
             Self::PropReference => "Prop",
             Self::MoodReference => "Mood",
             Self::LightingReference => "Lighting",
@@ -346,17 +380,126 @@ pub enum AssetStatus {
     Draft,
     Approved,
     Rejected,
+    /// Kept on disk. A newer approval replaced it; the file is not rewritten.
+    Superseded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TakeStatus {
+    Unreviewed,
     Selected,
     Alternate,
     Rejected,
     NeedsEdit,
     NeedsRerender,
     UsedInAssembly,
+}
+
+impl TakeStatus {
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        match value.as_str() {
+            "unreviewed" => Some(Self::Unreviewed),
+            "selected" => Some(Self::Selected),
+            "alternate" => Some(Self::Alternate),
+            "rejected" => Some(Self::Rejected),
+            "needs_edit" => Some(Self::NeedsEdit),
+            "needs_rerender" => Some(Self::NeedsRerender),
+            "used_in_assembly" => Some(Self::UsedInAssembly),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unreviewed => "unreviewed",
+            Self::Selected => "selected",
+            Self::Alternate => "alternate",
+            Self::Rejected => "rejected",
+            Self::NeedsEdit => "needs_edit",
+            Self::NeedsRerender => "needs_rerender",
+            Self::UsedInAssembly => "used_in_assembly",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualSourceStrategy {
+    PreproductionStartFrame,
+    PreviousSelectedTakeExitFrame,
+    SharedReference,
+    NoStartFrame,
+    DeferredManual,
+}
+
+impl VisualSourceStrategy {
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        match value.as_str() {
+            "preproduction_start_frame" | "start_frame" | "generated_start_frame" => {
+                Some(Self::PreproductionStartFrame)
+            }
+            "previous_selected_take_exit_frame"
+            | "previous_selected_take"
+            | "previous_exit_frame"
+            | "continuity_frame" => Some(Self::PreviousSelectedTakeExitFrame),
+            "shared_reference" | "shared" => Some(Self::SharedReference),
+            "no_start_frame" | "none" | "text_only" => Some(Self::NoStartFrame),
+            "deferred_manual" | "manual" | "deferred" => Some(Self::DeferredManual),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PreproductionStartFrame => "preproduction_start_frame",
+            Self::PreviousSelectedTakeExitFrame => "previous_selected_take_exit_frame",
+            Self::SharedReference => "shared_reference",
+            Self::NoStartFrame => "no_start_frame",
+            Self::DeferredManual => "deferred_manual",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisualSourceSpec {
+    pub strategy: VisualSourceStrategy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor: Option<CutId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_take_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_time_seconds: Option<f64>,
+    /// Stable shot id of the predecessor. The cut number in `predecessor` is only a label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor_shot_id: Option<String>,
+}
+
+impl VisualSourceSpec {
+    pub fn new(strategy: VisualSourceStrategy) -> Self {
+        Self {
+            strategy,
+            predecessor: None,
+            asset_id: None,
+            source_take_id: None,
+            frame_time_seconds: None,
+            predecessor_shot_id: None,
+        }
+    }
+
+    pub fn is_bound(&self) -> bool {
+        match self.strategy {
+            VisualSourceStrategy::NoStartFrame => true,
+            VisualSourceStrategy::PreproductionStartFrame
+            | VisualSourceStrategy::PreviousSelectedTakeExitFrame
+            | VisualSourceStrategy::SharedReference
+            | VisualSourceStrategy::DeferredManual => self.asset_id.is_some(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -654,6 +797,17 @@ impl CutSketch {
     }
 }
 
+/// What to do with work that depended on an artifact that just changed.
+/// Downstream files stay on disk either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyState {
+    Stale,
+    NeedsReview,
+    Invalid,
+    Keep,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TakeRecord {
     pub id: String,
@@ -694,10 +848,21 @@ pub struct CutRecord {
     pub start_frame_negative_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sketch: Option<CutSketch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_source: Option<VisualSourceSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub takes: Vec<TakeRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_take: Option<String>,
+    /// Durable shot id. Cut numbers in `id` are display labels.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stable_id: String,
+    /// Set when an approved upstream artifact changes. Downstream files stay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_state: Option<DependencyState>,
+    /// Set when animatic timing or order changes. Does not delete takes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub package_needs_review: bool,
 }
 
 impl CutRecord {
@@ -718,14 +883,93 @@ impl CutRecord {
             start_frame_prompt: None,
             start_frame_negative_prompt: None,
             sketch: None,
+            visual_source: None,
             takes: Vec::new(),
             selected_take: None,
+            stable_id: String::new(),
+            dependency_state: None,
+            package_needs_review: false,
         }
     }
 
     pub fn has_production_note(&self) -> bool {
         self.production_note_path.is_some() || self.prompt.is_some()
     }
+
+    pub fn visual_source_strategy(&self) -> Option<VisualSourceStrategy> {
+        self.visual_source
+            .as_ref()
+            .map(|source| source.strategy)
+            .or_else(|| {
+                self.approved_start_frame
+                    .as_ref()
+                    .map(|_| VisualSourceStrategy::PreproductionStartFrame)
+            })
+    }
+
+    pub fn visual_source_planned(&self) -> bool {
+        self.visual_source_strategy().is_some()
+    }
+
+    pub fn visual_source_ready(&self) -> bool {
+        match &self.visual_source {
+            Some(source) if source.strategy == VisualSourceStrategy::PreproductionStartFrame => {
+                source.asset_id.is_some() || self.approved_start_frame.is_some()
+            }
+            Some(source) => source.is_bound(),
+            None => self.approved_start_frame.is_some(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageWarningKind {
+    MissingReaction,
+    MissingInsert,
+    MissingEstablishing,
+    UnplannedBeat,
+}
+
+impl CoverageWarningKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingReaction => "missing_reaction",
+            Self::MissingInsert => "missing_insert",
+            Self::MissingEstablishing => "missing_establishing",
+            Self::UnplannedBeat => "unplanned_beat",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoverageWarning {
+    pub id: String,
+    pub kind: CoverageWarningKind,
+    pub message: String,
+}
+
+/// Timing and order for one cut sketch. The id is allocated once and is not
+/// the cut number or the position in the rough cut.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnimaticShot {
+    pub id: String,
+    pub cut_id: CutId,
+    pub duration_seconds: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch_audio_path: Option<String>,
+}
+
+/// Rough-cut timing laid over cut sketches. Not a second copy of the prompts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneAnimatic {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub approved: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shots: Vec<AnimaticShot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<CoverageWarning>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -762,6 +1006,13 @@ pub struct SceneRecord {
     pub cuts: Vec<CutRecord>,
     #[serde(default)]
     pub stages: StageMap,
+    /// Durable scene id. `id` is the display number.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stable_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animatic: Option<SceneAnimatic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post: Option<crate::workflow::post::ScenePost>,
 }
 
 impl SceneRecord {
@@ -784,6 +1035,9 @@ impl SceneRecord {
             intent_approved: false,
             cuts: Vec::new(),
             stages: StageMap::default(),
+            stable_id: String::new(),
+            animatic: None,
+            post: None,
         }
     }
 
@@ -836,12 +1090,379 @@ pub struct JobRecord {
     pub raw_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<JobAttempt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobAttempt {
+    pub id: String,
+    #[serde(default)]
+    pub status: JobStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_asset_ids: Vec<String>,
+}
+
+/// A frozen path for one asset. Approving a replacement does not rewrite this path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactVersion {
+    pub id: String,
+    pub asset_id: String,
+    pub version: u32,
+    pub path: String,
+    #[serde(default)]
+    pub status: AssetStatus,
+}
+
+impl JobRecord {
+    /// One pending attempt. Look generation, renders, stills, and assembly all use this.
+    pub fn open(id: impl Into<String>, kind: impl Into<String>) -> Self {
+        let id = id.into();
+        let attempt_id = format!("{id}_attempt_1");
+        Self {
+            id,
+            kind: kind.into(),
+            provider: None,
+            model: None,
+            input_asset_ids: Vec::new(),
+            output_asset_ids: Vec::new(),
+            status: JobStatus::Pending,
+            output_path: None,
+            raw_provider_id: None,
+            error: None,
+            attempts: vec![JobAttempt {
+                id: attempt_id,
+                status: JobStatus::Pending,
+                error: None,
+                output_asset_ids: Vec::new(),
+            }],
+        }
+    }
+
+    pub fn finish(&mut self, path: Option<&str>, asset_id: Option<&str>) {
+        self.status = JobStatus::Completed;
+        if let Some(path) = path {
+            self.output_path = Some(path.to_string());
+        }
+        if let Some(asset_id) = asset_id {
+            if !self.output_asset_ids.iter().any(|id| id == asset_id) {
+                self.output_asset_ids.push(asset_id.to_string());
+            }
+        }
+        if let Some(attempt) = self.attempts.last_mut() {
+            attempt.status = JobStatus::Completed;
+            if let Some(asset_id) = asset_id {
+                if !attempt.output_asset_ids.iter().any(|id| id == asset_id) {
+                    attempt.output_asset_ids.push(asset_id.to_string());
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SettingsSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aspect_ratio: Option<String>,
+}
+
+/// Built-in recipe identity. Stage order, dependencies, and required roles
+/// live on the recipe graph, not in branches of this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionRecipe {
+    #[default]
+    NarrativeDialogue,
+    Montage,
+}
+
+impl ProductionRecipe {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NarrativeDialogue => "narrative_dialogue",
+            Self::Montage => "montage",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' '], "_")
+            .as_str()
+        {
+            "narrative_dialogue" | "narrative" => Some(Self::NarrativeDialogue),
+            "montage" | "music_video" => Some(Self::Montage),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        crate::workflow::recipe::graph(self).label
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementKind {
+    Cast,
+    Location,
+    Prop,
+    Wardrobe,
+    Sound,
+    Graphic,
+    RiskyShot,
+    Deferred,
+    Voice,
+    Plate,
+}
+
+impl RequirementKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cast => "cast",
+            Self::Location => "location",
+            Self::Prop => "prop",
+            Self::Wardrobe => "wardrobe",
+            Self::Sound => "sound",
+            Self::Graphic => "graphic",
+            Self::RiskyShot => "risky_shot",
+            Self::Deferred => "deferred",
+            Self::Voice => "voice",
+            Self::Plate => "plate",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cast => "Cast",
+            Self::Location => "Location",
+            Self::Prop => "Prop",
+            Self::Wardrobe => "Wardrobe",
+            Self::Sound => "Sound",
+            Self::Graphic => "Graphic",
+            Self::RiskyShot => "Risky shot",
+            Self::Deferred => "Deferred",
+            Self::Voice => "Voice",
+            Self::Plate => "Plate",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let v = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        match v.as_str() {
+            "cast" | "character" => Some(Self::Cast),
+            "location" => Some(Self::Location),
+            "prop" => Some(Self::Prop),
+            "wardrobe" => Some(Self::Wardrobe),
+            "sound" => Some(Self::Sound),
+            "graphic" | "graphics" => Some(Self::Graphic),
+            "risky_shot" | "risk" => Some(Self::RiskyShot),
+            "deferred" => Some(Self::Deferred),
+            "voice" => Some(Self::Voice),
+            "plate" => Some(Self::Plate),
+            _ => None,
+        }
+    }
+
+    pub fn sort_key(self) -> u8 {
+        match self {
+            Self::Cast => 0,
+            Self::Voice => 1,
+            Self::Location => 2,
+            Self::Prop => 3,
+            Self::Wardrobe => 4,
+            Self::Plate => 5,
+            Self::Sound => 6,
+            Self::Graphic => 7,
+            Self::RiskyShot => 8,
+            Self::Deferred => 9,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementStatus {
+    #[default]
+    Missing,
+    Draft,
+    Present,
+    Approved,
+    Deferred,
+}
+
+impl RequirementStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Draft => "draft",
+            Self::Present => "present",
+            Self::Approved => "approved",
+            Self::Deferred => "deferred",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        let v = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        match v.as_str() {
+            "missing" => Some(Self::Missing),
+            "draft" => Some(Self::Draft),
+            "present" => Some(Self::Present),
+            "approved" => Some(Self::Approved),
+            "deferred" => Some(Self::Deferred),
+            _ => None,
+        }
+    }
+
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Missing => 0,
+            Self::Draft => 1,
+            Self::Deferred => 2,
+            Self::Present => 3,
+            Self::Approved => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeliverableRecord {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect_ratio: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProductionProfile {
+    pub recipe: ProductionRecipe,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deliverables: Vec<DeliverableRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aspect_ratios: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continuity_rules: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safety_constraints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rights_notes: Option<String>,
+}
+
+impl Default for ProductionProfile {
+    fn default() -> Self {
+        Self {
+            recipe: ProductionRecipe::NarrativeDialogue,
+            deliverables: Vec::new(),
+            audience: None,
+            platforms: Vec::new(),
+            runtime: None,
+            aspect_ratios: Vec::new(),
+            resolution: None,
+            frame_rate: None,
+            language: None,
+            medium: None,
+            style_notes: None,
+            audio_plan: None,
+            continuity_rules: Vec::new(),
+            safety_constraints: Vec::new(),
+            budget: None,
+            schedule: None,
+            rights_notes: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequirementRecord {
+    pub id: String,
+    pub kind: RequirementKind,
+    pub name: String,
+    pub status: RequirementStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scene_ids: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// When set, reimport keeps this status instead of recomputing it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub status_override: bool,
+    /// Kept across reimport even when the script scan does not derive it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub user_added: bool,
+}
+
+impl RequirementRecord {
+    /// A scene can be blocked on a location, prop, voice, or plate.
+    pub fn blocks_scene(&self) -> bool {
+        matches!(
+            self.kind,
+            RequirementKind::Location
+                | RequirementKind::Prop
+                | RequirementKind::Voice
+                | RequirementKind::Plate
+        ) && matches!(
+            self.status,
+            RequirementStatus::Missing | RequirementStatus::Draft
+        )
+    }
+}
+
+pub fn deliverable_id(name: &str) -> String {
+    let slug = slugify(name);
+    if slug.is_empty() {
+        "del_deliverable".into()
+    } else {
+        format!("del_{slug}")
+    }
+}
+
+/// Stable registry id from kind plus a content key. Not a display index.
+pub fn requirement_id(kind: RequirementKind, key: &str) -> String {
+    let slug = slugify(key);
+    let slug = if slug.is_empty() {
+        "item".to_string()
+    } else {
+        slug
+    };
+    format!("req_{}_{slug}", kind.as_str())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -861,6 +1482,12 @@ pub struct ProjectState {
     pub jobs: Vec<JobRecord>,
     #[serde(default)]
     pub settings: SettingsSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProductionProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<RequirementRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<ArtifactVersion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
 }
@@ -876,6 +1503,9 @@ impl ProjectState {
             assets: Vec::new(),
             jobs: Vec::new(),
             settings: SettingsSnapshot::default(),
+            profile: None,
+            requirements: Vec::new(),
+            versions: Vec::new(),
             notes: Vec::new(),
         }
     }
@@ -947,6 +1577,21 @@ impl ProjectState {
 
     pub fn asset_mut(&mut self, id: &str) -> Option<&mut AssetRecord> {
         self.assets.iter_mut().find(|a| a.id == id)
+    }
+
+    pub fn blockers_for_scene(&self, scene_id: u32) -> Vec<&RequirementRecord> {
+        self.requirements
+            .iter()
+            .filter(|requirement| {
+                requirement.scene_ids.contains(&scene_id) && requirement.blocks_scene()
+            })
+            .collect()
+    }
+
+    pub fn requirement_mut(&mut self, id: &str) -> Option<&mut RequirementRecord> {
+        self.requirements
+            .iter_mut()
+            .find(|requirement| requirement.id == id)
     }
 }
 
@@ -1029,6 +1674,7 @@ mod tests {
             output_path: None,
             raw_provider_id: None,
             error: None,
+            attempts: Vec::new(),
         });
         assert_eq!(state.next_asset_id(), "asset_4");
         assert_eq!(state.next_job_id(), "job_5");

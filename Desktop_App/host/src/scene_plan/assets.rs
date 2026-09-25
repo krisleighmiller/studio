@@ -17,6 +17,9 @@ pub struct VoiceAsset {
     pub provider: String,
     pub voice_id: String,
     pub voice_name: Option<String>,
+    /// On-disk clip named by the profile. Present for a local or recorded sample
+    /// even when the profile has no provider voice id.
+    pub sample_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,9 +113,16 @@ struct ManifestShot {
 #[serde(default)]
 struct VoiceProfile {
     character: String,
-    provider: String,
-    voice_id: String,
+    provider: Option<String>,
+    voice_id: Option<String>,
     voice_name: Option<String>,
+    approved_audio: Vec<ApprovedAudio>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ApprovedAudio {
+    path: String,
 }
 
 fn resolve(raw: &str, dir: &Path) -> Option<PathBuf> {
@@ -206,7 +216,7 @@ impl AssetRegistry {
                 out.push_str(&format!("; other saved shots: {}", others.join(", ")));
             }
             match &c.voice {
-                Some(v) => out.push_str(&format!(
+                Some(v) if !v.voice_id.trim().is_empty() => out.push_str(&format!(
                     "; voice: {} `{}`{}",
                     v.provider,
                     v.voice_id,
@@ -215,6 +225,12 @@ impl AssetRegistry {
                         .map(|n| format!(" ({n})"))
                         .unwrap_or_default()
                 )),
+                Some(v) => {
+                    out.push_str("; voice: local sample");
+                    if let Some(path) = &v.sample_path {
+                        out.push_str(&format!(" `{}`", path.display()));
+                    }
+                }
                 None => out.push_str("; voice: none on file"),
             }
             if !c.pending_shots.is_empty() {
@@ -304,6 +320,22 @@ fn scan_character_dir(dir: &Path, notes: &mut Vec<String>) -> Option<CharacterAs
     Some(c)
 }
 
+fn approved_sample(character_dir: &Path, profile: &VoiceProfile) -> Option<PathBuf> {
+    profile.approved_audio.iter().find_map(|audio| {
+        let raw = audio.path.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let path = Path::new(raw);
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            character_dir.join(path)
+        };
+        resolved.is_file().then_some(resolved)
+    })
+}
+
 fn find_voice_profile(dir: &Path, character: &str, notes: &mut Vec<String>) -> Option<VoiceAsset> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     for d in [dir.join("voice"), dir.to_path_buf()] {
@@ -330,7 +362,22 @@ fn find_voice_profile(dir: &Path, character: &str, notes: &mut Vec<String>) -> O
             .map_err(|e| e.to_string())
             .and_then(|t| serde_yaml_ng::from_str::<VoiceProfile>(&t).map_err(|e| e.to_string()))
         {
-            Ok(v) if !v.voice_id.trim().is_empty() => {
+            Ok(v) => {
+                let voice_id = v
+                    .voice_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                let sample_path = approved_sample(dir, &v);
+                if voice_id.is_empty() && sample_path.is_none() {
+                    notes.push(format!(
+                        "{}: voice profile has no voice_id and no audio file on disk",
+                        p.display()
+                    ));
+                    continue;
+                }
                 if !v.character.trim().is_empty()
                     && name_tokens(&v.character) != name_tokens(character)
                 {
@@ -342,15 +389,21 @@ fn find_voice_profile(dir: &Path, character: &str, notes: &mut Vec<String>) -> O
                 }
                 return Some(VoiceAsset {
                     profile_path: p,
-                    provider: v.provider.trim().to_string(),
-                    voice_id: v.voice_id.trim().to_string(),
+                    provider: v
+                        .provider
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|provider| !provider.is_empty())
+                        .unwrap_or("")
+                        .to_string(),
+                    voice_id,
                     voice_name: v
                         .voice_name
                         .map(|n| n.trim().to_string())
                         .filter(|n| !n.is_empty()),
+                    sample_path,
                 });
             }
-            Ok(_) => notes.push(format!("{}: voice profile has no voice_id", p.display())),
             Err(e) => notes.push(format!(
                 "{}: could not parse voice profile: {e}",
                 p.display()
@@ -442,6 +495,44 @@ mod tests {
         assert!(block.contains("**Aunt Marian** — NO usable reference image"));
         assert!(block.contains("voice: elevenlabs `MlxAbUenU34aJO4OFnwY` (Benny)"));
         assert!(block.contains("not usable: expression_excited"));
+    }
+
+    #[test]
+    fn local_sample_without_voice_id_counts_as_voice() {
+        let dir = tempfile::tempdir().unwrap();
+        let voice = dir.path().join("Characters/Tom Vale/voice");
+        fs::create_dir_all(&voice).unwrap();
+        fs::write(voice.join("Tom_voice_sample_01.wav"), b"RIFF").unwrap();
+        fs::write(
+            voice.join("Tom_voice_profile.yaml"),
+            "\
+profile_version: 1
+character: \"Tom Vale\"
+source_mode: existing_file
+provider: null
+voice_id: null
+voice_name: null
+approved_audio:
+- path: \"voice/Tom_voice_sample_01.wav\"
+  purpose: canonical_sample
+",
+        )
+        .unwrap();
+
+        let tom = AssetRegistry::discover(dir.path())
+            .find_character("Tom")
+            .unwrap()
+            .clone();
+        let voice_asset = tom.voice.as_ref().unwrap();
+        assert!(voice_asset.voice_id.is_empty());
+        assert!(voice_asset
+            .sample_path
+            .as_ref()
+            .unwrap()
+            .ends_with("Tom_voice_sample_01.wav"));
+        let block = AssetRegistry::discover(dir.path()).prompt_block();
+        assert!(block.contains("voice: local sample"));
+        assert!(block.contains("Tom_voice_sample_01.wav"));
     }
 
     #[test]

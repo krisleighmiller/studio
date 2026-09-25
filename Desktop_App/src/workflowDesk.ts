@@ -2,10 +2,14 @@ import { ask, invoke, openDialog, toMediaUrlAsync } from "./host";
 import {
   LOOK_ROLES,
   MOUTH_POLICIES,
+  REQUIREMENT_KINDS,
+  REQUIREMENT_STATUSES,
   SCENE_STRATEGIES,
   SHOT_ROLES,
+  VISUAL_SOURCE_STRATEGIES,
   WORKFLOW_STAGES,
   type AssetRecord,
+  type AnimaticShot,
   type CharacterRecord,
   type CharacterProfile,
   type CutSketch,
@@ -15,6 +19,10 @@ import {
   type MouthPolicy,
   type ProjectReport,
   type ProjectState,
+  type RecipeView,
+  type RequirementKind,
+  type RequirementRecord,
+  type RequirementStatus,
   type SceneIntent,
   type SceneRecord,
   type SceneReport,
@@ -22,6 +30,8 @@ import {
   type SpeechMode,
   type StageId,
   type StageStatus,
+  type TakeRecord,
+  type VisualSourceStrategy,
   type WorkflowImportResult,
 } from "./workflowTypes";
 
@@ -54,6 +64,7 @@ type WorkflowViewport = {
   scenesTop: number;
   inspectorTop: number;
   jobsTop: number;
+  requirementsTop: number;
 };
 
 let hooks: DeskHooks | null = null;
@@ -74,6 +85,13 @@ const characterDrafts = new Map<
   { name: string; profile: CharacterProfile }
 >();
 let newCharacterOpen = false;
+let profileOpen = false;
+let roughPlayback: {
+  sceneId: number;
+  index: number;
+  timer: number;
+  audio: HTMLAudioElement | null;
+} | null = null;
 
 export function bindWorkflowDesk(next: DeskHooks): void {
   hooks = next;
@@ -94,9 +112,12 @@ export function workflowSelection(): WorkflowSelection {
 export async function refreshWorkflowDesk(): Promise<void> {
   const root = hooks?.projectRoot();
   if (!root || !state) return;
-  const result = await invoke<WorkflowImportResult>("workflow_status", {
+  // Provider actions can create new stills, audio, and video files. Re-scan
+  // instead of merely reloading the previous state so completed outputs appear
+  // in the desk immediately after the Director finishes.
+  const result = await invoke<WorkflowImportResult>("workflow_import", {
     projectRoot: root,
-    refresh: false,
+    persist: true,
   });
   const keepNote = actionNote;
   const previousIntentMissing = selectedScene()?.stages.scene_intent === "missing";
@@ -133,6 +154,8 @@ export function clearWorkflowDesk(): void {
   intentDraftScene = null;
   characterDrafts.clear();
   newCharacterOpen = false;
+  profileOpen = false;
+  stopRoughCut();
   if (hooks) hooks.root.replaceChildren();
 }
 
@@ -196,6 +219,7 @@ async function runAction(
   cmd: string,
   args: Record<string, unknown>,
 ): Promise<boolean> {
+  stopRoughCut();
   const root = hooks?.projectRoot();
   if (!root) {
     actionNote = "Open a project first.";
@@ -247,7 +271,7 @@ export function renderWorkflowDesk(): void {
   const head = document.createElement("div");
   if (actionNote) head.append(block(noteClass(actionNote), actionNote));
   if (busy) head.append(block("workflow-banner", busy));
-  head.append(renderStageRail());
+  head.append(renderProjectProfile(), renderStageRail());
   desk.append(head, renderBody(), renderJobs());
   root.append(desk);
   restoreWorkflowViewport(root, viewport);
@@ -269,6 +293,8 @@ function captureWorkflowViewport(root: HTMLElement): WorkflowViewport | null {
       root.querySelector<HTMLElement>(".workflow-inspector")?.scrollTop ?? 0,
     jobsTop:
       root.querySelector<HTMLElement>(".workflow-jobs-body")?.scrollTop ?? 0,
+    requirementsTop:
+      root.querySelector<HTMLElement>(".workflow-requirements-list")?.scrollTop ?? 0,
   };
 }
 
@@ -294,6 +320,8 @@ function restoreWorkflowViewport(
   if (inspector) inspector.scrollTop = viewport.inspectorTop;
   const jobs = root.querySelector<HTMLElement>(".workflow-jobs-body");
   if (jobs) jobs.scrollTop = viewport.jobsTop;
+  const requirements = root.querySelector<HTMLElement>(".workflow-requirements-list");
+  if (requirements) requirements.scrollTop = viewport.requirementsTop;
 }
 
 function noteClass(note: string): string {
@@ -345,12 +373,324 @@ function resolveProjectPath(raw: string | null | undefined): string | null {
   return `${root.replace(/\/+$/, "")}/${raw.replace(/^\/+/, "")}`;
 }
 
+function sceneBlockers(sceneId: number): RequirementRecord[] {
+  return (state?.requirements ?? []).filter(
+    (requirement) =>
+      (requirement.scene_ids ?? []).includes(sceneId) && requirementBlocks(requirement),
+  );
+}
+
+function requirementBlocks(requirement: RequirementRecord): boolean {
+  return (
+    (requirement.kind === "location" ||
+      requirement.kind === "prop" ||
+      requirement.kind === "voice" ||
+      requirement.kind === "plate") &&
+    (requirement.status === "missing" || requirement.status === "draft")
+  );
+}
+
+function activeRecipe(): RecipeView | null {
+  return report?.recipe ?? null;
+}
+
+function activeStages(): Array<{ id: StageId; label: string; required_roles?: string[] }> {
+  const stages = activeRecipe()?.stages;
+  if (stages?.length) return stages;
+  return WORKFLOW_STAGES;
+}
+
+function recipeRequires(role: string): boolean {
+  return activeStages().some((stage) => stage.required_roles?.includes(role));
+}
+
+function requirementKindLabel(kind: RequirementKind): string {
+  return REQUIREMENT_KINDS.find((item) => item.id === kind)?.label ?? kind;
+}
+
+function renderProjectProfile(): HTMLElement {
+  const wrap = document.createElement("section");
+  wrap.className = "workflow-project";
+  wrap.setAttribute("aria-label", "Production profile");
+  const profile = state?.profile;
+  const deliverable = profile?.deliverables?.[0];
+  const bar = document.createElement("div");
+  bar.className = "workflow-profile-bar";
+  const recipe = document.createElement("span");
+  recipe.className = "workflow-profile-recipe";
+  recipe.textContent = activeRecipe()?.label ?? "Narrative dialogue";
+  const summary = document.createElement("p");
+  summary.className = "workflow-profile-summary";
+  const bits = [
+    deliverable?.name || state?.project_name || "Untitled",
+    deliverable?.aspect_ratio || profile?.aspect_ratios?.[0],
+    deliverable?.runtime || profile?.runtime,
+    profile?.medium,
+  ].filter((bit): bit is string => Boolean(bit));
+  summary.textContent = bits.join(" · ");
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "ghost-button";
+  edit.textContent = profileOpen ? "Close profile" : "Edit profile";
+  edit.disabled = Boolean(busy);
+  edit.addEventListener("click", () => {
+    profileOpen = !profileOpen;
+    renderWorkflowDesk();
+  });
+  bar.append(recipe, summary, edit);
+  wrap.append(bar);
+  if (profileOpen) wrap.append(renderProfileForm());
+  wrap.append(renderRequirements());
+  return wrap;
+}
+
+function renderProfileForm(): HTMLElement {
+  const profile = state?.profile;
+  const deliverable = profile?.deliverables?.[0];
+  const form = document.createElement("form");
+  form.className = "workflow-profile-form";
+  const recipeLabel = document.createElement("label");
+  recipeLabel.textContent = "Recipe";
+  const recipeInput = document.createElement("select");
+  recipeInput.name = "recipe";
+  const choices = report?.recipes?.length
+    ? report.recipes
+    : [
+        { id: "narrative_dialogue", label: "Narrative dialogue" },
+        { id: "montage", label: "Montage" },
+      ];
+  for (const choice of choices) {
+    const option = document.createElement("option");
+    option.value = choice.id;
+    option.textContent = choice.label;
+    option.selected = choice.id === (profile?.recipe ?? activeRecipe()?.id ?? "narrative_dialogue");
+    recipeInput.append(option);
+  }
+  recipeLabel.append(recipeInput);
+  form.append(recipeLabel);
+  const fields: { key: string; label: string; value: string; wide?: boolean }[] = [
+    { key: "name", label: "Deliverable", value: deliverable?.name ?? "" },
+    { key: "audience", label: "Audience", value: profile?.audience ?? deliverable?.audience ?? "" },
+    {
+      key: "platforms",
+      label: "Platforms",
+      value: (profile?.platforms ?? deliverable?.platforms ?? []).join(", "),
+    },
+    { key: "runtime", label: "Runtime", value: profile?.runtime ?? deliverable?.runtime ?? "" },
+    {
+      key: "aspect",
+      label: "Aspect ratio",
+      value: deliverable?.aspect_ratio ?? profile?.aspect_ratios?.[0] ?? "",
+    },
+    {
+      key: "resolution",
+      label: "Resolution",
+      value: profile?.resolution ?? deliverable?.resolution ?? "",
+    },
+    {
+      key: "frame_rate",
+      label: "Frame rate",
+      value: profile?.frame_rate ?? deliverable?.frame_rate ?? "",
+    },
+    { key: "language", label: "Language", value: profile?.language ?? deliverable?.language ?? "" },
+    { key: "medium", label: "Medium", value: profile?.medium ?? "" },
+    { key: "style_notes", label: "Style notes", value: profile?.style_notes ?? "", wide: true },
+    { key: "audio_plan", label: "Audio plan", value: profile?.audio_plan ?? "", wide: true },
+    {
+      key: "continuity_rules",
+      label: "Continuity rules",
+      value: (profile?.continuity_rules ?? []).join("\n"),
+      wide: true,
+    },
+    {
+      key: "safety_constraints",
+      label: "Safety constraints",
+      value: (profile?.safety_constraints ?? []).join("\n"),
+      wide: true,
+    },
+    { key: "budget", label: "Budget", value: profile?.budget ?? "" },
+    { key: "schedule", label: "Schedule", value: profile?.schedule ?? "" },
+    { key: "rights_notes", label: "Rights notes", value: profile?.rights_notes ?? "", wide: true },
+  ];
+  for (const field of fields) {
+    const label = document.createElement("label");
+    label.className = field.wide ? "wide" : "";
+    label.textContent = field.label;
+    const input = field.wide ? document.createElement("textarea") : document.createElement("input");
+    input.name = field.key;
+    input.value = field.value;
+    if (field.key === "medium") {
+      input.setAttribute("placeholder", "Clay, live action, anime…");
+    }
+    label.append(input);
+    form.append(label);
+  }
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "ghost-button";
+  save.textContent = "Save profile";
+  save.disabled = Boolean(busy);
+  form.append(save);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const read = (key: string) =>
+      (form.elements.namedItem(key) as HTMLInputElement | HTMLTextAreaElement | null)?.value ?? "";
+    const blank = (value: string) => {
+      const trimmed = value.trim();
+      return trimmed ? trimmed : null;
+    };
+    const list = (value: string) =>
+      value
+        .split(/[,\n]/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+    const lines = (value: string) =>
+      value
+        .split("\n")
+        .map((part) => part.trim())
+        .filter(Boolean);
+    const name = read("name").trim();
+    const aspect = blank(read("aspect"));
+    const platforms = list(read("platforms"));
+    void runAction("Saving production profile", "workflow_save_profile", {
+      profile: {
+        recipe: recipeInput.value,
+        deliverables: [
+          {
+            id: deliverable?.id ?? "",
+            name,
+            audience: blank(read("audience")),
+            platforms,
+            runtime: blank(read("runtime")),
+            aspect_ratio: aspect,
+            resolution: blank(read("resolution")),
+            frame_rate: blank(read("frame_rate")),
+            language: blank(read("language")),
+          },
+        ],
+        audience: blank(read("audience")),
+        platforms,
+        runtime: blank(read("runtime")),
+        aspect_ratios: aspect ? [aspect] : [],
+        resolution: blank(read("resolution")),
+        frame_rate: blank(read("frame_rate")),
+        language: blank(read("language")),
+        medium: blank(read("medium")),
+        style_notes: blank(read("style_notes")),
+        audio_plan: blank(read("audio_plan")),
+        continuity_rules: lines(read("continuity_rules")),
+        safety_constraints: lines(read("safety_constraints")),
+        budget: blank(read("budget")),
+        schedule: blank(read("schedule")),
+        rights_notes: blank(read("rights_notes")),
+      },
+    });
+  });
+  return form;
+}
+
+function renderRequirements(): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "workflow-requirements";
+  section.setAttribute("aria-label", "Requirements");
+  const heading = document.createElement("h2");
+  heading.textContent = "Requirements";
+  const count = document.createElement("span");
+  const requirements = [...(state?.requirements ?? [])];
+  count.textContent = String(requirements.length);
+  heading.append(count);
+  const list = document.createElement("ul");
+  list.className = "workflow-requirements-list";
+  if (!requirements.length) {
+    const empty = document.createElement("li");
+    empty.className = "workflow-requirement empty";
+    empty.textContent = "No requirements yet.";
+    list.append(empty);
+  }
+  for (const requirement of requirements) {
+    const item = document.createElement("li");
+    item.className = "workflow-requirement";
+    item.dataset.status = requirement.status;
+    item.dataset.kind = requirement.kind;
+    const inScene = selectedSceneId != null && (requirement.scene_ids ?? []).includes(selectedSceneId);
+    if (inScene) item.classList.add("in-scene");
+    if (inScene && requirementBlocks(requirement)) item.classList.add("blocking");
+    const kind = document.createElement("span");
+    kind.className = "workflow-requirement-kind";
+    kind.textContent = requirementKindLabel(requirement.kind);
+    const name = document.createElement("span");
+    name.className = "workflow-requirement-name";
+    name.textContent = requirement.name;
+    const scenes = document.createElement("span");
+    scenes.className = "workflow-requirement-scenes";
+    scenes.textContent = (requirement.scene_ids ?? [])
+      .map((id) => state?.scenes.find((scene) => scene.id === id)?.title ?? `Scene ${id}`)
+      .join(", ");
+    const status = document.createElement("select");
+    status.className = "workflow-requirement-status";
+    status.setAttribute("aria-label", `${requirement.name} status`);
+    status.disabled = Boolean(busy);
+    for (const option of REQUIREMENT_STATUSES) {
+      const choice = document.createElement("option");
+      choice.value = option.id;
+      choice.textContent = option.label;
+      choice.selected = option.id === requirement.status;
+      status.append(choice);
+    }
+    status.addEventListener("change", () => {
+      void runAction(`Updating ${requirement.name}`, "workflow_set_requirement_status", {
+        requirementId: requirement.id,
+        status: status.value as RequirementStatus,
+      });
+    });
+    item.append(kind, name, scenes, status);
+    list.append(item);
+  }
+  const add = document.createElement("form");
+  add.className = "workflow-requirement-add";
+  const nameInput = document.createElement("input");
+  nameInput.name = "name";
+  nameInput.placeholder = "Add a requirement";
+  nameInput.setAttribute("aria-label", "Requirement name");
+  const kindInput = document.createElement("select");
+  kindInput.name = "kind";
+  kindInput.setAttribute("aria-label", "Requirement kind");
+  for (const option of REQUIREMENT_KINDS) {
+    const choice = document.createElement("option");
+    choice.value = option.id;
+    choice.textContent = option.label;
+    kindInput.append(choice);
+  }
+  const button = document.createElement("button");
+  button.type = "submit";
+  button.className = "ghost-button";
+  button.textContent = "Add";
+  button.disabled = Boolean(busy);
+  add.append(nameInput, kindInput, button);
+  add.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = nameInput.value.trim();
+    if (!name) return;
+    void runAction(`Adding ${name}`, "workflow_add_requirement", {
+      name,
+      kind: kindInput.value,
+      sceneId: selectedSceneId,
+    });
+  });
+  section.append(heading, list, add);
+  return section;
+}
+
 function renderStageRail(): HTMLElement {
   const scene = selectedScene();
+  const stages = activeStages();
+  if (!stages.some((stage) => stage.id === selectedStage)) {
+    selectedStage = stages[0]?.id ?? "script";
+  }
   const nav = document.createElement("nav");
   nav.className = "workflow-stage-rail";
   nav.setAttribute("aria-label", "Production stages");
-  for (const stage of WORKFLOW_STAGES) {
+  for (const stage of stages) {
     const status = scene?.stages[stage.id] ?? "missing";
     const button = document.createElement("button");
     button.type = "button";
@@ -421,13 +761,18 @@ function renderMain(): HTMLElement {
   const title = document.createElement("header");
   title.className = "workflow-main-header";
   const heading = document.createElement("h1");
-  heading.textContent = WORKFLOW_STAGES.find((stage) => stage.id === selectedStage)?.label ?? selectedStage;
+  heading.textContent =
+    activeStages().find((stage) => stage.id === selectedStage)?.label ?? selectedStage;
   const sub = document.createElement("p");
   sub.textContent = scene
     ? sceneStatus
       ? `${scene.title} · ${mixLabel(sceneStatus.mix)} · ${sceneStatus.approved_start_frames} start frames`
       : `${scene.title} · ${scene.cuts.length} cuts`
     : "No scene selected";
+  const blockers = scene ? sceneBlockers(scene.id) : [];
+  if (blockers.length) {
+    sub.textContent += ` · Blocked on ${blockers.map((item) => item.name).join(", ")}`;
+  }
   title.append(heading, sub);
   main.append(title);
 
@@ -475,17 +820,17 @@ function renderStageContent(scene: SceneRecord | undefined, sceneStatus: SceneRe
       if (!scene.cuts.length) {
         wrap.append(missingPanel("No production notes for this scene.", "Run scene plan or import a project that has Scene_Prompts."));
       } else {
-        wrap.append(renderCutCards(scene, true));
+        wrap.append(renderProductionNotesStage(scene));
       }
       break;
     case "render":
-      wrap.append(missingPanel("No renders recorded.", "Provider jobs will appear here after a cut is sent."));
+      wrap.append(renderRenderStage(scene));
       break;
     case "take_review":
-      wrap.append(missingPanel("No takes to review.", "Selected / alternate / rejected statuses land here after generation."));
+      wrap.append(renderTakeReviewStage(scene));
       break;
     case "assemble":
-      wrap.append(missingPanel("Assemble is not planned yet.", "Host-owned assemble from selected takes comes later."));
+      wrap.append(renderAssembleStage(scene));
       break;
   }
   return wrap;
@@ -720,7 +1065,7 @@ function renderLookSlot(scene: SceneRecord, slot: LookSlot): HTMLElement {
     versions.append(block("empty-state", "No stills yet. Attach an image or generate one."));
   } else {
     for (const assetId of ids) {
-      const asset = findAsset(assetId);
+      const asset = findLookAsset(slot, assetId);
       if (!asset) continue;
       const fig = document.createElement("figure");
       fig.className = `workflow-look-thumb${
@@ -762,6 +1107,9 @@ function renderLookSlot(scene: SceneRecord, slot: LookSlot): HTMLElement {
     }
   }
   card.append(versions);
+  if (slot.role === "wardrobe_reference") {
+    card.append(renderWardrobePlates(scene));
+  }
 
   const actions = document.createElement("div");
   actions.className = "workflow-inspector-actions";
@@ -780,6 +1128,15 @@ function renderLookSlot(scene: SceneRecord, slot: LookSlot): HTMLElement {
       });
     }),
   );
+  if (slot.role === "wardrobe_reference" && approvedLookAsset(slot)) {
+    actions.append(
+      actionButton("Build wardrobe plates", () => {
+        void runAction("Preparing wardrobe plates…", "workflow_generate_wardrobe_plate", {
+          sceneId: scene.id,
+        });
+      }),
+    );
+  }
   card.append(actions);
   return card;
 }
@@ -791,6 +1148,57 @@ const LOOK_PEOPLE_ROLES = new Set([
   "location_reference",
   "composition_reference",
 ]);
+
+function renderWardrobePlates(scene: SceneRecord): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "workflow-look-versions";
+  const heading = document.createElement("p");
+  heading.className = "workflow-field-hint";
+  const plates = (state?.assets ?? []).filter(
+    (asset) =>
+      asset.role === "wardrobe_plate" &&
+      asset.scene_id === scene.id &&
+      asset.status !== "rejected",
+  );
+  heading.textContent = plates.length
+    ? "These plates replace bare model sheets for later stills. Build wardrobe plates sends every missing close-up and standing plate in one approval."
+    : "One approval builds a close-up and a standing plate for each named character.";
+  section.append(heading);
+  for (const asset of plates) {
+    const character = state?.characters?.find((item) => item.id === asset.character_id);
+    const fig = document.createElement("figure");
+    fig.className = "workflow-look-thumb approved";
+    const img = document.createElement("img");
+    img.alt = `${character?.name ?? "Character"} ${asset.notes ?? "wardrobe plate"}`;
+    img.dataset.lookPath = resolveProjectPath(asset.path) ?? asset.path;
+    img.addEventListener("click", () => {
+      hooks?.onOpenPath(resolveProjectPath(asset.path) ?? asset.path);
+    });
+    const cap = document.createElement("figcaption");
+    cap.textContent = `${character?.name ?? "Character"} · ${(asset.notes ?? "plate").replace(/_/g, " ")}`;
+    const versionActions = document.createElement("div");
+    versionActions.className = "workflow-look-thumb-actions";
+    versionActions.append(
+      actionButton("Delete", () => {
+        void deleteWardrobePlate(asset);
+      }),
+    );
+    fig.append(img, cap, versionActions);
+    section.append(fig);
+  }
+  return section;
+}
+
+async function deleteWardrobePlate(asset: AssetRecord): Promise<void> {
+  const confirmed = await ask(
+    `Delete ${asset.path}?\n\nStart frames will fall back to the bare model sheet for this view until you build it again.`,
+    { title: "Delete wardrobe plate", kind: "warning" },
+  );
+  if (!confirmed) return;
+  await runAction("Deleting wardrobe plate…", "workflow_delete_wardrobe_plate", {
+    assetId: asset.id,
+  });
+}
 
 function lookIdentityHint(scene: SceneRecord, slot: LookSlot): string | null {
   const characters = state?.characters ?? [];
@@ -817,9 +1225,15 @@ function lookIdentityHint(scene: SceneRecord, slot: LookSlot): string | null {
     });
   if (!hits.length) return null;
   const wardrobe = scene.look_board?.slots?.find(
-    (item) => item.role === "wardrobe_reference" && item.approved_asset_id,
+    (item) => item.role === "wardrobe_reference" && approvedLookAsset(item),
   );
   if (wardrobe) {
+    const plates = (state?.assets ?? []).filter(
+      (asset) => asset.role === "wardrobe_plate" && asset.scene_id === scene.id && asset.status !== "rejected",
+    );
+    if (plates.length) {
+      return `Generate will prefer scene wardrobe plates over bare model sheets where they exist (${plates.length} plate${plates.length === 1 ? "" : "s"}): ${hits.join(", ")}`;
+    }
     return `Generate will attach model sheets for identity and “${wardrobe.title || "Wardrobe"}” for clothing continuity: ${hits.join(", ")}`;
   }
   if (slot.role === "wardrobe_reference") {
@@ -864,6 +1278,24 @@ function findAsset(id: string): AssetRecord | undefined {
   return state?.assets?.find((asset) => asset.id === id);
 }
 
+function findLookAsset(slot: LookSlot, id: string): AssetRecord | undefined {
+  const matches = (state?.assets ?? []).filter((asset) => asset.id === id);
+  return matches.find((asset) => asset.role === slot.role) ?? matches[0];
+}
+
+function approvedLookAsset(slot: LookSlot): AssetRecord | undefined {
+  if (slot.approved_asset_id) {
+    const chosen = findLookAsset(slot, slot.approved_asset_id);
+    if (chosen?.status === "approved" && chosen.role === slot.role) return chosen;
+  }
+  const ids = [...(slot.asset_ids ?? [])].reverse();
+  for (const id of ids) {
+    const asset = findLookAsset(slot, id);
+    if (asset?.status === "approved" && asset.role === slot.role) return asset;
+  }
+  return undefined;
+}
+
 function queueLookThumbs(root: HTMLElement): void {
   root.querySelectorAll<HTMLImageElement>("img[data-look-path]").forEach((img) => {
     const path = img.dataset.lookPath;
@@ -878,13 +1310,26 @@ function queueLookThumbs(root: HTMLElement): void {
   });
 }
 
+function queueTakeVideos(root: HTMLElement): void {
+  root.querySelectorAll<HTMLVideoElement>("video[data-take-path]").forEach((video) => {
+    const path = video.dataset.takePath;
+    if (!path) return;
+    void toMediaUrlAsync(path)
+      .then((url) => {
+        video.src = url;
+        video.load();
+      })
+      .catch(() => {
+        video.replaceWith(block("workflow-field-hint", "Could not load this take."));
+      });
+  });
+}
+
 const CUT_IMAGE_ROLES = new Set([
   "cut_start_frame",
   "performance_source",
   "reaction_plate",
   "insert_plate",
-  "continuity_frame",
-  "last_frame",
   "edit_source",
 ]);
 
@@ -894,13 +1339,14 @@ function renderReferenceImagesStage(
 ): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "workflow-start-frames";
-  const approved = sceneStatus?.approved_start_frames ?? 0;
+  const planned = sceneStatus?.planned_visual_sources ?? 0;
+  const ready = sceneStatus?.render_ready_sources ?? 0;
   wrap.append(
     block(
-      approved ? "workflow-banner" : "workflow-missing",
-      approved
-        ? `${approved} of ${scene.cuts.length} cuts have an approved start frame. Approved cut images become video sources; model sheets remain identity references.`
-        : "No approved cut start frames. Draft or edit a still prompt, generate or attach versions, then choose Use on the production-ready image.",
+      planned ? "workflow-banner" : "workflow-missing",
+      planned
+        ? `${planned} of ${scene.cuts.length} cuts have a planned visual-source strategy; ${ready} are render ready. Continuity-linked cuts remain correctly planned while they wait for a selected predecessor take.`
+        : "No visual-source strategies are approved. Choose how each cut obtains its opening image; not every cut needs a preproduction start frame.",
     ),
   );
   if (!scene.cuts.length) {
@@ -919,18 +1365,135 @@ function renderReferenceImagesStage(
   return wrap;
 }
 
-function renderStartFrameCard(scene: SceneRecord, cut: CutRecord): HTMLElement {
-  const card = document.createElement("article");
-  card.className = "workflow-start-frame-card";
+function renderStartFrameCard(
+  scene: SceneRecord,
+  cut: CutRecord,
+  embedded = false,
+): HTMLElement {
+  const card = document.createElement(embedded ? "section" : "article");
+  card.className = `workflow-start-frame-card${embedded ? " embedded" : ""}`;
   const header = document.createElement("header");
   const heading = document.createElement("h3");
-  heading.textContent = `Cut ${cut.id.cut} · ${cut.title?.trim() || "Untitled"}`;
+  heading.textContent = embedded
+    ? "Visual source and reference image"
+    : `Cut ${cut.id.cut} · ${cut.title?.trim() || "Untitled"}`;
   const status = document.createElement("span");
   status.className = "workflow-look-status";
-  status.textContent = cut.approved_start_frame ? "Approved source" : "Needs approval";
+  const currentStrategy = effectiveVisualSourceStrategy(cut);
+  status.textContent = visualSourceStatus(cut);
   header.append(heading, status);
   card.append(header);
 
+  const sourceControls = document.createElement("section");
+  sourceControls.className = "workflow-source-controls";
+  const strategyLabel = document.createElement("label");
+  strategyLabel.className = "workflow-field";
+  const strategyTitle = document.createElement("span");
+  strategyTitle.textContent = "Visual-source strategy";
+  const strategySelect = document.createElement("select");
+  for (const option of VISUAL_SOURCE_STRATEGIES) {
+    const item = document.createElement("option");
+    item.value = option.id;
+    item.textContent = option.label;
+    strategySelect.append(item);
+  }
+  strategySelect.value = currentStrategy ?? "preproduction_start_frame";
+  strategyLabel.append(strategyTitle, strategySelect);
+
+  const predecessorLabel = document.createElement("label");
+  predecessorLabel.className = "workflow-field";
+  const predecessorTitle = document.createElement("span");
+  predecessorTitle.textContent = "Predecessor cut";
+  const predecessorSelect = document.createElement("select");
+  const earlierCuts = scene.cuts.filter((candidate) => candidate.id.cut < cut.id.cut);
+  for (const candidate of earlierCuts) {
+    const item = document.createElement("option");
+    item.value = String(candidate.id.cut);
+    item.textContent = `Cut ${candidate.id.cut} · ${candidate.title?.trim() || "Untitled"}`;
+    predecessorSelect.append(item);
+  }
+  predecessorSelect.value = String(
+    cut.visual_source?.predecessor?.cut ??
+      earlierCuts[earlierCuts.length - 1]?.id.cut ??
+      "",
+  );
+  predecessorLabel.append(predecessorTitle, predecessorSelect);
+
+  const sharedLabel = document.createElement("label");
+  sharedLabel.className = "workflow-field";
+  const sharedTitle = document.createElement("span");
+  sharedTitle.textContent = "Approved shared reference";
+  const sharedSelect = document.createElement("select");
+  const emptyShared = document.createElement("option");
+  emptyShared.value = "";
+  emptyShared.textContent = "Choose an approved scene reference";
+  sharedSelect.append(emptyShared);
+  for (const asset of approvedSceneLookAssets(scene)) {
+    const item = document.createElement("option");
+    item.value = asset.id;
+    item.textContent = asset.path.split("/").pop() ?? asset.id;
+    sharedSelect.append(item);
+  }
+  sharedSelect.value = cut.visual_source?.asset_id ?? "";
+  sharedLabel.append(sharedTitle, sharedSelect);
+
+  const sourceHint = document.createElement("p");
+  sourceHint.className = "workflow-field-hint";
+  const boundAsset = cut.visual_source?.asset_id
+    ? findAsset(cut.visual_source.asset_id)
+    : undefined;
+  sourceHint.textContent = visualSourceHint(cut, boundAsset);
+
+  const sourceActions = document.createElement("div");
+  sourceActions.className = "workflow-inspector-actions";
+  const saveSource = actionButton("Save source strategy", () => {
+    const strategy = strategySelect.value as VisualSourceStrategy;
+    const args: Record<string, unknown> = {
+      sceneId: scene.id,
+      cut: cut.id.cut,
+      strategy,
+    };
+    if (strategy === "previous_selected_take_exit_frame") {
+      args.predecessorCut = Number(predecessorSelect.value);
+    }
+    if (strategy === "shared_reference" && sharedSelect.value) {
+      args.assetId = sharedSelect.value;
+    }
+    void runAction("Saving visual-source strategy…", "workflow_set_visual_source", args);
+  });
+  sourceActions.append(saveSource);
+  const bindContinuity = actionButton("Bind selected exit frame", () => {
+    void runAction("Binding predecessor exit frame…", "workflow_bind_continuity_frame", {
+      sceneId: scene.id,
+      cut: cut.id.cut,
+    });
+  });
+  sourceActions.append(bindContinuity);
+  sourceControls.append(
+    strategyLabel,
+    predecessorLabel,
+    sharedLabel,
+    sourceHint,
+    sourceActions,
+  );
+  card.append(sourceControls);
+
+  const toggleSourceFields = (): void => {
+    const strategy = strategySelect.value as VisualSourceStrategy;
+    predecessorLabel.hidden = strategy !== "previous_selected_take_exit_frame";
+    sharedLabel.hidden = strategy !== "shared_reference";
+    bindContinuity.hidden = strategy !== "previous_selected_take_exit_frame";
+    const predecessor = earlierCuts.find(
+      (candidate) => candidate.id.cut === Number(predecessorSelect.value),
+    );
+    bindContinuity.disabled = Boolean(busy) || !predecessor?.selected_take;
+  };
+  strategySelect.addEventListener("change", toggleSourceFields);
+  predecessorSelect.addEventListener("change", toggleSourceFields);
+  toggleSourceFields();
+
+  const directSource = document.createElement("section");
+  directSource.className = "workflow-direct-start-frame";
   const promptLabel = document.createElement("label");
   promptLabel.className = "workflow-field";
   const promptTitle = document.createElement("span");
@@ -951,7 +1514,7 @@ function renderStartFrameCard(scene: SceneRecord, cut: CutRecord): HTMLElement {
     cut.negative_prompt ??
     "";
   negativeLabel.append(negativeTitle, negative);
-  card.append(promptLabel, negativeLabel);
+  directSource.append(promptLabel, negativeLabel);
 
   const promptActions = document.createElement("div");
   promptActions.className = "workflow-inspector-actions";
@@ -987,7 +1550,7 @@ function renderStartFrameCard(scene: SceneRecord, cut: CutRecord): HTMLElement {
       void attachStartFrame(scene.id, cut.id.cut);
     }),
   );
-  card.append(promptActions);
+  directSource.append(promptActions);
 
   const assets = cutImageAssets(scene.id, cut.id.cut);
   const versions = document.createElement("div");
@@ -1004,7 +1567,7 @@ function renderStartFrameCard(scene: SceneRecord, cut: CutRecord): HTMLElement {
       versions.append(renderStartFrameVersion(scene, cut, asset));
     }
   }
-  card.append(versions);
+  directSource.append(versions);
 
   const editKey = `${scene.id}.${cut.id.cut}`;
   const editLabel = document.createElement("label");
@@ -1020,8 +1583,93 @@ function renderStartFrameCard(scene: SceneRecord, cut: CutRecord): HTMLElement {
     startFrameEditBriefs.set(editKey, editBrief.value);
   });
   editLabel.append(editTitle, editBrief);
-  card.append(editLabel);
+  directSource.append(editLabel);
+  directSource.hidden = strategySelect.value !== "preproduction_start_frame";
+  strategySelect.addEventListener("change", () => {
+    directSource.hidden = strategySelect.value !== "preproduction_start_frame";
+  });
+  card.append(directSource);
   return card;
+}
+
+function effectiveVisualSourceStrategy(cut: CutRecord): VisualSourceStrategy | null {
+  return cut.visual_source?.strategy ??
+    (cut.approved_start_frame ? "preproduction_start_frame" : null);
+}
+
+function visualSourceReady(cut: CutRecord): boolean {
+  const strategy = effectiveVisualSourceStrategy(cut);
+  if (strategy === "no_start_frame") return true;
+  if (strategy === "preproduction_start_frame") return Boolean(cut.approved_start_frame);
+  return Boolean(cut.visual_source?.asset_id);
+}
+
+function visualSourceStatus(cut: CutRecord): string {
+  const strategy = effectiveVisualSourceStrategy(cut);
+  if (!strategy) return "Source strategy needed";
+  if (visualSourceReady(cut)) return "Render source ready";
+  if (strategy === "previous_selected_take_exit_frame") return "Planned · awaiting take";
+  if (strategy === "shared_reference") return "Planned · choose reference";
+  if (strategy === "deferred_manual") return "Planned · awaiting manual source";
+  return "Planned · start frame needed";
+}
+
+function renderBlocker(cut: CutRecord): string | null {
+  if (!cut.production_note_path) return "production note missing";
+  if (!cut.prompt?.trim()) return "production video prompt missing";
+  if (!effectiveVisualSourceStrategy(cut)) return "visual-source strategy missing";
+  if (!visualSourceReady(cut)) {
+    const strategy = effectiveVisualSourceStrategy(cut);
+    if (strategy === "preproduction_start_frame") return "approved start frame missing";
+    if (strategy === "previous_selected_take_exit_frame") {
+      return "predecessor take or exit frame missing";
+    }
+    if (strategy === "shared_reference") return "approved shared reference missing";
+    return "concrete render source missing";
+  }
+  return null;
+}
+
+function visualSourceHint(cut: CutRecord, boundAsset: AssetRecord | undefined): string {
+  const strategy = effectiveVisualSourceStrategy(cut);
+  if (!strategy) {
+    return "Choose and save a strategy. This approves how the cut will obtain its opening image.";
+  }
+  if (boundAsset) {
+    return `Bound source: ${boundAsset.path}`;
+  }
+  if (strategy === "previous_selected_take_exit_frame") {
+    const predecessor = cut.visual_source?.predecessor?.cut;
+    return predecessor
+      ? `Depends on Cut ${predecessor}. Production notes may proceed, but rendering waits for that cut’s selected take and exit frame.`
+      : "Choose an earlier cut. Production notes may preserve the dependency before its frame exists.";
+  }
+  if (strategy === "shared_reference") {
+    return "Choose an approved scene-look still to use as the shared source.";
+  }
+  if (strategy === "no_start_frame") {
+    return "This cut is render ready without a starting image.";
+  }
+  if (strategy === "deferred_manual") {
+    return "The source is intentionally deferred. Rendering remains blocked until a concrete asset is attached.";
+  }
+  return cut.approved_start_frame
+    ? `Approved start frame: ${cut.approved_start_frame}`
+    : "Generate or attach a still, then choose Use on the approved version.";
+}
+
+function approvedSceneLookAssets(scene: SceneRecord): AssetRecord[] {
+  const ids = new Set(
+    (scene.look_board?.slots ?? [])
+      .map((slot) => slot.approved_asset_id)
+      .filter((id): id is string => Boolean(id)),
+  );
+  return (state?.assets ?? []).filter(
+    (asset) =>
+      ids.has(asset.id) &&
+      asset.scene_id === scene.id &&
+      asset.status === "approved",
+  );
 }
 
 function renderStartFrameVersion(
@@ -1219,8 +1867,238 @@ function renderSketchStage(scene: SceneRecord, sceneStatus: SceneReport | undefi
     }),
   );
   wrap.append(actions);
-  if (scene.cuts.length) wrap.append(renderSketchCards(scene));
+  if (scene.cuts.length) {
+    wrap.append(renderAnimatic(scene));
+    wrap.append(renderSketchCards(scene));
+  }
   return wrap;
+}
+
+function cutForShot(scene: SceneRecord, shot: AnimaticShot): CutRecord | undefined {
+  return scene.cuts.find(
+    (cut) => cut.id.cut === shot.cut_id.cut && cut.id.source_scene === shot.cut_id.source_scene,
+  );
+}
+
+function stopRoughCut(): void {
+  if (!roughPlayback) return;
+  window.clearTimeout(roughPlayback.timer);
+  roughPlayback.audio?.pause();
+  roughPlayback = null;
+}
+
+function paintRoughStage(scene: SceneRecord, shot: AnimaticShot | null): void {
+  const stage = document.querySelector<HTMLElement>(".workflow-rough-cut-stage");
+  if (!stage || Number(stage.dataset.sceneId) !== scene.id) return;
+  stage.replaceChildren();
+  if (!shot) {
+    stage.hidden = true;
+    return;
+  }
+  stage.hidden = false;
+  const cut = cutForShot(scene, shot);
+  const title = document.createElement("h3");
+  const index = (scene.animatic?.shots ?? []).findIndex((item) => item.id === shot.id);
+  title.textContent = `${index + 1}. Cut ${shot.cut_id.cut} · ${cut?.sketch?.title || cut?.title || "Untitled"} · ${shot.duration_seconds.toFixed(2)}s`;
+  const dialogue = document.createElement("p");
+  const lines = cut?.sketch?.dialogue?.length ? cut.sketch.dialogue : [];
+  const spoken = lines.length
+    ? lines.map((line) => `${line.speaker}: ${line.text}`).join(" ")
+    : (cut?.dialogue ?? []).map((line) => `${line.speaker}: ${line.text}`).join(" ");
+  dialogue.textContent = spoken || "No dialogue on this shot.";
+  stage.append(title, dialogue);
+  const imagePath = resolveProjectPath(cut?.approved_start_frame);
+  if (imagePath) {
+    const image = document.createElement("img");
+    image.alt = title.textContent ?? "";
+    stage.append(image);
+    void toMediaUrlAsync(imagePath).then((url) => {
+      image.src = url;
+    });
+  }
+}
+
+async function showRoughShot(scene: SceneRecord, index: number): Promise<void> {
+  if (!roughPlayback || roughPlayback.sceneId !== scene.id) return;
+  const shots = scene.animatic?.shots ?? [];
+  const shot = shots[index];
+  if (!shot) {
+    stopRoughCut();
+    paintRoughStage(scene, null);
+    renderWorkflowDesk();
+    return;
+  }
+  roughPlayback.index = index;
+  roughPlayback.audio?.pause();
+  roughPlayback.audio = null;
+  paintRoughStage(scene, shot);
+  if (shot.scratch_audio_path) {
+    const abs = resolveProjectPath(shot.scratch_audio_path);
+    if (abs) {
+      const url = await toMediaUrlAsync(abs);
+      if (!roughPlayback || roughPlayback.sceneId !== scene.id || roughPlayback.index !== index) return;
+      const audio = new Audio(url);
+      roughPlayback.audio = audio;
+      void audio.play().catch(() => undefined);
+    }
+  }
+  const ms = Math.max(0.4, shot.duration_seconds) * 1000;
+  roughPlayback.timer = window.setTimeout(() => {
+    const current = state?.scenes.find((item) => item.id === scene.id) ?? scene;
+    void showRoughShot(current, index + 1);
+  }, ms);
+}
+
+function playRoughCut(scene: SceneRecord): void {
+  const shots = scene.animatic?.shots ?? [];
+  if (!shots.length) return;
+  stopRoughCut();
+  roughPlayback = { sceneId: scene.id, index: 0, timer: 0, audio: null };
+  renderWorkflowDesk();
+  void showRoughShot(scene, 0);
+}
+
+function renderAnimatic(scene: SceneRecord): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "workflow-animatic";
+  section.setAttribute("aria-label", "Animatic");
+  const shots = scene.animatic?.shots ?? [];
+  const total = shots.reduce((sum, shot) => sum + (shot.duration_seconds || 0), 0);
+  const heading = document.createElement("h2");
+  heading.textContent = scene.animatic?.approved
+    ? `Rough cut · approved · ${total.toFixed(1)}s`
+    : `Rough cut · ${total.toFixed(1)}s`;
+  const note = document.createElement("p");
+  note.className = "workflow-field-hint";
+  note.textContent =
+    "Timing and order sit on the cut sketches. Dialogue without a scratch file plays as temporary on-screen text. A timing change marks later shot packages for review and keeps existing renders.";
+  section.append(heading, note);
+
+  const stage = document.createElement("div");
+  stage.className = "workflow-rough-cut-stage";
+  stage.dataset.sceneId = String(scene.id);
+  stage.hidden = roughPlayback?.sceneId !== scene.id;
+  section.append(stage);
+
+  const controls = document.createElement("div");
+  controls.className = "workflow-inspector-actions";
+  controls.append(
+    actionButton(roughPlayback?.sceneId === scene.id ? "Stop rough cut" : "Play rough cut", () => {
+      if (roughPlayback?.sceneId === scene.id) {
+        stopRoughCut();
+        renderWorkflowDesk();
+        return;
+      }
+      playRoughCut(scene);
+    }),
+    actionButton(scene.animatic?.approved ? "Rough cut approved" : "Approve rough cut", () => {
+      void runAction("Approving rough cut…", "workflow_approve_animatic", { sceneId: scene.id });
+    }),
+  );
+  const approveButton = controls.querySelectorAll("button")[1] as HTMLButtonElement | undefined;
+  if (approveButton && scene.animatic?.approved) approveButton.disabled = true;
+  section.append(controls);
+
+  const warnings = scene.animatic?.warnings ?? [];
+  if (warnings.length) {
+    section.append(
+      block(
+        "workflow-banner warn",
+        warnings.map((warning) => warning.message).join("\n"),
+      ),
+    );
+  }
+
+  const list = document.createElement("ol");
+  list.className = "workflow-animatic-list";
+  shots.forEach((shot, index) => {
+    const cut = cutForShot(scene, shot);
+    const item = document.createElement("li");
+    item.className = "workflow-animatic-row";
+    const label = document.createElement("span");
+    label.className = "workflow-animatic-label";
+    label.textContent = `Cut ${shot.cut_id.cut} · ${cut?.sketch?.title || cut?.title || "Untitled"}`;
+    const duration = document.createElement("input");
+    duration.type = "number";
+    duration.min = "0.4";
+    duration.max = "120";
+    duration.step = "0.1";
+    duration.value = String(shot.duration_seconds);
+    duration.setAttribute("aria-label", `Duration for cut ${shot.cut_id.cut}`);
+    duration.addEventListener("change", () => {
+      const seconds = Number(duration.value);
+      if (!Number.isFinite(seconds)) return;
+      void runAction("Saving animatic timing…", "workflow_set_animatic_duration", {
+        sceneId: scene.id,
+        shotId: shot.id,
+        durationSeconds: seconds,
+      });
+    });
+    const scratch = document.createElement("span");
+    scratch.className = "workflow-animatic-scratch";
+    const hasDialogue = Boolean(cut?.dialogue?.length || cut?.sketch?.dialogue?.length);
+    if (shot.scratch_audio_path) {
+      scratch.textContent = shot.scratch_audio_path.split("/").pop() ?? "Scratch audio";
+    } else if (hasDialogue) {
+      scratch.textContent = "Temporary dialogue";
+    } else {
+      scratch.textContent = "No scratch audio";
+    }
+    const rowActions = document.createElement("div");
+    rowActions.className = "workflow-animatic-actions";
+    rowActions.append(
+      actionButton("Up", () => moveAnimaticShot(scene, index, -1)),
+      actionButton("Down", () => moveAnimaticShot(scene, index, 1)),
+      actionButton(shot.scratch_audio_path ? "Replace scratch" : "Attach scratch", () => {
+        void attachScratchAudio(scene.id, shot.id);
+      }),
+    );
+    if (shot.scratch_audio_path) {
+      rowActions.append(
+        actionButton("Remove scratch", () => {
+          void runAction("Removing scratch audio…", "workflow_clear_scratch_audio", {
+            sceneId: scene.id,
+            shotId: shot.id,
+          });
+        }),
+      );
+    }
+    item.append(label, duration, scratch, rowActions);
+    list.append(item);
+  });
+  section.append(list);
+  if (roughPlayback?.sceneId === scene.id) {
+    const current = shots[roughPlayback.index];
+    if (current) queueMicrotask(() => paintRoughStage(scene, current));
+  }
+  return section;
+}
+
+function moveAnimaticShot(scene: SceneRecord, index: number, delta: number): void {
+  const shots = [...(scene.animatic?.shots ?? [])];
+  const next = index + delta;
+  if (next < 0 || next >= shots.length) return;
+  const [moved] = shots.splice(index, 1);
+  shots.splice(next, 0, moved);
+  void runAction("Reordering animatic…", "workflow_reorder_animatic", {
+    sceneId: scene.id,
+    shotIds: shots.map((shot) => shot.id),
+  });
+}
+
+async function attachScratchAudio(sceneId: number, shotId: string): Promise<void> {
+  const selected = await openDialog({
+    title: "Attach scratch audio",
+    multiple: false,
+    filters: [{ name: "Audio", extensions: ["wav", "mp3", "m4a", "aac", "ogg", "flac"] }],
+  });
+  const path = Array.isArray(selected) ? selected[0] : selected;
+  if (!path) return;
+  await runAction("Attaching scratch audio…", "workflow_attach_scratch_audio", {
+    sceneId,
+    shotId,
+    sourcePath: path,
+  });
 }
 
 function renderSketchCards(scene: SceneRecord): HTMLElement {
@@ -1229,7 +2107,51 @@ function renderSketchCards(scene: SceneRecord): HTMLElement {
   for (const cut of scene.cuts) {
     list.append(renderSketchCard(scene, cut));
   }
+  queueLookThumbs(list);
   return list;
+}
+
+function dependencyNote(state: CutRecord["dependency_state"]): string | null {
+  switch (state) {
+    case "needs_review":
+      return "An approved upstream artifact changed. This shot needs review. Existing files were kept.";
+    case "stale":
+      return "An approved upstream artifact changed. This shot is stale. Existing files were kept.";
+    case "invalid":
+      return "An approved upstream artifact changed. This shot is invalid until it is rebuilt. Existing files were kept.";
+    case "keep":
+      return "An approved upstream artifact changed. This shot is safe to keep.";
+    default:
+      return null;
+  }
+}
+
+function moveCut(scene: SceneRecord, cut: CutRecord, delta: number): void {
+  const cuts = [...scene.cuts].sort((a, b) => a.id.cut - b.id.cut);
+  const index = cuts.findIndex((item) => item.stable_id && item.stable_id === cut.stable_id);
+  const next = index + delta;
+  if (index < 0 || next < 0 || next >= cuts.length) return;
+  const ids = cuts.map((item) => item.stable_id ?? "").filter((id) => id.length > 0);
+  if (ids.length !== cuts.length) return;
+  const [moved] = ids.splice(index, 1);
+  ids.splice(next, 0, moved);
+  void runAction("Reordering cuts…", "workflow_reorder_cuts", {
+    sceneId: scene.id,
+    shotIds: ids,
+  });
+}
+
+function renderCutOrder(scene: SceneRecord, cut: CutRecord): HTMLElement {
+  const cuts = [...scene.cuts].sort((a, b) => a.id.cut - b.id.cut);
+  const index = cuts.findIndex((item) => item.id.cut === cut.id.cut);
+  const row = document.createElement("div");
+  row.className = "workflow-sketch-toolbar";
+  const earlier = actionButton("Move earlier", () => moveCut(scene, cut, -1));
+  earlier.disabled = index <= 0 || !cut.stable_id;
+  const later = actionButton("Move later", () => moveCut(scene, cut, 1));
+  later.disabled = index < 0 || index >= cuts.length - 1 || !cut.stable_id;
+  row.append(earlier, later);
+  return row;
 }
 
 function renderSketchCard(scene: SceneRecord, cut: CutRecord): HTMLElement {
@@ -1244,6 +2166,7 @@ function renderSketchCard(scene: SceneRecord, cut: CutRecord): HTMLElement {
   status.textContent = cut.sketch ? speechLabel(cut.speech_mode) : "Imported fallback";
   header.append(heading, status);
   card.append(header);
+  card.append(renderCutOrder(scene, cut));
 
   const fields = document.createElement("div");
   fields.className = "workflow-sketch-field-grid";
@@ -1256,12 +2179,9 @@ function renderSketchCard(scene: SceneRecord, cut: CutRecord): HTMLElement {
   );
   const subject = sketchTextField(fields, "Subject", sketch.subject ?? "");
   const speaker = sketchTextField(fields, "Speaker", sketch.speaker ?? "");
-  const mouth = sketchSelectField(
-    fields,
-    "Mouth policy",
-    sketch.mouth_policy ?? "",
-    MOUTH_POLICIES,
-  );
+  const mouth = recipeRequires("mouth_policy")
+    ? sketchSelectField(fields, "Mouth policy", sketch.mouth_policy ?? "", MOUTH_POLICIES)
+    : null;
   const pace = sketchSelectField(fields, "Pace", sketch.pace ?? "", [
     { id: "tight", label: "Tight" },
     { id: "natural", label: "Natural" },
@@ -1337,7 +2257,7 @@ function renderSketchCard(scene: SceneRecord, cut: CutRecord): HTMLElement {
           shot_role: nullable(role.value),
           subject: nullable(subject.value),
           speaker: nullable(speaker.value),
-          mouth_policy: nullable(mouth.value),
+          mouth_policy: mouth ? nullable(mouth.value) : null,
           pace: nullable(pace.value),
           visual_prompt: nullable(prompt.value),
           negative_prompt: nullable(negative.value),
@@ -1352,6 +2272,7 @@ function renderSketchCard(scene: SceneRecord, cut: CutRecord): HTMLElement {
     }),
   );
   card.append(actions);
+  card.append(renderStartFrameCard(scene, cut, true));
   return card;
 }
 
@@ -1552,6 +2473,7 @@ function renderCharactersStage(): HTMLElement {
   for (const character of characters) {
     list.append(renderCharacterEditor(character));
   }
+  queueLookThumbs(list);
   return list;
 }
 
@@ -1634,6 +2556,8 @@ function renderCharacterEditor(character: CharacterRecord | null): HTMLElement {
 
   if (character) {
     card.append(renderCharacterModelSheet(character));
+    const voice = renderCharacterVoice(character);
+    if (voice) card.append(voice);
   }
 
   if (character?.notes?.length) {
@@ -1787,36 +2711,556 @@ function renderCharacterModelSheet(character: CharacterRecord): HTMLElement {
   return section;
 }
 
-function renderCutCards(scene: SceneRecord, showMode: boolean): HTMLElement {
+function renderCharacterVoice(character: CharacterRecord): HTMLElement | null {
+  const assets = (character.asset_ids ?? [])
+    .map(findAsset)
+    .filter((asset): asset is AssetRecord => Boolean(asset));
+  const sample = assets.find((asset) => asset.role === "voice_sample");
+  const profile = assets.find((asset) => asset.role === "voice_profile");
+  if (!sample && !profile) return null;
+  const line = document.createElement("p");
+  line.className = "workflow-field-hint";
+  const file = sample?.path.split("/").pop() || profile?.path.split("/").pop() || "voice";
+  const detail = profile?.notes?.trim();
+  line.textContent = detail ? `Voice · ${file} · ${detail}` : `Voice · ${file}`;
+  return line;
+}
+
+function renderProductionNotesStage(scene: SceneRecord): HTMLElement {
   const list = document.createElement("div");
-  list.className = "workflow-cuts";
-  list.setAttribute("aria-label", "Cuts");
+  list.className = "workflow-production-notes";
+  const sync = actionButton("Build all production video prompts", () => {
+    const chat = requireChat();
+    if (!chat) return;
+    void runAction(
+      "Building production video prompts…",
+      "workflow_sync_production_notes",
+      { sceneId: scene.id, ...chat },
+    );
+  });
+  sync.disabled = Boolean(busy);
+  const refresh = actionButton("Refresh rendered takes", () => {
+    void runAction("Refreshing rendered takes…", "workflow_import", { persist: true });
+  });
+  refresh.disabled = Boolean(busy);
+  const intro = document.createElement("section");
+  intro.className = "workflow-source-controls";
+  intro.append(
+    block(
+      "workflow-field-hint",
+      "Build complete moving-image prompts from the script, scene intent, ordered cut sketches, dialogue, approved scene references, and each cut’s approved visual source. Use this after planning or reference images change.",
+    ),
+    sync,
+    refresh,
+  );
+  list.append(intro);
   for (const cut of scene.cuts) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `workflow-cut${cut.id.cut === selectedCut ? " active" : ""}`;
-    const mode = cut.sketch?.shot_role
-      ? `${roleLabel(cut.sketch.shot_role)} · ${mouthLabel(cut.sketch.mouth_policy)}`
-      : showMode
-        ? speechLabel(cut.speech_mode)
-        : "sketch pending";
-    const start = cut.approved_start_frame ? "start frame" : "identity ref only";
-    button.innerHTML = `<span class="workflow-cut-num"></span><span class="workflow-cut-title"></span><span class="workflow-cut-mode"></span><span class="workflow-cut-ref"></span>`;
-    button.querySelector(".workflow-cut-num")!.textContent = `Cut ${cut.id.cut}`;
-    button.querySelector(".workflow-cut-title")!.textContent = cut.title?.trim() || `Scene ${cut.id.source_scene} Cut ${cut.id.cut}`;
-    button.querySelector(".workflow-cut-mode")!.textContent = mode;
-    button.querySelector(".workflow-cut-ref")!.textContent = start;
-    if (cut.sketch?.shot_role === "performance" || cut.speech_mode === "source_video_lipsync") {
-      button.classList.add("performance");
-    }
-    button.addEventListener("click", () => {
-      selectedCut = cut.id.cut;
-      renderWorkflowDesk();
-      emitSelection();
-    });
-    list.append(button);
+    list.append(renderProductionNoteCard(scene, cut));
   }
   return list;
+}
+
+function renderProductionNoteCard(
+  scene: SceneRecord,
+  cut: CutRecord,
+  renderQueue = false,
+): HTMLElement {
+  const card = document.createElement("article");
+  card.className = "workflow-start-frame-card workflow-production-note-card";
+  const header = document.createElement("header");
+  const heading = document.createElement("h3");
+  heading.textContent = `Cut ${cut.id.cut} · ${cut.title?.trim() || "Untitled"}`;
+  const status = document.createElement("span");
+  status.className = "workflow-look-status";
+  const blocker = renderBlocker(cut);
+  status.textContent = cut.package_needs_review
+    ? blocker
+      ? `Needs review · render blocked · ${blocker}`
+      : `Needs review · ${cut.takes?.length ?? 0} take(s) kept`
+    : blocker
+      ? `Render blocked · ${blocker}`
+      : `${cut.takes?.length ?? 0} take(s) · ready`;
+  header.append(heading, status);
+  card.append(header);
+  if (cut.package_needs_review) {
+    card.append(
+      block(
+        "workflow-banner warn",
+        "Animatic timing changed. This shot package needs review. Existing renders were kept.",
+      ),
+      actionButton("Mark package reviewed", () => {
+        void runAction("Marking shot package reviewed…", "workflow_clear_package_review", {
+          sceneId: scene.id,
+          cut: cut.id.cut,
+        });
+      }),
+    );
+  }
+  const dependency = dependencyNote(cut.dependency_state);
+  if (dependency) {
+    card.append(block("workflow-banner warn", dependency));
+  }
+
+  const facts = document.createElement("p");
+  facts.className = "workflow-field-hint";
+  facts.textContent = [
+    roleLabel(cut.sketch?.shot_role),
+    speechLabel(cut.speech_mode),
+    cut.render_lane?.replace(/_/g, " ") ?? "lane pending",
+    visualSourceStatus(cut),
+  ].join(" · ");
+  card.append(facts);
+
+  if (!renderQueue) {
+    const promptLabel = document.createElement("label");
+    promptLabel.className = "workflow-field";
+    const promptTitle = document.createElement("span");
+    promptTitle.textContent = "Production video prompt";
+    const prompt = document.createElement("textarea");
+    prompt.rows = 10;
+    prompt.value = cut.prompt ?? cut.sketch?.visual_prompt ?? "";
+    prompt.placeholder =
+      "Describe the moving shot, performance or action, camera behavior, continuity, and sound.";
+    promptLabel.append(promptTitle, prompt);
+
+    const negativeLabel = document.createElement("label");
+    negativeLabel.className = "workflow-field";
+    const negativeTitle = document.createElement("span");
+    negativeTitle.textContent = "Negative prompt";
+    const negative = document.createElement("textarea");
+    negative.rows = 3;
+    negative.value = cut.negative_prompt ?? cut.sketch?.negative_prompt ?? "";
+    negativeLabel.append(negativeTitle, negative);
+    card.append(promptLabel, negativeLabel);
+
+    if (cut.dialogue?.length) {
+      const dialogue = document.createElement("p");
+      dialogue.className = "workflow-production-dialogue";
+      dialogue.textContent = cut.dialogue
+        .map((line) => `${line.speaker}: “${line.text}”`)
+        .join(" ");
+      card.append(dialogue);
+    }
+
+    const save = actionButton("Save production prompt", () => {
+      void runAction("Saving production prompt…", "workflow_save_production_prompt", {
+        sceneId: scene.id,
+        cut: cut.id.cut,
+        prompt: prompt.value,
+        negativePrompt: negative.value,
+      });
+    });
+    save.disabled = Boolean(busy) || !cut.production_note_path;
+    const actions = document.createElement("div");
+    actions.className = "workflow-inspector-actions";
+    const sync = actionButton("Build full video prompt", () => {
+      const chat = requireChat();
+      if (!chat) return;
+      void runAction(
+        "Building production video prompt…",
+        "workflow_sync_production_notes",
+        {
+          sceneId: scene.id,
+          cut: cut.id.cut,
+          ...chat,
+        },
+      );
+    });
+    sync.disabled = Boolean(busy) || !cut.production_note_path || !cut.sketch;
+    sync.title =
+      "Synthesize a complete video prompt from the script, cut sequence, current sketch, dialogue, and approved visual references.";
+    actions.append(sync, save);
+    const notePath = resolveProjectPath(cut.production_note_path);
+    if (notePath) {
+      actions.append(actionButton("Open full handoff", () => hooks?.onOpenPath(notePath)));
+    }
+    actions.append(renderCutButton(scene, cut));
+    card.append(actions);
+  } else {
+    const actions = document.createElement("div");
+    actions.className = "workflow-inspector-actions";
+    actions.append(renderCutButton(scene, cut));
+    card.append(actions);
+  }
+
+  const takes = cut.takes ?? [];
+  if (takes.length) {
+    const takeList = document.createElement("div");
+    takeList.className = "workflow-production-takes";
+    for (const take of [...takes].reverse()) {
+      const preview = document.createElement("figure");
+      preview.className = "workflow-production-take";
+      const video = document.createElement("video");
+      video.controls = true;
+      video.preload = "metadata";
+      video.playsInline = true;
+      video.dataset.takePath = resolveProjectPath(take.path) ?? take.path;
+      const caption = document.createElement("figcaption");
+      caption.textContent = `${take.path.split("/").pop() ?? take.id} · ${take.status.replace(/_/g, " ")}`;
+      const open = actionButton(
+        "Open in viewer",
+        () => hooks?.onOpenPath(resolveProjectPath(take.path) ?? take.path),
+      );
+      const reviewActions = document.createElement("div");
+      reviewActions.className = "workflow-inspector-actions";
+      for (const [status, label] of [
+        ["selected", "Select"],
+        ["alternate", "Alternate"],
+        ["rejected", "Reject"],
+        ["needs_edit", "Needs edit"],
+        ["needs_rerender", "Needs rerender"],
+      ] as const) {
+        const review = actionButton(label, () => {
+          void runAction("Updating take review…", "workflow_set_take_status", {
+            sceneId: scene.id,
+            cut: cut.id.cut,
+            takeId: take.id,
+            status,
+          });
+        });
+        review.disabled = Boolean(busy) || take.status === status;
+        reviewActions.append(review);
+      }
+      reviewActions.append(
+        actionButton("Delete video", () => {
+          void deleteProductionTake(scene, cut, take);
+        }),
+      );
+      preview.append(video, caption, open, reviewActions);
+      takeList.append(preview);
+    }
+    card.append(takeList);
+    queueTakeVideos(takeList);
+  }
+  return card;
+}
+
+async function deleteProductionTake(
+  scene: SceneRecord,
+  cut: CutRecord,
+  take: TakeRecord,
+): Promise<void> {
+  const confirmed = await ask(
+    `Delete ${take.path}?\n\nThis permanently removes this video take. If it is selected, dependent continuity frames will be unbound.`,
+    { title: `Delete Scene ${scene.id} Cut ${cut.id.cut} take`, kind: "warning" },
+  );
+  if (!confirmed) return;
+  await runAction("Deleting video take…", "workflow_delete_take", {
+    sceneId: scene.id,
+    cut: cut.id.cut,
+    takeId: take.id,
+  });
+}
+
+function renderCutButton(scene: SceneRecord, cut: CutRecord): HTMLButtonElement {
+  const button = actionButton(`Render Cut ${cut.id.cut} new take`, () => {
+    void runAction("Preparing render…", "workflow_prepare_render", {
+      sceneId: scene.id,
+      cut: cut.id.cut,
+    });
+  });
+  const blocker = renderBlocker(cut);
+  button.disabled = Boolean(busy) || Boolean(blocker);
+  button.title = blocker
+    ? `Render blocked: ${blocker}.`
+    : "Prepare a provider request for approval.";
+  return button;
+}
+
+function renderRenderStage(scene: SceneRecord): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "workflow-production-notes";
+  const takes = scene.cuts.reduce((total, cut) => total + (cut.takes?.length ?? 0), 0);
+  wrap.append(
+    block(
+      takes ? "workflow-banner" : "workflow-missing",
+      takes
+        ? `${takes} take(s) recorded. Render another take here or directly from Production Notes.`
+        : "No takes recorded yet. Ready cuts can be rendered here or directly from Production Notes.",
+    ),
+  );
+  for (const cut of scene.cuts) {
+    wrap.append(renderProductionNoteCard(scene, cut, true));
+  }
+  return wrap;
+}
+
+function renderAssembleStage(scene: SceneRecord): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "workflow-production-notes";
+  const missing: number[] = [];
+  const selected: Array<{ cut: number; take: TakeRecord }> = [];
+  for (const cut of scene.cuts) {
+    const take = (cut.takes ?? []).find(
+      (candidate) =>
+        candidate.id === cut.selected_take || candidate.path === cut.selected_take,
+    );
+    if (take) selected.push({ cut: cut.id.cut, take });
+    else missing.push(cut.id.cut);
+  }
+
+  wrap.append(
+    block(
+      missing.length ? "workflow-missing" : "workflow-banner",
+      missing.length
+        ? `Select one take for every cut before assembly. Missing: ${missing
+            .map((cut) => `Cut ${cut}`)
+            .join(", ")}.`
+        : `${selected.length} selected takes are ready to assemble in cut order.`,
+    ),
+  );
+
+  const summary = document.createElement("article");
+  summary.className = "workflow-script";
+  const heading = document.createElement("h3");
+  heading.textContent = `Scene ${scene.id} master`;
+  const list = document.createElement("ol");
+  list.className = "workflow-readiness";
+  for (const cut of scene.cuts) {
+    const entry = document.createElement("li");
+    const take = selected.find((item) => item.cut === cut.id.cut)?.take;
+    entry.className = take ? "ready" : "missing";
+    entry.textContent = take
+      ? `Cut ${cut.id.cut} · ${take.path.split("/").pop() ?? take.id}`
+      : `Cut ${cut.id.cut} · no selected take`;
+    list.append(entry);
+  }
+
+  const controls = document.createElement("div");
+  controls.className = "workflow-inspector-actions";
+  const assemble = actionButton(`Prepare Scene ${scene.id} master`, () => {
+    void runAction("Preparing assembly…", "workflow_prepare_assemble", {
+      sceneId: scene.id,
+    });
+  });
+  assemble.disabled = Boolean(busy) || missing.length > 0 || scene.cuts.length === 0;
+  assemble.title = missing.length
+    ? "Select a take for every cut in Production Notes first."
+    : "Prepare a local ffmpeg assembly for approval. No provider credits are used.";
+  controls.append(assemble);
+  const note = document.createElement("p");
+  note.className = "workflow-field-hint";
+  note.textContent =
+    "Assembly joins the complete reviewed takes in cut order, runs locally with ffmpeg after approval, and writes a versioned master to Final/.";
+  summary.append(heading, list, controls, note);
+  wrap.append(summary, renderPostPanel(scene, missing.length > 0));
+  return wrap;
+}
+
+const CUT_VERSION_STAGES: Array<{ id: string; label: string }> = [
+  { id: "selects", label: "Selects" },
+  { id: "assembly", label: "Assembly" },
+  { id: "fine_cut", label: "Fine cut" },
+  { id: "picture_lock", label: "Picture lock" },
+];
+
+const POST_FIELDS: Array<{ id: string; label: string }> = [
+  { id: "audio_mix", label: "Audio mix" },
+  { id: "vfx", label: "VFX" },
+  { id: "compositing", label: "Compositing" },
+  { id: "captions", label: "Captions" },
+  { id: "mastering", label: "Mastering" },
+  { id: "qc", label: "QC" },
+];
+
+const POST_STATUSES: Array<{ id: string; label: string }> = [
+  { id: "not_started", label: "Not started" },
+  { id: "in_progress", label: "In progress" },
+  { id: "needs_review", label: "Needs review" },
+  { id: "approved", label: "Approved" },
+];
+
+function postStatus(post: SceneRecord["post"], field: string): string {
+  switch (field) {
+    case "audio_mix":
+      return post?.audio_mix ?? "not_started";
+    case "vfx":
+      return post?.vfx ?? "not_started";
+    case "compositing":
+      return post?.compositing ?? "not_started";
+    case "captions":
+      return post?.captions ?? "not_started";
+    case "mastering":
+      return post?.mastering ?? "not_started";
+    case "qc":
+      return post?.qc ?? "not_started";
+    default:
+      return "not_started";
+  }
+}
+
+function renderPostPanel(scene: SceneRecord, takesMissing: boolean): HTMLElement {
+  const post = scene.post;
+  const article = document.createElement("article");
+  article.className = "workflow-script";
+  const heading = document.createElement("h3");
+  heading.textContent = "Cut versions";
+  article.append(heading);
+
+  const versions = post?.versions ?? [];
+  if (versions.length === 0) {
+    article.append(
+      block(
+        "workflow-banner",
+        "No cut version yet. Marking snapshots the selected takes and leaves those files in place.",
+      ),
+    );
+  }
+  for (const version of versions) {
+    const row = document.createElement("div");
+    row.className = "workflow-field inline";
+    const label = document.createElement("span");
+    const locked = post?.picture_locked_id === version.id;
+    label.textContent = `${version.label} · ${version.shots.length} shots${
+      version.assembly_path ? ` · ${version.assembly_path}` : ""
+    }${locked ? " · locked" : ""}`;
+    const stage = document.createElement("select");
+    stage.setAttribute("aria-label", `${version.label} stage`);
+    stage.disabled = Boolean(busy);
+    for (const option of CUT_VERSION_STAGES) {
+      const choice = document.createElement("option");
+      choice.value = option.id;
+      choice.textContent = option.label;
+      choice.selected = option.id === version.stage;
+      stage.append(choice);
+    }
+    stage.addEventListener("change", () => {
+      void runAction(`Updating ${version.label}`, "workflow_set_cut_version_stage", {
+        sceneId: scene.id,
+        versionId: version.id,
+        stage: stage.value,
+      });
+    });
+    row.append(label, stage);
+    article.append(row);
+  }
+
+  const controls = document.createElement("div");
+  controls.className = "workflow-inspector-actions";
+  const mark = actionButton("Mark selects as cut version", () => {
+    void runAction("Marking cut version…", "workflow_mark_cut_version", { sceneId: scene.id });
+  });
+  mark.disabled = Boolean(busy) || takesMissing || scene.cuts.length === 0;
+  mark.title = takesMissing
+    ? "Select a take for every cut in Production Notes first."
+    : "Snapshot the selected takes as a cut version. Files stay where they are.";
+  controls.append(mark);
+  const latest = versions[versions.length - 1];
+  if (latest && post?.picture_locked_id !== latest.id) {
+    const lock = actionButton("Lock picture", () => {
+      void runAction("Locking picture…", "workflow_lock_picture", {
+        sceneId: scene.id,
+        versionId: latest.id,
+      });
+    });
+    controls.append(lock);
+  }
+  article.append(controls);
+
+  const editorial = document.createElement("div");
+  editorial.className = "workflow-field";
+  const editorialLabel = document.createElement("span");
+  editorialLabel.textContent = "Editorial path";
+  const pathSelect = document.createElement("select");
+  pathSelect.setAttribute("aria-label", "Editorial path");
+  pathSelect.disabled = Boolean(busy);
+  for (const option of [
+    { id: "host_ffmpeg", label: "Host ffmpeg" },
+    { id: "external_nle", label: "External NLE" },
+  ]) {
+    const choice = document.createElement("option");
+    choice.value = option.id;
+    choice.textContent = option.label;
+    choice.selected = option.id === (post?.editorial_path ?? "host_ffmpeg");
+    pathSelect.append(choice);
+  }
+  const noteInput = document.createElement("input");
+  noteInput.type = "text";
+  noteInput.placeholder = "Why this edit leaves the host";
+  noteInput.setAttribute("aria-label", "External NLE note");
+  noteInput.value = post?.external_nle_note ?? "";
+  noteInput.disabled = Boolean(busy);
+  const saveEditorial = actionButton("Record editorial path", () => {
+    void runAction("Recording editorial path…", "workflow_set_editorial_path", {
+      sceneId: scene.id,
+      path: pathSelect.value,
+      note: noteInput.value,
+    });
+  });
+  editorial.append(editorialLabel, pathSelect, noteInput, saveEditorial);
+  const editorialHint = document.createElement("p");
+  editorialHint.className = "workflow-field-hint";
+  editorialHint.textContent =
+    "Host ffmpeg stays the assembly above. Recording an external NLE stores that decision and leaves the cut version and take files in place.";
+  article.append(editorial, editorialHint);
+
+  const statuses = document.createElement("div");
+  statuses.className = "workflow-post-statuses";
+  for (const field of POST_FIELDS) {
+    const row = document.createElement("label");
+    row.className = "workflow-field inline";
+    row.textContent = field.label;
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", field.label);
+    select.disabled = Boolean(busy);
+    const current = postStatus(post, field.id);
+    for (const option of POST_STATUSES) {
+      const choice = document.createElement("option");
+      choice.value = option.id;
+      choice.textContent = option.label;
+      choice.selected = option.id === current;
+      select.append(choice);
+    }
+    select.addEventListener("change", () => {
+      void runAction(`Updating ${field.label}`, "workflow_set_post_status", {
+        sceneId: scene.id,
+        field: field.id,
+        status: select.value,
+      });
+    });
+    row.append(select);
+    statuses.append(row);
+  }
+  article.append(statuses);
+
+  const deliverables = state?.profile?.deliverables ?? [];
+  const checkRow = document.createElement("div");
+  checkRow.className = "workflow-inspector-actions";
+  if (deliverables.length === 0) {
+    article.append(
+      block("workflow-banner", "Add a named deliverable on the profile before a QC check."),
+    );
+  } else {
+    const deliverableSelect = document.createElement("select");
+    deliverableSelect.setAttribute("aria-label", "Deliverable");
+    deliverableSelect.disabled = Boolean(busy);
+    for (const deliverable of deliverables) {
+      const choice = document.createElement("option");
+      choice.value = deliverable.id;
+      const spec = [deliverable.resolution, deliverable.aspect_ratio].filter(Boolean).join(" ");
+      choice.textContent = spec ? `${deliverable.name} · ${spec}` : deliverable.name;
+      choice.selected = post?.last_check?.deliverable_id === deliverable.id;
+      deliverableSelect.append(choice);
+    }
+    const check = actionButton("Check deliverable", () => {
+      void runAction("Checking deliverable…", "workflow_check_deliverable", {
+        sceneId: scene.id,
+        deliverableId: deliverableSelect.value,
+      });
+    });
+    checkRow.append(deliverableSelect, check);
+    article.append(checkRow);
+  }
+  const last = post?.last_check;
+  if (last) {
+    article.append(
+      block(
+        last.passed ? "workflow-banner" : "workflow-missing",
+        `${last.passed ? "Passed" : "Failed"}. ${(last.messages ?? []).join(" ")}`,
+      ),
+    );
+  }
+  return article;
 }
 
 function renderInspector(): HTMLElement {
@@ -1834,6 +3278,17 @@ function renderInspector(): HTMLElement {
     return aside;
   }
   aside.append(renderReadiness(scene, sceneStatus));
+  const blockers = sceneBlockers(scene.id);
+  if (blockers.length) {
+    aside.append(
+      block(
+        "workflow-banner warn",
+        `Blocked on ${blockers
+          .map((item) => `${item.name} (${item.kind.replace(/_/g, " ")})`)
+          .join(", ")}.`,
+      ),
+    );
+  }
   if (sceneStatus) {
     const summary = document.createElement("pre");
     summary.className = "workflow-excerpt";
@@ -1847,7 +3302,9 @@ function renderInspector(): HTMLElement {
     addFact(dl, "Title", cut.title ?? "—");
     addFact(dl, "Mode", speechLabel(cut.speech_mode));
     addFact(dl, "Shot role", roleLabel(cut.sketch?.shot_role));
-    addFact(dl, "Mouth", mouthLabel(cut.sketch?.mouth_policy));
+    if (recipeRequires("mouth_policy")) {
+      addFact(dl, "Mouth", mouthLabel(cut.sketch?.mouth_policy));
+    }
     addFact(dl, "Subject", cut.subject ?? cut.sketch?.subject ?? "—");
     addFact(dl, "Start frame", cut.approved_start_frame ?? "none (not a model-sheet closeup)");
     addFact(dl, "Note", cut.production_note_path ?? "—");
@@ -1905,21 +3362,91 @@ function renderJobs(): HTMLElement {
       body.append(
         block(
           "empty-state",
-          "No provider jobs recorded yet. Scene look generates and later renders land here.",
+          "No provider jobs recorded yet. Look generation, start frames, renders, and assembly land here.",
         ),
       );
     } else {
       for (const job of state?.jobs ?? []) {
         const row = document.createElement("p");
-        row.textContent = `${job.kind} · ${job.status ?? "unknown"} · ${
-          job.output_path ?? job.model ?? job.provider ?? job.id
-        }`;
+        const attempts = job.attempts?.length ?? 0;
+        row.textContent = `${job.kind} · ${job.status ?? "unknown"} · ${attempts} attempt${
+          attempts === 1 ? "" : "s"
+        } · ${job.output_path ?? job.model ?? job.provider ?? job.id}`;
         body.append(row);
       }
     }
     drawer.append(body);
   }
   return drawer;
+}
+
+function renderTakeReviewStage(scene: SceneRecord): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "workflow-take-review";
+  const refresh = actionButton("Refresh takes from project", () => {
+    void runAction("Refreshing takes…", "workflow_import", { persist: true });
+  });
+  wrap.append(
+    block(
+      "workflow-banner",
+      "A generated clip is a take until you select it. Changing a selected take clears any dependent continuity binding made from the old take.",
+    ),
+    refresh,
+  );
+  let count = 0;
+  for (const cut of scene.cuts) {
+    const takes = cut.takes ?? [];
+    if (!takes.length) continue;
+    count += takes.length;
+    const card = document.createElement("article");
+    card.className = "workflow-start-frame-card";
+    const heading = document.createElement("h3");
+    heading.textContent = `Cut ${cut.id.cut} · ${cut.title?.trim() || "Untitled"}`;
+    card.append(heading);
+    for (const take of takes) {
+      const row = document.createElement("div");
+      row.className = "workflow-take-row";
+      const summary = document.createElement("button");
+      summary.type = "button";
+      summary.className = "workflow-take-path";
+      summary.textContent = `${take.path} · ${take.status.replace(/_/g, " ")}`;
+      summary.addEventListener("click", () => {
+        hooks?.onOpenPath(resolveProjectPath(take.path) ?? take.path);
+      });
+      const actions = document.createElement("div");
+      actions.className = "workflow-inspector-actions";
+      for (const [status, label] of [
+        ["selected", "Select"],
+        ["alternate", "Alternate"],
+        ["rejected", "Reject"],
+        ["needs_edit", "Needs edit"],
+        ["needs_rerender", "Needs rerender"],
+      ] as const) {
+        const button = actionButton(label, () => {
+          void runAction("Updating take review…", "workflow_set_take_status", {
+            sceneId: scene.id,
+            cut: cut.id.cut,
+            takeId: take.id,
+            status,
+          });
+        });
+        button.disabled = Boolean(busy) || take.status === status;
+        actions.append(button);
+      }
+      row.append(summary, actions);
+      card.append(row);
+    }
+    wrap.append(card);
+  }
+  if (!count) {
+    wrap.append(
+      missingPanel(
+        "No takes to review.",
+        "Generate clips under Scenes/SceneN/CutN, then refresh this stage. The importer registers video files as unreviewed takes.",
+      ),
+    );
+  }
+  return wrap;
 }
 
 function renderReadiness(
@@ -1938,8 +3465,12 @@ function renderReadiness(
     [Boolean(sceneStatus?.scene_look), "Scene look board"],
     [Boolean(sceneStatus?.cut_sketches), "Cut sketches"],
     [
-      (sceneStatus?.approved_start_frames ?? 0) > 0,
-      `${sceneStatus?.approved_start_frames ?? 0} approved start frames`,
+      (sceneStatus?.planned_visual_sources ?? 0) === (scene?.cuts.length ?? 0),
+      `${sceneStatus?.planned_visual_sources ?? 0}/${scene?.cuts.length ?? 0} visual-source strategies planned`,
+    ],
+    [
+      (sceneStatus?.render_ready_sources ?? 0) === (scene?.cuts.length ?? 0),
+      `${sceneStatus?.render_ready_sources ?? 0}/${scene?.cuts.length ?? 0} concrete render sources ready`,
     ],
     [Boolean(sceneStatus?.production_notes), "Production notes"],
   ];
@@ -2038,6 +3569,12 @@ function selectionExcerpt(
         cut.sketch?.shot_role ? `, ${cut.sketch.shot_role}` : ""
       })`,
     );
+    const sourceStrategy = effectiveVisualSourceStrategy(cut);
+    if (sourceStrategy) {
+      lines.push(
+        `Visual source: ${sourceStrategy} (${visualSourceReady(cut) ? "bound/render ready" : "planned/unresolved"})`,
+      );
+    }
     if (cut.sketch?.visual_prompt) lines.push(cut.sketch.visual_prompt.slice(0, 1200));
     else if (cut.prompt) lines.push(cut.prompt.slice(0, 1200));
   }

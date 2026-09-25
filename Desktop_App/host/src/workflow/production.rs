@@ -25,13 +25,14 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn resolve(root: &Path, value: &str) -> PathBuf {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    }
+fn resolve(root: &Path, value: &str) -> Result<PathBuf, String> {
+    crate::project_path::resolve(
+        value,
+        Some(root.to_string_lossy().as_ref()),
+        crate::project_path::PathIntent::Read,
+    )
+    .map(|path| path.into_path_buf())
+    .map_err(|error| error.to_string())
 }
 
 fn production_master(root: &Path, scene_id: u32) -> Option<PathBuf> {
@@ -50,7 +51,7 @@ fn production_master(root: &Path, scene_id: u32) -> Option<PathBuf> {
                 .and_then(|section| section.get("production_path"))
                 .and_then(Value::as_str)
             {
-                return Some(resolve(root, path));
+                return resolve(root, path).ok();
             }
         }
     }
@@ -94,7 +95,7 @@ pub fn save_prompt(
                 "Cut {cut_number} has no canonical production note. Create its shot specification first."
             )
         })?;
-    let sidecar = resolve(root, &note_path);
+    let sidecar = resolve(root, &note_path)?;
     let text = fs::read_to_string(&sidecar)
         .map_err(|error| format!("could not read {}: {error}", sidecar.display()))?;
     let mut handoff = load_handoff_document(&text)
@@ -348,7 +349,7 @@ pub fn sync_from_planning(
         .production_note_path
         .clone()
         .ok_or_else(|| format!("Cut {cut_number} has no canonical production note to update."))?;
-    let sidecar = resolve(root, &note_path);
+    let sidecar = resolve(root, &note_path)?;
     let text = fs::read_to_string(&sidecar)
         .map_err(|error| format!("could not read {}: {error}", sidecar.display()))?;
     let mut handoff = load_handoff_document(&text)
@@ -898,7 +899,7 @@ mod tests {
             RenderLane::AudioDrivenI2v
         );
         let (approval, _) = prepare_render(root, &mut state, 1, 1).unwrap();
-        assert!(approval.contains("Specialist: `text_sync`"));
+        assert!(approval.contains("Operation: `text_sync`"));
         assert!(approval.contains("\"source_frame\""));
         assert!(approval.contains("Preproduction/Scene1/start_frames/cut_1_v2.png"));
         assert!(approval.contains("\"voice_clone\""));

@@ -9,38 +9,39 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /**
  * Resolve the workbench-host binary for dev and packaged builds.
  */
-function unpackagedDev() {
-  return Boolean(process.defaultApp) || process.env.ELECTRON_IS_DEV === "1";
+function devHostOverride() {
+  return process.env.WORKBENCH_DEV === "1";
 }
 
 export function resolveHostBinary() {
-  if (process.env.WORKBENCH_HOST_BIN) {
+  if (devHostOverride() && process.env.WORKBENCH_HOST_BIN) {
     return process.env.WORKBENCH_HOST_BIN;
   }
   const root = path.resolve(__dirname, "..");
   const candidates = [];
-  if (process.resourcesPath && !unpackagedDev()) {
+  if (process.resourcesPath && !devHostOverride()) {
     candidates.push(path.join(process.resourcesPath, "workbench-host"));
   }
   // Prefer in-tree builds; also honor CARGO_TARGET_DIR (e.g. CI / sandboxes).
   // Unpackaged `electron .` must prefer debug so `npm run dev:host` wins over a stale release binary.
-  const targetRoots = [
-    path.join(root, "host", "target"),
-    process.env.CARGO_TARGET_DIR,
-  ].filter(Boolean);
+  const targetRoots = [path.join(root, "host", "target")];
+  if (devHostOverride() && process.env.CARGO_TARGET_DIR) {
+    targetRoots.push(process.env.CARGO_TARGET_DIR);
+  }
   for (const targetRoot of targetRoots) {
     const debug = path.join(targetRoot, "debug", "workbench-host");
     const release = path.join(targetRoot, "release", "workbench-host");
-    if (unpackagedDev()) {
+    if (devHostOverride()) {
       candidates.push(debug, release);
     } else {
-      candidates.push(release, debug);
+      candidates.push(release);
     }
   }
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;
   }
-  return path.join(root, "host", "target", "debug", "workbench-host");
+  const fallback = devHostOverride() ? "debug" : "release";
+  return path.join(root, "host", "target", fallback, "workbench-host");
 }
 
 export class Sidecar {
@@ -110,7 +111,7 @@ export class Sidecar {
   }
 
   #restartIfBinaryChanged() {
-    if (!this.#bin || !unpackagedDev()) return;
+    if (!this.#bin || !devHostOverride()) return;
     let mtime = 0;
     try {
       mtime = fs.statSync(this.#bin).mtimeMs;

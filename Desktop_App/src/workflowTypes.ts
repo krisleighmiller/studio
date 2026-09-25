@@ -1,16 +1,10 @@
 /** Wire types for `workflow_import` / `workflow_status`. Snake_case matches the host JSON. */
 
-export type StageId =
-  | "script"
-  | "characters"
-  | "scene_intent"
-  | "scene_look"
-  | "cut_sketches"
-  | "reference_images"
-  | "production_notes"
-  | "render"
-  | "take_review"
-  | "assemble";
+/** Stage ids come from the host recipe. Known editors recognize some of them. */
+export type StageId = string;
+
+/** A recipe can name a stage this file has never switched on. */
+export const EXAMPLE_RECIPE_STAGE = "color_script" satisfies StageId;
 
 export type StageStatus = "missing" | "present" | "draft" | "approved";
 
@@ -105,6 +99,7 @@ export type SceneReport = {
   mix_verdict?: MixVerdict;
   warnings: string[];
   summary: string;
+  navigation?: StageNavItem[];
 };
 
 export type ProjectReport = {
@@ -120,7 +115,24 @@ export type ProjectReport = {
   recipes?: RecipeChoice[];
 };
 
-export type StageMap = Record<StageId, StageStatus>;
+export type StageMap = {
+  script: StageStatus;
+  characters: StageStatus;
+  scene_intent: StageStatus;
+  scene_look: StageStatus;
+  cut_sketches: StageStatus;
+  reference_images: StageStatus;
+  production_notes: StageStatus;
+  render: StageStatus;
+  take_review: StageStatus;
+  assemble: StageStatus;
+};
+
+export function stageStatus(map: StageMap | null | undefined, id: string): StageStatus {
+  if (!map) return "missing";
+  const value = (map as Record<string, StageStatus | undefined>)[id];
+  return value ?? "missing";
+}
 
 export type DialogueLine = {
   speaker: string;
@@ -359,16 +371,28 @@ export type JobRecord = {
   scope?: JobScope | null;
   progress?: string | null;
   cost?: number | null;
+  estimated_cost?: number | null;
   currency?: string | null;
   retry_of?: string | null;
 };
 
 export type ProductionRecipe = "narrative_dialogue" | "montage";
 
-export type RecipeStageView = {
-  id: StageId;
+export type StageNavItem = {
+  id: string;
   label: string;
-  depends_on: StageId[];
+  work_area: "plan" | "produce" | "finish";
+  status: string;
+  available: boolean;
+  disabled_reason?: string | null;
+  depends_on: string[];
+};
+
+export type RecipeStageView = {
+  id: string;
+  label: string;
+  work_area?: "plan" | "produce" | "finish";
+  depends_on: string[];
   required_roles: string[];
 };
 

@@ -130,12 +130,13 @@ fn resolve(raw: &str, dir: &Path) -> Option<PathBuf> {
     if raw.is_empty() {
         return None;
     }
-    let p = Path::new(raw);
-    Some(if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        dir.join(p)
-    })
+    crate::project_path::resolve(
+        raw,
+        Some(dir.to_string_lossy().as_ref()),
+        crate::project_path::PathIntent::Read,
+    )
+    .ok()
+    .map(|path| path.into_path_buf())
 }
 
 impl AssetRegistry {

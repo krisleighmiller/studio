@@ -228,13 +228,16 @@ pub fn voice_start_recording(
         return Err("A recording is already in progress.".into());
     }
 
-    let path = PathBuf::from(&output_path);
+    let path = crate::session::authorize_user_path(
+        &output_path,
+        crate::project_path::PathIntent::Write,
+    )?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("Could not create recording directory: {error}"))?;
     }
 
-    let raw_path = PathBuf::from(format!("{output_path}.raw"));
+    let raw_path = PathBuf::from(format!("{}.raw", path.display()));
     let _ = std::fs::remove_file(&raw_path);
     let mut pw_record = Command::new("pw-record");
     pw_record.args(["--format", "s16", "--rate", "44100", "--channels", "1"]);
@@ -307,12 +310,12 @@ pub fn voice_start_recording(
 
     *active_process = Some(RecordingProcess {
         child,
-        output_path: output_path.clone(),
+        output_path: path.to_string_lossy().into_owned(),
         raw_path: raw_path.to_string_lossy().into_owned(),
         spectrum,
         reader: Some(reader),
     });
-    Ok(output_path)
+    Ok(path.to_string_lossy().into_owned())
 }
 
 pub fn voice_recording_level(state: &RecorderState) -> Result<Vec<f32>, String> {
@@ -427,8 +430,14 @@ fn inside_directory(file: &Path, directory: &Path) -> bool {
 pub fn voice_attach_existing(
     request: AttachExistingVoiceRequest,
 ) -> Result<SavedVoiceProfile, String> {
-    let character_directory = PathBuf::from(request.character_directory.trim());
-    let source = PathBuf::from(request.audio_path.trim());
+    let character_directory = crate::session::authorize_user_path(
+        request.character_directory.trim(),
+        crate::project_path::PathIntent::Write,
+    )?;
+    let source = crate::session::authorize_user_path(
+        request.audio_path.trim(),
+        crate::project_path::PathIntent::Read,
+    )?;
     if !source.is_file() {
         return Err("That audio file is missing or is no longer available.".into());
     }
@@ -499,8 +508,14 @@ updated_at: {}\n",
 }
 
 pub fn voice_save_recording(request: SaveRecordingRequest) -> Result<SavedVoiceProfile, String> {
-    let character_directory = PathBuf::from(&request.character_directory);
-    let temp_path = PathBuf::from(&request.temp_path);
+    let character_directory = crate::session::authorize_user_path(
+        &request.character_directory,
+        crate::project_path::PathIntent::Write,
+    )?;
+    let temp_path = crate::session::authorize_user_path(
+        &request.temp_path,
+        crate::project_path::PathIntent::Read,
+    )?;
     if !temp_path.is_file() {
         return Err("The recording file is missing or is no longer available.".into());
     }
@@ -572,7 +587,10 @@ pub struct SaveLibraryVoiceRequest {
 pub fn voice_save_library_voice(
     request: SaveLibraryVoiceRequest,
 ) -> Result<SavedVoiceProfile, String> {
-    let character_directory = PathBuf::from(&request.character_directory);
+    let character_directory = crate::session::authorize_user_path(
+        &request.character_directory,
+        crate::project_path::PathIntent::Write,
+    )?;
     let voice_directory = voice_dir(&character_directory)?;
     let stem = safe_character_name(&request.character_name);
     let bytes = B64
@@ -682,7 +700,10 @@ pub fn voice_save_designed_voice(
         request.voice_description.clone(),
         request.generated_voice_id.clone(),
     )?;
-    let character_directory = PathBuf::from(&request.character_directory);
+    let character_directory = crate::session::authorize_user_path(
+        &request.character_directory,
+        crate::project_path::PathIntent::Write,
+    )?;
     let voice_directory = voice_dir(&character_directory)?;
     let stem = safe_character_name(&request.character_name);
     let bytes = B64

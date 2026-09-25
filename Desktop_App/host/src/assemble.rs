@@ -656,7 +656,7 @@ fn has_audio_stream(path: &Path) -> bool {
             "stream=codec_type",
             "-of",
             "csv=p=0",
-            &path.to_string_lossy(),
+            &crate::ffmpeg_path::ffmpeg_local_arg(path).unwrap_or_default(),
         ])
         .output()
     else {
@@ -1276,11 +1276,11 @@ fn trim_scene(app: &HostCtx, scene: &ScenePlan, out: &Path) -> Result<(), String
             "-ss".into(),
             format!("{:.6}", scene.trim_start),
             "-i".into(),
-            scene.video.to_string_lossy().to_string(),
+            crate::ffmpeg_path::ffmpeg_local_arg(&scene.video)?,
             "-ss".into(),
             format!("{:.6}", scene.trim_start),
             "-i".into(),
-            audio.to_string_lossy().to_string(),
+            crate::ffmpeg_path::ffmpeg_local_arg(audio)?,
             "-t".into(),
             format!("{:.6}", scene.trim_duration),
             "-map".into(),
@@ -1298,7 +1298,7 @@ fn trim_scene(app: &HostCtx, scene: &ScenePlan, out: &Path) -> Result<(), String
             "-ar".into(),
             "48000".into(),
             "-shortest".into(),
-            out.to_string_lossy().to_string(),
+            crate::ffmpeg_path::ffmpeg_local_arg(out)?,
         ];
         run_ffmpeg(&args, &format!("trim+vo scene {}", scene.id))?;
     } else {
@@ -1307,7 +1307,7 @@ fn trim_scene(app: &HostCtx, scene: &ScenePlan, out: &Path) -> Result<(), String
             "-ss".into(),
             format!("{:.6}", scene.trim_start),
             "-i".into(),
-            scene.video.to_string_lossy().to_string(),
+            crate::ffmpeg_path::ffmpeg_local_arg(&scene.video)?,
             "-t".into(),
             format!("{:.6}", scene.trim_duration),
             "-vf".into(),
@@ -1330,7 +1330,7 @@ fn trim_scene(app: &HostCtx, scene: &ScenePlan, out: &Path) -> Result<(), String
                 "aac".into(),
             ]);
         }
-        args.push(out.to_string_lossy().to_string());
+        args.push(crate::ffmpeg_path::ffmpeg_local_arg(out)?);
         run_ffmpeg(&args, &format!("trim scene {}", scene.id))?;
     }
     if !out.is_file() {
@@ -1379,7 +1379,7 @@ fn apply_edge_fade(
     let args = vec![
         "-y".into(),
         "-i".into(),
-        clip.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(clip)?,
         "-vf".into(),
         vf.join(","),
         "-af".into(),
@@ -1392,7 +1392,7 @@ fn apply_edge_fade(
         "aac".into(),
         "-ar".into(),
         "48000".into(),
-        out.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(out)?,
     ];
     run_ffmpeg(&args, "edge fade")?;
     Ok(())
@@ -1406,18 +1406,19 @@ fn concat_cuts(app: &HostCtx, clips: &[PathBuf], out: &Path) -> Result<(), Strin
     let list_path = out.parent().unwrap_or(Path::new(".")).join("concat.txt");
     let mut list = String::new();
     for clip in clips {
-        let p = clip.to_string_lossy().replace('\'', "'\\''");
-        list.push_str(&format!("file '{p}'\n"));
+        list.push_str(&crate::ffmpeg_path::concat_list_line(clip)?);
     }
     fs::write(&list_path, list).map_err(|e| format!("Could not write concat list: {e}"))?;
     let args = vec![
         "-y".into(),
         "-f".into(),
         "concat".into(),
+        // Absolute paths in a host-written list need -safe 0. Lines are
+        // canonical paths with newlines and quotes already rejected.
         "-safe".into(),
         "0".into(),
         "-i".into(),
-        list_path.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(&list_path)?,
         "-c:v".into(),
         "libx264".into(),
         "-pix_fmt".into(),
@@ -1428,7 +1429,7 @@ fn concat_cuts(app: &HostCtx, clips: &[PathBuf], out: &Path) -> Result<(), Strin
         "48000".into(),
         "-movflags".into(),
         "+faststart".into(),
-        out.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(out)?,
     ];
     run_ffmpeg(&args, "concat")?;
     Ok(())
@@ -1452,7 +1453,7 @@ fn concat_with_xfades(
     let mut args = vec!["-y".into()];
     for clip in clips {
         args.push("-i".into());
-        args.push(clip.to_string_lossy().to_string());
+        args.push(crate::ffmpeg_path::ffmpeg_local_arg(clip)?);
     }
     // Build video xfade + acrossfade chain
     let mut filter = String::new();
@@ -1506,7 +1507,7 @@ fn concat_with_xfades(
         "48000".into(),
         "-movflags".into(),
         "+faststart".into(),
-        out.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(out)?,
     ]);
     run_ffmpeg(&args, "xfade timeline")?;
     Ok(())
@@ -1533,11 +1534,11 @@ fn mix_music(
     let args = vec![
         "-y".into(),
         "-i".into(),
-        dialogue.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(dialogue)?,
         "-stream_loop".into(),
         "-1".into(),
         "-i".into(),
-        music.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(music)?,
         "-filter_complex".into(),
         filter,
         "-map".into(),
@@ -1551,7 +1552,7 @@ fn mix_music(
         "-ar".into(),
         "48000".into(),
         "-shortest".into(),
-        out.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(out)?,
     ];
     run_ffmpeg(&args, "music mix")?;
     Ok(())
@@ -1568,9 +1569,9 @@ fn mux_soft_subs(
     let args = vec![
         "-y".into(),
         "-i".into(),
-        video.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(video)?,
         "-i".into(),
-        srt.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(srt)?,
         "-c:v".into(),
         "copy".into(),
         "-c:a".into(),
@@ -1579,7 +1580,7 @@ fn mux_soft_subs(
         "mov_text".into(),
         "-metadata:s:s:0".into(),
         format!("language={language}"),
-        out.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(out)?,
     ];
     run_ffmpeg(&args, "soft subs")?;
     Ok(())
@@ -1598,14 +1599,14 @@ fn burn_subs(app: &HostCtx, video: &Path, srt: &Path, out: &Path) -> Result<(), 
     let args = vec![
         "-y".into(),
         "-i".into(),
-        video.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(video)?,
         "-vf".into(),
         vf,
         "-c:a".into(),
         "copy".into(),
         "-movflags".into(),
         "+faststart".into(),
-        out.to_string_lossy().to_string(),
+        crate::ffmpeg_path::ffmpeg_local_arg(out)?,
     ];
     run_ffmpeg(&args, "burned captions")?;
     Ok(())
@@ -1822,7 +1823,7 @@ pub fn approval_notes(inputs: &Map<String, Value>, project_root: Option<&str>) -
                 }
             }
             body.push_str(
-                "\nLocal ffmpeg only (no provider spend). Reply **Approved** to render this plan.",
+                "\nLocal ffmpeg only (no provider spend). Use the Approve button to render this plan.",
             );
             body
         }
@@ -1946,7 +1947,7 @@ assemble:
             json!(map_path.to_string_lossy().to_string()),
         );
         inputs.insert("trim".into(), json!("full"));
-        merge_assemble_map_into_inputs(&mut inputs, None).expect("merge");
+        merge_assemble_map_into_inputs(&mut inputs, Some(dir.to_str().unwrap())).expect("merge");
         assert_eq!(inputs.get("trim").and_then(|v| v.as_str()), Some("full"));
         assert_eq!(
             inputs.get("production_path").and_then(|v| v.as_str()),

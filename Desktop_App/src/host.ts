@@ -89,6 +89,22 @@ export async function toMediaUrlAsync(path: string): Promise<string> {
   return bridge().toMediaUrl(path);
 }
 
+export async function openProjectFolder(): Promise<string | null> {
+  const open = bridge().openProject;
+  if (!open) throw new Error("Project open is not available in this build.");
+  return open();
+}
+
+export async function useRecentProject(projectPath: string): Promise<string | null> {
+  const use = bridge().useProject;
+  if (!use) throw new Error("Recent projects are not available in this build.");
+  return use(projectPath);
+}
+
+export async function closeProjectSession(): Promise<void> {
+  await bridge().closeProject?.();
+}
+
 export async function openDialog(
   opts: OpenDialogOptions,
 ): Promise<string | string[] | null> {

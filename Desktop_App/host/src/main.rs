@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use workbench_host::ctx::HostCtx;
 use workbench_host::dispatch;
@@ -37,6 +37,25 @@ fn dirs_fallback() -> PathBuf {
         return PathBuf::from(home).join(".config").join("video-workbench");
     }
     PathBuf::from(".").join("workbench-settings")
+}
+
+struct JobSlots {
+    available: Mutex<mpsc::Receiver<()>>,
+    release: mpsc::Sender<()>,
+}
+
+fn job_slots() -> &'static JobSlots {
+    static SLOTS: std::sync::OnceLock<JobSlots> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| {
+        let (release, available) = mpsc::channel();
+        for _ in 0..8 {
+            let _ = release.send(());
+        }
+        JobSlots {
+            available: Mutex::new(available),
+            release,
+        }
+    })
 }
 
 fn main() {
@@ -75,23 +94,31 @@ fn main() {
 
         let app = app.clone();
         let recorder = Arc::clone(&recorder);
+        let slots = job_slots();
+        // Wait for a free slot before starting another command thread.
+        let _ = slots.available.lock().expect("job slots").recv();
+        let release = slots.release.clone();
         // Each command on its own thread so long director/Atlas work can emit progress
         // while still accepting later requests (e.g. voice level polls).
         thread::spawn(move || {
             let result = dispatch(&app, &recorder, &request.cmd, &request.args);
             let response = match result {
-                Ok(value) => json!({
-                    "id": request.id,
-                    "ok": true,
-                    "result": value,
-                }),
+                Ok(value) => {
+                    let value = workbench_host::secrets::redact_json(&app, value);
+                    json!({
+                        "id": request.id,
+                        "ok": true,
+                        "result": value,
+                    })
+                }
                 Err(error) => json!({
                     "id": request.id,
                     "ok": false,
-                    "error": error,
+                    "error": workbench_host::secrets::redact_text(&app, &error),
                 }),
             };
             app.write_response(&response);
+            let _ = release.send(());
         });
     }
 

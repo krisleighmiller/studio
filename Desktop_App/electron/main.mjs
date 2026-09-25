@@ -5,16 +5,22 @@ import {
   dialog,
   ipcMain,
   protocol,
+  session,
   shell,
 } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { Sidecar } from "./sidecar.mjs";
 
+const require = createRequire(import.meta.url);
+const { isAppUrl, externalUrl, windowOpenAction } = require("./navigationPolicy.cjs");
+const { HOST_COMMANDS } = require("./commandAllowlist.cjs");
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const isDev = !app.isPackaged;
+const isDev = process.env.WORKBENCH_DEV === "1";
 
 // Stable userData path (matches package.json name) even if launched oddly.
 if (!app.isPackaged) {
@@ -36,7 +42,7 @@ protocol.registerSchemesAsPrivileged([
       secure: true,
       supportFetchAPI: true,
       stream: true,
-      bypassCSP: true,
+      bypassCSP: false,
       corsEnabled: true,
     },
   },
@@ -170,8 +176,13 @@ function mediaFileResponse(filePath, request) {
   if (rangeHeader) {
     const match = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
     if (match) {
-      let start = match[1] === "" ? 0 : Number.parseInt(match[1], 10);
-      let end = match[2] === "" ? size - 1 : Number.parseInt(match[2], 10);
+      const suffix = match[1] === "" && match[2] !== "";
+      let start = suffix
+        ? Math.max(0, size - Number.parseInt(match[2], 10))
+        : match[1] === ""
+          ? 0
+          : Number.parseInt(match[1], 10);
+      let end = suffix || match[2] === "" ? size - 1 : Number.parseInt(match[2], 10);
       if (!Number.isFinite(start)) start = 0;
       if (!Number.isFinite(end) || end >= size) end = size - 1;
       if (start < 0 || start >= size || start > end) {
@@ -337,7 +348,7 @@ function createMenu(recentProjects = loadRecentProjects()) {
           click: () => send("toggle-chat"),
         },
         { type: "separator" },
-        { role: "toggleDevTools" },
+        ...(isDev ? [{ role: "toggleDevTools" }] : []),
         // Do not use bare role:reload — its default Ctrl+R steals Refresh Explorer.
         {
           label: "Reload Window",
@@ -437,15 +448,15 @@ function createWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
     },
   });
 
   wireAppShortcuts(mainWindow);
+  lockNavigation(mainWindow.webContents);
 
   if (isDev) {
-    const url = process.env.VITE_DEV_SERVER_URL || "http://localhost:1420";
-    void mainWindow.loadURL(url);
+    void mainWindow.loadURL(devServerUrl());
   } else {
     void mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
@@ -453,6 +464,40 @@ function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+}
+
+function appNavigationOptions() {
+  return {
+    appIndex: path.resolve(__dirname, "..", "dist", "index.html"),
+  };
+}
+
+function lockNavigation(contents) {
+  const allow = (url) => isAppUrl(url, appNavigationOptions());
+  const block = (event) => {
+    if (!allow(event.url)) event.preventDefault();
+  };
+  contents.on("will-navigate", block);
+  contents.on("will-redirect", block);
+  contents.on("will-frame-navigate", block);
+  contents.setWindowOpenHandler(() => ({ action: windowOpenAction() }));
+}
+
+function restrictSettingsPermissions() {
+  const dir = settingsDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(dir, 0o700);
+  } catch (error) {
+    console.error("Could not restrict config directory permissions", error);
+  }
+  const dest = path.join(dir, "settings.json");
+  if (!fs.existsSync(dest)) return;
+  try {
+    fs.chmodSync(dest, 0o600);
+  } catch (error) {
+    console.error("Could not restrict settings file permissions", error);
+  }
 }
 
 function migrateSettings() {
@@ -470,8 +515,10 @@ function migrateSettings() {
   for (const candidate of candidates) {
     if (!fs.existsSync(candidate)) continue;
     try {
-      fs.mkdirSync(settingsDir(), { recursive: true });
+      fs.mkdirSync(settingsDir(), { recursive: true, mode: 0o700 });
       fs.copyFileSync(candidate, dest);
+      fs.chmodSync(settingsDir(), 0o700);
+      fs.chmodSync(dest, 0o600);
       console.log(`Migrated settings from ${candidate}`);
       return;
     } catch (error) {
@@ -480,17 +527,129 @@ function migrateSettings() {
   }
 }
 
+function devServerUrl() {
+  const fallback = "http://127.0.0.1:1420";
+  const extra = process.env.VITE_DEV_SERVER_URL;
+  if (!extra) return fallback;
+  try {
+    const url = new URL(extra);
+    if (url.protocol === "http:" && url.hostname === "127.0.0.1") return url.origin;
+  } catch {
+    // Ignore a malformed override and stay on the loopback dev server.
+  }
+  return fallback;
+}
+
+/** @type {string | null} */
+let sessionRoot = null;
+/** @type {Set<string>} */
+const pathGrants = new Set();
+
+function realPathOrAbsolute(target) {
+  const resolved = path.resolve(String(target));
+  try {
+    return fs.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function isInside(root, target) {
+  const rel = path.relative(root, target);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function mediaAllowed(filePath) {
+  if (mimeForMediaPath(filePath) === "application/octet-stream") return false;
+  let resolved;
+  try {
+    resolved = fs.realpathSync(filePath);
+  } catch {
+    return false;
+  }
+  if (sessionRoot && isInside(sessionRoot, resolved)) return true;
+  for (const grant of pathGrants) {
+    if (isInside(grant, resolved)) return true;
+  }
+  return false;
+}
+
+async function openSession(projectPath) {
+  if (!sidecar) throw new Error("Host sidecar is not started");
+  const result = await sidecar.invoke("open_project", { path: projectPath });
+  sessionRoot = realPathOrAbsolute(result?.root || projectPath);
+  pathGrants.clear();
+  rememberRecentProject(sessionRoot);
+  createMenu();
+  return sessionRoot;
+}
+
+async function closeSession() {
+  if (sidecar) await sidecar.invoke("close_project", {});
+  sessionRoot = null;
+  pathGrants.clear();
+}
+
+async function grantDialogPath(target) {
+  if (!target || !sidecar) return;
+  const granted = await sidecar.invoke("grant_path", { path: target });
+  pathGrants.add(realPathOrAbsolute(granted?.path || target));
+}
+
+function assertAppSender(event) {
+  const url = event.senderFrame?.url || "";
+  if (!isAppUrl(url, appNavigationOptions())) {
+    throw new Error("Rejected a message from outside the app");
+  }
+}
+
 function registerIpc() {
-  ipcMain.handle("host:invoke", async (_event, cmd, args) => {
+  ipcMain.handle("host:invoke", async (event, cmd, args) => {
+    assertAppSender(event);
     if (!sidecar) throw new Error("Host sidecar is not started");
+    if (!HOST_COMMANDS.has(String(cmd))) {
+      throw new Error(`Command is not available to the window: ${cmd}`);
+    }
+    if (cmd === "close_project") {
+      sessionRoot = null;
+      pathGrants.clear();
+    }
     return sidecar.invoke(cmd, args ?? {});
   });
 
+  ipcMain.handle("project:open", async (event) => {
+    assertAppSender(event);
+    const result = await dialog.showOpenDialog({
+      title: "Open Project Folder",
+      properties: ["openDirectory"],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return openSession(result.filePaths[0]);
+  });
+
+  ipcMain.handle("project:use", async (event, projectPath) => {
+    assertAppSender(event);
+    const requested = realPathOrAbsolute(projectPath);
+    const known = loadRecentProjects().some(
+      (item) => realPathOrAbsolute(item) === requested,
+    );
+    if (!known) throw new Error("That folder is not a recent project");
+    return openSession(requested);
+  });
+
+  ipcMain.handle("project:close", async (event) => {
+    assertAppSender(event);
+    await closeSession();
+    return true;
+  });
+
   ipcMain.on("host:toMediaUrlSync", (event, filePath) => {
+    assertAppSender(event);
     event.returnValue = mediaUrlFor(String(filePath));
   });
 
-  ipcMain.handle("dialog:open", async (_event, opts = {}) => {
+  ipcMain.handle("dialog:open", async (event, opts = {}) => {
+    assertAppSender(event);
     const properties = [];
     if (opts.directory) properties.push("openDirectory");
     else properties.push("openFile");
@@ -506,11 +665,15 @@ function registerIpc() {
       })),
     });
     if (result.canceled || result.filePaths.length === 0) return null;
+    for (const chosen of result.filePaths) {
+      await grantDialogPath(chosen);
+    }
     if (opts.multiple) return result.filePaths;
     return result.filePaths[0] ?? null;
   });
 
-  ipcMain.handle("dialog:save", async (_event, opts = {}) => {
+  ipcMain.handle("dialog:save", async (event, opts = {}) => {
+    assertAppSender(event);
     const result = await dialog.showSaveDialog({
       title: opts.title,
       defaultPath: opts.defaultPath,
@@ -520,10 +683,12 @@ function registerIpc() {
       })),
     });
     if (result.canceled || !result.filePath) return null;
+    await grantDialogPath(result.filePath);
     return result.filePath;
   });
 
-  ipcMain.handle("dialog:ask", async (_event, message, opts = {}) => {
+  ipcMain.handle("dialog:ask", async (event, message, opts = {}) => {
+    assertAppSender(event);
     const result = await dialog.showMessageBox({
       type:
         opts.kind === "warning"
@@ -540,19 +705,38 @@ function registerIpc() {
     return result.response === 1;
   });
 
-  ipcMain.handle("shell:openPath", async (_event, target) => {
-    return shell.openPath(String(target));
+  ipcMain.handle("shell:openExternal", async (event, target) => {
+    assertAppSender(event);
+    const url = externalUrl(target);
+    if (!url) return false;
+    const result = await dialog.showMessageBox({
+      type: "question",
+      title: "Open external link",
+      message: "Open this link in your browser?",
+      detail: url,
+      buttons: ["Cancel", "Open"],
+      defaultId: 1,
+      cancelId: 0,
+    });
+    if (result.response !== 1) return false;
+    await shell.openExternal(url);
+    return true;
   });
 
-  ipcMain.handle("recent:list", async () => loadRecentProjects());
+  ipcMain.handle("recent:list", async (event) => {
+    assertAppSender(event);
+    return loadRecentProjects();
+  });
 
-  ipcMain.handle("recent:remember", async (_event, projectPath) => {
+  ipcMain.handle("recent:remember", async (event, projectPath) => {
+    assertAppSender(event);
     const next = rememberRecentProject(projectPath);
     createMenu(next);
     return next;
   });
 
-  ipcMain.handle("recent:remove", async (_event, projectPath) => {
+  ipcMain.handle("recent:remove", async (event, projectPath) => {
+    assertAppSender(event);
     const normalized = String(projectPath || "").replace(/\/+$/, "");
     const next = saveRecentProjects(
       loadRecentProjects().filter((item) => item !== normalized),
@@ -566,6 +750,7 @@ app.whenReady().then(() => {
   protocol.handle(MEDIA_SCHEME, (request) => {
     try {
       const filePath = pathFromMediaUrl(request.url);
+      if (!mediaAllowed(filePath)) return new Response("Not found", { status: 404 });
       return mediaFileResponse(filePath, request);
     } catch (error) {
       console.error("media protocol error", error);
@@ -573,7 +758,35 @@ app.whenReady().then(() => {
     }
   });
 
+  const csp = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: workbench-media:",
+    "media-src 'self' blob: workbench-media:",
+    isDev
+      ? "connect-src 'self' http://127.0.0.1:1420 ws://127.0.0.1:1420"
+      : "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-src 'none'",
+  ].join("; ");
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        "Content-Security-Policy": [csp],
+      },
+    });
+  });
+  session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => {
+    callback(false);
+  });
+  session.defaultSession.setPermissionCheckHandler(() => false);
+
   migrateSettings();
+  restrictSettingsPermissions();
 
   sidecar = new Sidecar({ settingsDir: settingsDir() });
   sidecar.start();

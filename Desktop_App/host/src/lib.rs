@@ -8,6 +8,7 @@ pub mod director;
 pub mod director_actions;
 pub mod elevenlabs;
 pub mod fal;
+pub mod ffmpeg_path;
 pub mod fs_ops;
 pub mod gemini_images;
 pub mod http_util;
@@ -17,15 +18,20 @@ pub mod media;
 pub mod media_util;
 pub mod openai_images;
 pub mod output_paths;
+pub mod pending;
+pub mod project_path;
 pub mod prompts;
 pub mod replicate;
 pub mod runway;
 pub mod scene_plan;
 pub mod script;
+pub mod secrets;
+pub mod session;
 pub mod settings;
 pub mod specialists;
 pub mod stability;
 pub mod sync_labs;
+pub mod text_writes;
 pub mod voice;
 pub mod workflow;
 
@@ -41,54 +47,70 @@ pub fn dispatch(
     args: &Value,
 ) -> Result<Value, String> {
     match cmd {
-        "list_dir" => {
+        "open_project" => {
             let path = arg_string(args, "path")?;
+            to_value(session::open(&path).map(|root| json!({ "root": root })))
+        }
+        "close_project" => {
+            session::close();
+            Ok(json!({ "closed": true }))
+        }
+        "grant_path" => {
+            let path = arg_string(args, "path")?;
+            to_value(session::grant(&path).map(|path| json!({ "path": path })))
+        }
+        "list_dir" => {
+            let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Read)?;
             to_value(fs_ops::list_dir(path))
         }
         "read_text_file" => {
-            let path = arg_string(args, "path")?;
+            let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Read)?;
             to_value(fs_ops::read_text_file(path))
         }
         "write_text_file" => {
-            let path = arg_string(args, "path")?;
+            let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Write)?;
             let contents = arg_string(args, "contents")?;
             to_value(fs_ops::write_text_file(path, contents))
         }
         "create_file" => {
-            let path = arg_string(args, "path")?;
+            let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Write)?;
             to_value(fs_ops::create_file(path))
         }
         "create_dir" => {
-            let path = arg_string(args, "path")?;
+            let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Write)?;
             to_value(fs_ops::create_dir(path))
         }
         "rename_path" => {
-            let from = arg_string(args, "from")?;
-            let to = arg_string(args, "to")?;
+            let from = scoped_path(&arg_string(args, "from")?, project_path::PathIntent::Write)?;
+            let to = scoped_path(&arg_string(args, "to")?, project_path::PathIntent::Write)?;
             to_value(fs_ops::rename_path(from, to))
         }
         "copy_path" => {
-            let from = arg_string(args, "from")?;
-            let to = arg_string(args, "to")?;
+            let from = scoped_path(&arg_string(args, "from")?, project_path::PathIntent::Read)?;
+            let to = scoped_path(&arg_string(args, "to")?, project_path::PathIntent::Write)?;
             to_value(fs_ops::copy_path(from, to))
         }
         "delete_path" => {
-            let path = arg_string(args, "path")?;
-            to_value(fs_ops::delete_path(path))
+            let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Write)?;
+            to_value(fs_ops::delete_scoped(path))
         }
         "classify_file" => {
-            let path = arg_string(args, "path")?;
+            let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Read)?;
             to_value(fs_ops::classify_file(path))
         }
         "can_open_in_editor" => {
-            let path = arg_string(args, "path")?;
+            let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Read)?;
             to_value(fs_ops::can_open_in_editor(path))
         }
         "read_media_bytes" => {
-            let path = arg_string(args, "path")?;
+            let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Read)?;
             to_value(fs_ops::read_media_bytes(path))
         }
-        "load_settings" => to_value(settings::load_settings(app.clone())),
+        "load_settings" => {
+            let mut value = settings::load_settings(app.clone())?;
+            settings::redact_settings_for_renderer(&mut value);
+            Ok(value)
+        }
         "save_settings" => {
             let settings = args
                 .get("settings")
@@ -100,12 +122,7 @@ pub fn dispatch(
             let api_key = arg_string(args, "apiKey")?;
             to_value(settings::fetch_atlas_catalog(api_key))
         }
-        "fetch_api_catalog" => {
-            let kind = arg_string(args, "kind")?;
-            let api_key = opt_string(args, "apiKey").unwrap_or_default();
-            let base_url = opt_string(args, "baseUrl").unwrap_or_default();
-            to_value(settings::fetch_api_catalog(kind, api_key, base_url))
-        }
+        "fetch_api_catalog" => to_value(settings::fetch_catalog_for_renderer(app, args)),
         "director_turn" => {
             let request: director::DirectorTurnRequest = serde_json::from_value(
                 args.get("request")
@@ -114,6 +131,24 @@ pub fn dispatch(
             )
             .map_err(|error| format!("Invalid director request: {error}"))?;
             to_value(director::director_turn(app.clone(), request))
+        }
+        "director_approve" => {
+            let id = arg_string(args, "id")?;
+            let model = arg_string(args, "model")?;
+            let api_id = opt_string(args, "apiId");
+            let context: director::DirectorContext = serde_json::from_value(
+                args.get("context")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            )
+            .map_err(|error| format!("Invalid approval context: {error}"))?;
+            to_value(director::director_approve(
+                app.clone(),
+                id,
+                model,
+                api_id,
+                context,
+            ))
         }
         "elevenlabs_list_voices" => {
             let search = opt_string(args, "search");
@@ -269,9 +304,14 @@ pub fn dispatch(
         "workflow_approve_start_frame" => workflow::cmd_approve_start_frame(args),
         "workflow_reject_start_frame" => workflow::cmd_reject_start_frame(args),
         "workflow_delete_start_frame" => workflow::cmd_delete_start_frame(args),
+        "director_cancel" => Ok(json!({ "cancelled": true })),
         "ping" => Ok(json!("pong")),
         other => Err(format!("Unknown command: {other}")),
     }
+}
+
+fn scoped_path(raw: &str, intent: project_path::PathIntent) -> Result<String, String> {
+    session::authorize(raw, intent).map(|path| path.to_string_lossy().into_owned())
 }
 
 fn arg_string(args: &Value, key: &str) -> Result<String, String> {

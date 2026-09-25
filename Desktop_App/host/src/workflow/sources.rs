@@ -262,7 +262,7 @@ pub fn bind_selected_exit_frame(
             predecessor.cut
         ));
     };
-    let video = resolve(root, &take_path);
+    let video = resolve(root, &take_path)?;
     if !video.is_file() {
         return Err(format!(
             "selected take file is missing: {}",
@@ -481,16 +481,10 @@ pub fn delete_take(
                 })
         })
         .ok_or_else(|| format!("take `{take_id}` not found on Cut {cut_number}"))?;
-    let expected_prefix = format!("Scenes/Scene{scene_id}/Cut{cut_number}/");
-    if !path.starts_with(&expected_prefix) {
-        return Err(format!(
-            "refusing to delete take outside `{expected_prefix}`"
-        ));
-    }
-    let file = resolve(root, &path);
+    let file = resolve(root, &path)?;
+    crate::project_path::under_cut_dir(root, &file, scene_id, cut_number)?;
     if file.is_file() {
-        fs::remove_file(&file)
-            .map_err(|error| format!("could not delete `{}`: {error}", file.display()))?;
+        crate::project_path::move_to_trash(root, &file)?;
     }
     if let Some(cut) = state
         .scenes
@@ -539,13 +533,14 @@ fn next_continuity_rel(
     )
 }
 
-fn resolve(root: &Path, value: &str) -> PathBuf {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    }
+fn resolve(root: &Path, value: &str) -> Result<PathBuf, String> {
+    crate::project_path::resolve(
+        value,
+        Some(root.to_string_lossy().as_ref()),
+        crate::project_path::PathIntent::Write,
+    )
+    .map(|path| path.into_path_buf())
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

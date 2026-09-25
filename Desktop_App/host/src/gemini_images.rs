@@ -1,12 +1,10 @@
 //! Google Gemini / Imagen image generation on the existing `gemini` protocol kind.
 
 use crate::ctx::HostCtx;
-use crate::media_util::{emit_progress, file_to_data_uri, http_client, param_str, write_b64};
+use crate::media_util::{emit_progress, http_client, param_str, write_b64};
 use crate::settings::ApiEntry;
 use base64::Engine;
 use serde_json::{json, Value};
-use std::fs;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn base(api: &ApiEntry) -> String {
@@ -59,27 +57,10 @@ fn read_inline_image(raw: &str, project_root: Option<&str>) -> Result<(String, S
             base64::engine::general_purpose::STANDARD.encode(bytes),
         ));
     }
-    let path = if PathBuf::from(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else if let Some(root) = project_root {
-        PathBuf::from(root).join(raw)
-    } else {
-        PathBuf::from(raw)
-    };
-    let bytes = fs::read(&path).map_err(|error| format!("Could not read image: {error}"))?;
-    let mime = match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        _ => "image/png",
-    };
+    let path = crate::media_util::resolve_path(raw, project_root)?;
+    let (mime, bytes) = crate::media_util::load_media(&path)?;
     Ok((
-        mime.into(),
+        mime,
         base64::engine::general_purpose::STANDARD.encode(bytes),
     ))
 }
@@ -110,7 +91,7 @@ pub fn generate_image(
     );
 
     if is_imagen(model_id) {
-        let url = format!("{}/models/{model_id}:predict?key={key}", base(api));
+        let url = format!("{}/models/{model_id}:predict", base(api));
         let body = json!({
             "instances": [{ "prompt": prompt }],
             "parameters": {
@@ -121,9 +102,12 @@ pub fn generate_image(
         let response = http_client(180)?
             .post(url)
             .header("Content-Type", "application/json")
+            .header("x-goog-api-key", key)
             .json(&body)
             .send()
-            .map_err(|error| format!("Imagen request failed: {error}"))?;
+            .map_err(|error| {
+                crate::http_util::format_reqwest_error("Imagen request failed", error)
+            })?;
         let status = response.status();
         let text = response
             .text()
@@ -153,7 +137,6 @@ pub fn generate_image(
     // Native Gemini image models (Nano Banana / flash-image / pro-image).
     let mut parts = vec![json!({ "text": prompt })];
     if let Some(image) = param_str(params, &["image", "image_url", "input_image"]) {
-        let _ = file_to_data_uri(&image, project_root)?; // validate exists
         let (mime, b64) = read_inline_image(&image, project_root)?;
         parts.push(json!({
             "inline_data": { "mime_type": mime, "data": b64 }
@@ -165,13 +148,16 @@ pub fn generate_image(
             "responseModalities": ["TEXT", "IMAGE"]
         }
     });
-    let url = format!("{}/models/{model_id}:generateContent?key={key}", base(api));
+    let url = format!("{}/models/{model_id}:generateContent", base(api));
     let response = http_client(180)?
         .post(url)
         .header("Content-Type", "application/json")
+        .header("x-goog-api-key", key)
         .json(&body)
         .send()
-        .map_err(|error| format!("Gemini image request failed: {error}"))?;
+        .map_err(|error| {
+            crate::http_util::format_reqwest_error("Gemini image request failed", error)
+        })?;
     let status = response.status();
     let text = response
         .text()

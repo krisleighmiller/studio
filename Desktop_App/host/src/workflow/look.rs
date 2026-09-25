@@ -824,17 +824,12 @@ pub fn delete_image(
             asset.id == asset_id && asset.role.is_scene_look() && asset.scene_id == Some(scene_id)
         })
         .ok_or_else(|| format!("look asset `{asset_id}` not found"))?;
-    if !is_look_rel(&asset.path) {
-        return Err(
-            "refusing to delete a look asset outside Preproduction/SceneN/references".into(),
-        );
-    }
     let rel = asset.path.clone();
     let root_s = root.to_string_lossy().to_string();
     let path = resolve_under_project(&rel, Some(&root_s)).map_err(|error| error.to_string())?;
+    crate::project_path::under_scene_bucket(root, &path, "references")?;
     if path.is_file() {
-        fs::remove_file(&path)
-            .map_err(|error| format!("could not delete `{}`: {error}", path.display()))?;
+        crate::project_path::move_to_trash(root, &path)?;
     }
 
     state
@@ -1286,16 +1281,12 @@ pub fn delete_wardrobe_plate(
         .filter(|asset| asset.role == AssetRole::WardrobePlate)
         .cloned()
         .ok_or_else(|| format!("wardrobe plate `{asset_id}` not found"))?;
-    if !is_wardrobe_plate_rel(&asset.path) {
-        return Err(
-            "refusing to delete a wardrobe plate outside Preproduction/SceneN/wardrobe_plates"
-                .into(),
-        );
-    }
-    let path = root.join(&asset.path);
+    let root_s = root.to_string_lossy().to_string();
+    let path = resolve_under_project(&asset.path, Some(&root_s))
+        .map_err(|error| error.to_string())?;
+    crate::project_path::under_scene_bucket(root, &path, "wardrobe_plates")?;
     if path.is_file() {
-        fs::remove_file(&path)
-            .map_err(|error| format!("could not delete `{}`: {error}", path.display()))?;
+        crate::project_path::move_to_trash(root, &path)?;
     }
     state.assets.retain(|item| item.id != asset_id);
     for character in &mut state.characters {
@@ -1451,11 +1442,13 @@ fn relativize(root: &Path, path: &str) -> String {
 }
 
 fn resolve_source(root: &Path, source: &str) -> Result<PathBuf, String> {
-    let raw = PathBuf::from(source.trim());
-    if raw.is_absolute() {
-        return Ok(raw);
-    }
-    Ok(root.join(raw))
+    crate::project_path::resolve(
+        source,
+        Some(root.to_string_lossy().as_ref()),
+        crate::project_path::PathIntent::Read,
+    )
+    .map(|path| path.into_path_buf())
+    .map_err(|error| error.to_string())
 }
 
 pub fn look_summary(scene: &SceneRecord) -> String {
@@ -1696,6 +1689,7 @@ mod tests {
             scope: None,
             progress: None,
             cost: None,
+            estimated_cost: None,
             currency: None,
             retry_of: None,
         });
@@ -1733,6 +1727,7 @@ mod tests {
             scope: None,
             progress: None,
             cost: None,
+            estimated_cost: None,
             currency: None,
             retry_of: None,
         });
@@ -1786,6 +1781,7 @@ mod tests {
             scope: None,
             progress: None,
             cost: None,
+            estimated_cost: None,
             currency: None,
             retry_of: None,
         });
@@ -2174,6 +2170,7 @@ mod tests {
             scope: None,
             progress: None,
             cost: None,
+            estimated_cost: None,
             currency: None,
             retry_of: None,
         });

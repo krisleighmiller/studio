@@ -38,10 +38,21 @@ use serde_json::{json, Map, Value};
 use std::path::Path;
 
 fn arg_path(args: &Value, key: &str) -> Result<String, String> {
-    args.get(key)
+    let supplied = args
+        .get(key)
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("Missing or invalid argument: {key}"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    #[cfg(not(test))]
+    {
+        return crate::session::command_root(supplied.as_deref())
+            .map(|path| path.to_string_lossy().into_owned());
+    }
+    #[cfg(test)]
+    {
+        supplied.ok_or_else(|| format!("Missing or invalid argument: {key}"))
+    }
 }
 
 fn arg_bool(args: &Value, key: &str, default: bool) -> bool {

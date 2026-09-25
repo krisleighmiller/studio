@@ -177,13 +177,13 @@ function renderApiCard(api: ApiEntry, index: number): string {
       </label>
       <label class="settings-field">
         <span>${escapeHtml(keyLabel)}${meta.apiKeyOptional ? " (optional)" : ""}</span>
-        <input type="password" data-field="apiKey" value="${escapeAttr(api.apiKey)}" autocomplete="off" spellcheck="false" />
+        <input type="password" data-field="apiKey" value="${escapeAttr(api.apiKey)}" placeholder="${api.hasKey ? "Saved on this computer — leave blank to keep it" : ""}" autocomplete="off" spellcheck="false" />
       </label>
       ${
         meta.needsSecretKey
           ? `<label class="settings-field">
               <span>Secret Key</span>
-              <input type="password" data-field="secretKey" value="${escapeAttr(api.secretKey)}" autocomplete="off" spellcheck="false" />
+              <input type="password" data-field="secretKey" value="${escapeAttr(api.secretKey)}" placeholder="${api.hasSecret ? "Saved on this computer — leave blank to keep it" : ""}" autocomplete="off" spellcheck="false" />
             </label>`
           : ""
       }
@@ -582,7 +582,7 @@ async function fetchApiCatalog(apiId: string, options?: { quiet?: boolean }): Pr
     if (!options?.quiet) host?.onStatus("This protocol uses a built-in model list");
     return false;
   }
-  if (!api.apiKey.trim() && !apiAllowsEmptyKey(api)) {
+  if (!api.apiKey.trim() && !api.hasKey && !apiAllowsEmptyKey(api)) {
     if (!options?.quiet) host?.onStatus(`Enter an API key for ${api.name} first`);
     return false;
   }
@@ -590,9 +590,14 @@ async function fetchApiCatalog(apiId: string, options?: { quiet?: boolean }): Pr
   if (host) renderSettingsPanel();
   try {
     const catalog = await invoke<CatalogModel[]>("fetch_api_catalog", {
+      apiId: api.id,
       kind: api.kind,
-      apiKey: api.apiKey || (api.kind === "ollama" || isLocalLlmBaseUrl(api.baseUrl) ? "local" : ""),
       baseUrl: api.baseUrl,
+      ...(api.apiKey.trim()
+        ? { apiKey: api.apiKey }
+        : api.kind === "ollama" || isLocalLlmBaseUrl(api.baseUrl)
+          ? { apiKey: "local" }
+          : {}),
     });
     await applyFetchedCatalog(api, catalog);
     if (!options?.quiet) {

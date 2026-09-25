@@ -222,11 +222,20 @@ pub fn clear_scratch(
         .iter_mut()
         .find(|shot| shot.id == shot_id)
         .ok_or_else(|| format!("animatic shot {shot_id} not found"))?;
-    if let Some(path) = shot.scratch_audio_path.take() {
-        let file = project_root.join(path);
+    if let Some(path) = shot.scratch_audio_path.clone() {
+        let root_s = project_root.to_string_lossy().to_string();
+        let file = crate::project_path::resolve(
+            &path,
+            Some(&root_s),
+            crate::project_path::PathIntent::Write,
+        )
+        .map(|resolved| resolved.into_path_buf())
+        .map_err(|error| error.to_string())?;
+        crate::project_path::under_scene_bucket(project_root, &file, "animatic")?;
         if file.is_file() {
-            let _ = fs::remove_file(file);
+            crate::project_path::move_to_trash(project_root, &file)?;
         }
+        shot.scratch_audio_path = None;
     }
     Ok(())
 }

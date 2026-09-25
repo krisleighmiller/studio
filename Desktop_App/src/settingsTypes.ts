@@ -286,8 +286,11 @@ export type ApiEntry = {
   kind: ProtocolKind;
   baseUrl: string;
   apiKey: string;
+  /** True when the host has a saved API key that was not sent to the window. */
+  hasKey?: boolean;
   /** Kling Secret Key (and future dual-credential protocols). */
   secretKey: string;
+  hasSecret?: boolean;
   enabled: boolean;
   catalog: CatalogModel[];
   catalogFetchedAt: string | null;

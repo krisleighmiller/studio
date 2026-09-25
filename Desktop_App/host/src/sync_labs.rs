@@ -7,7 +7,6 @@ use crate::ctx::HostCtx;
 use crate::media_util::{download_url, emit_progress, http_client, param_str, resolve_path};
 use crate::settings::{ApiEntry, CatalogModel};
 use serde_json::{json, Value};
-use std::fs;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -136,11 +135,7 @@ fn request_json(
 
 /// Upload a local file via Sync assets; returns a public HTTPS url.
 fn upload_local_file(api: &ApiEntry, path: &Path, app: Option<&HostCtx>) -> Result<String, String> {
-    if !path.is_file() {
-        return Err(format!("Media path not found: {}", path.display()));
-    }
-    let bytes =
-        fs::read(path).map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let (_mime, bytes) = crate::media_util::load_media(path)?;
     let size = bytes.len() as u64;
     if size == 0 {
         return Err(format!("File is empty: {}", path.display()));
@@ -230,7 +225,7 @@ fn resolve_media_url(
             "Sync Labs does not accept data: URIs — pass a local path or https URL.".into(),
         );
     }
-    let path = resolve_path(raw, project_root);
+    let path = resolve_path(raw, project_root)?;
     upload_local_file(api, &path, app)
 }
 

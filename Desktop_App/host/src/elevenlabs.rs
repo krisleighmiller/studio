@@ -370,16 +370,32 @@ pub fn elevenlabs_create_designed_voice(
         .ok_or_else(|| "ElevenLabs create-voice response missing voice_id.".into())
 }
 
+fn allow_preview_url(raw: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(raw).map_err(|_| "Preview URL is not a valid URL.".to_string())?;
+    if url.scheme() != "https" {
+        return Err("Preview downloads must use https.".into());
+    }
+    let host = url.host_str().unwrap_or("");
+    let allowed = host == "elevenlabs.io"
+        || host.ends_with(".elevenlabs.io")
+        || host == "storage.googleapis.com";
+    if !allowed {
+        return Err("That preview host is not allowed.".into());
+    }
+    Ok(())
+}
+
 pub fn elevenlabs_download_preview_url(url: String) -> Result<AudioPayload, String> {
     let url = url.trim();
     if url.is_empty() {
         return Err("preview URL is required.".into());
     }
+    allow_preview_url(url)?;
     let client = client()?;
     let response = client
         .get(url)
         .send()
-        .map_err(|error| format!("Preview download failed: {error}"))?;
+        .map_err(|error| crate::http_util::format_reqwest_error("Preview download failed", error))?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().unwrap_or_default();
@@ -391,9 +407,7 @@ pub fn elevenlabs_download_preview_url(url: String) -> Result<AudioPayload, Stri
         .and_then(|value| value.to_str().ok())
         .unwrap_or("audio/mpeg")
         .to_string();
-    let bytes = response
-        .bytes()
-        .map_err(|error| format!("Could not read preview audio: {error}"))?;
+    let bytes = crate::http_util::read_limited(response, 15_000_000)?;
     Ok(AudioPayload {
         audio_base64: B64.encode(bytes),
         media_type,

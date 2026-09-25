@@ -1167,8 +1167,8 @@ pub fn download_atlas_media(
     if url.is_empty() {
         return Err("url is required".into());
     }
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("url must be an http(s) Atlas output URL".into());
+    if !url.starts_with("https://") {
+        return Err("Downloads must use https.".into());
     }
     let path = resolve_dest_path(dest, project_root)?;
     let ext = path
@@ -1226,24 +1226,25 @@ pub fn download_atlas_media(
         .get(url)
         .header("Accept", "*/*")
         .send()
-        .map_err(|error| format!("Download failed: {error}"))?;
+        .map_err(|error| crate::http_util::format_reqwest_error("Download failed", error))?;
     let status = response.status();
     if !status.is_success() {
         let text = response.text().unwrap_or_default();
         return Err(format!("Download failed ({status}): {text}"));
     }
-    let data = response
-        .bytes()
-        .map_err(|error| format!("Could not read download bytes: {error}"))?;
-    if data.is_empty() {
-        return Err("Download returned empty body".into());
-    }
-    // Write via temp file then rename so a crash mid-write does not leave a "saved" stub.
     let tmp = path.with_extension(format!(
         "{}.partial",
         path.extension().and_then(|e| e.to_str()).unwrap_or("bin")
     ));
-    fs::write(&tmp, &data).map_err(|error| format!("Could not write temp file: {error}"))?;
+    let written = crate::http_util::write_response_limited(
+        response,
+        &tmp,
+        crate::http_util::max_download_bytes(),
+    )?;
+    if written == 0 {
+        let _ = fs::remove_file(&tmp);
+        return Err("Download returned empty body".into());
+    }
     fs::rename(&tmp, &path).map_err(|error| {
         let _ = fs::remove_file(&tmp);
         format!("Could not finalize {}: {error}", path.display())
@@ -1276,48 +1277,13 @@ pub fn download_atlas_image(
 }
 
 fn resolve_existing_file(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
-    let path = resolve_path(raw, project_root);
-    if !path.is_absolute() {
-        return Err(format!(
-            "Path must be absolute (or project-relative with an open project): {}",
-            path.display()
-        ));
-    }
-    if !path.is_file() {
-        return Err(format!("Not a file: {}", path.display()));
-    }
+    let path = crate::media_util::resolve_path(raw, project_root)?;
+    crate::media_util::ensure_media_file(&path)?;
     Ok(path)
 }
 
 fn resolve_dest_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
-    let path = resolve_path(raw, project_root);
-    if !path.is_absolute() {
-        return Err(format!(
-            "Destination must be an absolute path (got {}).",
-            path.display()
-        ));
-    }
-    if let Some(root) = project_root {
-        let root = PathBuf::from(root);
-        if !path.starts_with(&root) {
-            return Err(format!(
-                "Destination must stay under the open project root ({})",
-                root.display()
-            ));
-        }
-    }
-    Ok(path)
-}
-
-fn resolve_path(raw: &str, project_root: Option<&str>) -> PathBuf {
-    let path = PathBuf::from(raw.trim());
-    if path.is_absolute() {
-        return path;
-    }
-    if let Some(root) = project_root {
-        return PathBuf::from(root).join(path);
-    }
-    path
+    crate::media_util::resolve_write_path(raw, project_root)
 }
 
 fn mime_for_path(path: &Path) -> &'static str {

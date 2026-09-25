@@ -100,12 +100,7 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
   const outputKind = outputPath ? outputKindOf(job.kind, outputPath) : null;
   const elapsed = elapsedLabel(job);
   const detail = job.error?.trim() || located.label || job.progress?.trim() || "Scope unknown";
-  const cost =
-    typeof job.cost === "number" && Number.isFinite(job.cost)
-      ? job.currency?.trim()
-        ? `${job.cost} ${job.currency.trim()}`
-        : `${job.cost} (currency unknown)`
-      : "cost unknown";
+  const cost = `estimate ${money(job.estimated_cost, job.currency)} · actual ${money(job.cost, job.currency)}`;
   return {
     id: job.id,
     title: KIND_LABELS[job.kind] ?? labelize(job.kind || "Job"),
@@ -303,6 +298,12 @@ function takeForOutput(
     }
   }
   return null;
+}
+
+function money(value: number | null | undefined, currency: string | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "unknown";
+  const unit = currency?.trim();
+  return unit ? `${value} ${unit}` : `${value} (currency unknown)`;
 }
 
 function labelize(value: string): string {

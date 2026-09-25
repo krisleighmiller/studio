@@ -192,7 +192,7 @@ fn gemini_chat(
         base
     };
     let model_id = model.strip_prefix("models/").unwrap_or(model);
-    let url = format!("{base}/models/{model_id}:generateContent?key={api_key}");
+    let url = format!("{base}/models/{model_id}:generateContent");
 
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
@@ -229,7 +229,10 @@ fn gemini_chat(
 
     let parsed = post_json(
         &url,
-        vec![("content-type".into(), "application/json".into())],
+        vec![
+            ("content-type".into(), "application/json".into()),
+            ("x-goog-api-key".into(), api_key.to_string()),
+        ],
         &body,
     )?;
     extract_gemini_text(&parsed)

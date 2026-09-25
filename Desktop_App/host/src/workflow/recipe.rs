@@ -8,11 +8,45 @@ use crate::workflow::state::{
 use crate::workflow::validate::has_dialogue;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkArea {
+    Plan,
+    Produce,
+    Finish,
+}
+
+impl WorkArea {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Produce => "produce",
+            Self::Finish => "finish",
+        }
+    }
+}
+
 pub struct RecipeStage {
-    pub id: WorkflowStage,
+    pub id: &'static str,
     pub label: &'static str,
-    pub depends_on: &'static [WorkflowStage],
+    pub work_area: WorkArea,
+    pub depends_on: &'static [&'static str],
     pub required_roles: &'static [&'static str],
+}
+
+const fn stage(
+    id: &'static str,
+    label: &'static str,
+    work_area: WorkArea,
+    depends_on: &'static [&'static str],
+    required_roles: &'static [&'static str],
+) -> RecipeStage {
+    RecipeStage {
+        id,
+        label,
+        work_area,
+        depends_on,
+        required_roles,
+    }
 }
 
 pub struct RecipeGraph {
@@ -25,8 +59,20 @@ pub struct RecipeGraph {
 pub struct RecipeStageReport {
     pub id: String,
     pub label: String,
+    pub work_area: String,
     pub depends_on: Vec<String>,
     pub required_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StageNav {
+    pub id: String,
+    pub label: String,
+    pub work_area: String,
+    pub status: String,
+    pub available: bool,
+    pub disabled_reason: Option<String>,
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,123 +89,28 @@ pub struct RecipeChoice {
 }
 
 const NARRATIVE_STAGES: &[RecipeStage] = &[
-    RecipeStage {
-        id: WorkflowStage::Script,
-        label: "Script",
-        depends_on: &[],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::Characters,
-        label: "Characters",
-        depends_on: &[WorkflowStage::Script],
-        required_roles: &["cast", "voice"],
-    },
-    RecipeStage {
-        id: WorkflowStage::SceneIntent,
-        label: "Scene Intent",
-        depends_on: &[WorkflowStage::Characters],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::SceneLook,
-        label: "Scene Look",
-        depends_on: &[WorkflowStage::SceneIntent],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::CutSketches,
-        label: "Cut Sketches",
-        depends_on: &[WorkflowStage::SceneLook],
-        required_roles: &["mouth_policy"],
-    },
-    RecipeStage {
-        id: WorkflowStage::ReferenceImages,
-        label: "Reference Images",
-        depends_on: &[WorkflowStage::CutSketches],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::ProductionNotes,
-        label: "Production Notes",
-        depends_on: &[WorkflowStage::ReferenceImages],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::Render,
-        label: "Render",
-        depends_on: &[WorkflowStage::ProductionNotes],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::TakeReview,
-        label: "Take Review",
-        depends_on: &[WorkflowStage::Render],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::Assemble,
-        label: "Assemble",
-        depends_on: &[WorkflowStage::TakeReview],
-        required_roles: &[],
-    },
+    stage("script", "Script", WorkArea::Plan, &[], &[]),
+    stage("characters", "Characters", WorkArea::Plan, &["script"], &["cast", "voice"]),
+    stage("scene_intent", "Scene Intent", WorkArea::Plan, &["characters"], &[]),
+    stage("scene_look", "Scene Look", WorkArea::Plan, &["scene_intent"], &[]),
+    stage("cut_sketches", "Cut Sketches", WorkArea::Plan, &["scene_look"], &["mouth_policy"]),
+    stage("reference_images", "Reference Images", WorkArea::Plan, &["cut_sketches"], &[]),
+    stage("production_notes", "Production Notes", WorkArea::Plan, &["reference_images"], &[]),
+    stage("render", "Render", WorkArea::Produce, &["production_notes"], &[]),
+    stage("take_review", "Take Review", WorkArea::Produce, &["render"], &[]),
+    stage("assemble", "Assemble", WorkArea::Finish, &["take_review"], &[]),
 ];
 
 const MONTAGE_STAGES: &[RecipeStage] = &[
-    RecipeStage {
-        id: WorkflowStage::Script,
-        label: "Track",
-        depends_on: &[],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::SceneIntent,
-        label: "Timing",
-        depends_on: &[WorkflowStage::Script],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::SceneLook,
-        label: "Visual treatment",
-        depends_on: &[WorkflowStage::SceneIntent],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::CutSketches,
-        label: "Boards",
-        depends_on: &[WorkflowStage::SceneLook],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::ReferenceImages,
-        label: "Shot sources",
-        depends_on: &[WorkflowStage::CutSketches],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::ProductionNotes,
-        label: "Shot specs",
-        depends_on: &[WorkflowStage::ReferenceImages],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::Render,
-        label: "Takes",
-        depends_on: &[WorkflowStage::ProductionNotes],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::TakeReview,
-        label: "Selects",
-        depends_on: &[WorkflowStage::Render],
-        required_roles: &[],
-    },
-    RecipeStage {
-        id: WorkflowStage::Assemble,
-        label: "Edit",
-        depends_on: &[WorkflowStage::TakeReview],
-        required_roles: &[],
-    },
+    stage("script", "Track", WorkArea::Plan, &[], &[]),
+    stage("scene_intent", "Timing", WorkArea::Plan, &["script"], &[]),
+    stage("scene_look", "Visual treatment", WorkArea::Plan, &["scene_intent"], &[]),
+    stage("cut_sketches", "Boards", WorkArea::Plan, &["scene_look"], &[]),
+    stage("reference_images", "Shot sources", WorkArea::Plan, &["cut_sketches"], &[]),
+    stage("production_notes", "Shot specs", WorkArea::Plan, &["reference_images"], &[]),
+    stage("render", "Takes", WorkArea::Produce, &["production_notes"], &[]),
+    stage("take_review", "Selects", WorkArea::Produce, &["render"], &[]),
+    stage("assemble", "Edit", WorkArea::Finish, &["take_review"], &[]),
 ];
 
 const NARRATIVE: RecipeGraph = RecipeGraph {
@@ -177,7 +128,7 @@ const MONTAGE: RecipeGraph = RecipeGraph {
 const GRAPHS: &[&RecipeGraph] = &[&NARRATIVE, &MONTAGE];
 
 impl RecipeGraph {
-    pub fn includes(&self, stage: WorkflowStage) -> bool {
+    pub fn includes(&self, stage: &str) -> bool {
         self.stages.iter().any(|item| item.id == stage)
     }
 
@@ -195,13 +146,10 @@ impl RecipeGraph {
                 .stages
                 .iter()
                 .map(|stage| RecipeStageReport {
-                    id: stage.id.as_str().to_string(),
+                    id: stage.id.to_string(),
                     label: stage.label.to_string(),
-                    depends_on: stage
-                        .depends_on
-                        .iter()
-                        .map(|item| item.as_str().to_string())
-                        .collect(),
+                    work_area: stage.work_area.as_str().to_string(),
+                    depends_on: stage.depends_on.iter().map(|item| (*item).to_string()).collect(),
                     required_roles: stage
                         .required_roles
                         .iter()
@@ -236,6 +184,74 @@ pub fn graph(recipe: ProductionRecipe) -> &'static RecipeGraph {
         .unwrap_or(&NARRATIVE)
 }
 
+pub fn validate_graph(graph: &RecipeGraph) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for stage in graph.stages {
+        if stage.id.is_empty() || !seen.insert(stage.id) {
+            return Err(format!("recipe {} has a duplicate or empty stage id", graph.id));
+        }
+        for dependency in stage.depends_on {
+            if !graph.stages.iter().any(|item| item.id == *dependency) {
+                return Err(format!(
+                    "recipe {} stage {} depends on unknown stage {dependency}",
+                    graph.id, stage.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Stages the recipe actually offers, in recipe order. Omitted stages are absent.
+/// A stage with missing dependencies stays visible and disabled instead of becoming a dead control.
+pub fn navigation(graph: &RecipeGraph, scene: &SceneRecord) -> Vec<StageNav> {
+    graph
+        .stages
+        .iter()
+        .map(|stage| {
+            let status = stage_status(scene, stage.id);
+            let blocking: Vec<&str> = stage
+                .depends_on
+                .iter()
+                .copied()
+                .filter(|dependency| stage_status(scene, dependency) == StageStatus::Missing)
+                .collect();
+            let available = blocking.is_empty() || status != StageStatus::Missing;
+            let disabled_reason = if available {
+                None
+            } else {
+                let labels: Vec<&str> = blocking
+                    .iter()
+                    .map(|dependency| {
+                        graph
+                            .stages
+                            .iter()
+                            .find(|item| item.id == *dependency)
+                            .map(|item| item.label)
+                            .unwrap_or(dependency)
+                    })
+                    .collect();
+                Some(format!("Waiting on {}.", labels.join(", ")))
+            };
+            StageNav {
+                id: stage.id.to_string(),
+                label: stage.label.to_string(),
+                work_area: stage.work_area.as_str().to_string(),
+                status: status.as_str().to_string(),
+                available,
+                disabled_reason,
+                depends_on: stage.depends_on.iter().map(|item| (*item).to_string()).collect(),
+            }
+        })
+        .collect()
+}
+
+fn stage_status(scene: &SceneRecord, id: &str) -> StageStatus {
+    WorkflowStage::parse(id)
+        .map(|stage| scene.stages.get(stage))
+        .unwrap_or(StageStatus::Missing)
+}
+
 pub fn apply_stages(state: &mut ProjectState) {
     let recipe = state
         .profile
@@ -246,7 +262,7 @@ pub fn apply_stages(state: &mut ProjectState) {
     let any_characters = !state.characters.is_empty();
     for scene in &mut state.scenes {
         for stage in WorkflowStage::ALL {
-            let status = if active.includes(stage) {
+            let status = if active.includes(stage.as_str()) {
                 readiness(stage, scene, any_characters)
             } else {
                 StageStatus::Missing
@@ -406,32 +422,36 @@ mod tests {
 
     #[test]
     fn narrative_graph_keeps_the_slice_and_requires_cast_and_mouth() {
-        let graph = graph(ProductionRecipe::NarrativeDialogue);
-        let ids: Vec<_> = graph.stages.iter().map(|stage| stage.id).collect();
-        assert_eq!(ids, WorkflowStage::ALL.to_vec());
-        assert!(graph.requires_role("cast"));
-        assert!(graph.requires_role("voice"));
-        assert!(graph.requires_role("mouth_policy"));
-        assert!(graph
+        let narrative = graph(ProductionRecipe::NarrativeDialogue);
+        validate_graph(narrative).unwrap();
+        validate_graph(graph(ProductionRecipe::Montage)).unwrap();
+        let ids: Vec<_> = narrative.stages.iter().map(|stage| stage.id).collect();
+        let expected: Vec<_> = WorkflowStage::ALL.iter().map(|stage| stage.as_str()).collect();
+        assert_eq!(ids, expected);
+        assert!(narrative.requires_role("cast"));
+        assert!(narrative.requires_role("voice"));
+        assert!(narrative.requires_role("mouth_policy"));
+        assert!(narrative
             .stages
             .iter()
-            .any(|stage| stage.id == WorkflowStage::Render
-                && stage.depends_on.contains(&WorkflowStage::ProductionNotes)));
+            .any(|stage| stage.id == "render" && stage.depends_on.contains(&"production_notes")));
     }
 
     #[test]
     fn montage_skips_characters_and_lipsync_without_a_dead_stage() {
         let graph = graph(ProductionRecipe::Montage);
-        assert!(!graph.includes(WorkflowStage::Characters));
+        assert!(!graph.includes("characters"));
         assert!(!graph.requires_role("cast"));
         assert!(!graph.requires_role("voice"));
         assert!(!graph.requires_role("mouth_policy"));
         assert!(graph
             .stages
             .iter()
-            .all(|stage| stage.id != WorkflowStage::Characters
-                && !stage.required_roles.contains(&"mouth_policy")
-                && !stage.required_roles.contains(&"cast")));
+            .all(|stage| {
+                stage.id != "characters"
+                    && !stage.required_roles.contains(&"mouth_policy")
+                    && !stage.required_roles.contains(&"cast")
+            }));
 
         let mut state = ProjectState::new();
         state.profile = Some(ProductionProfile {
@@ -598,5 +618,110 @@ mod tests {
             state.scene(1).unwrap().stages.assemble,
             StageStatus::Approved
         );
+    }
+
+    #[test]
+    fn navigation_follows_recipe_order_and_work_areas() {
+        let mut state = ProjectState::new();
+        state.profile = Some(ProductionProfile::default());
+        let scene = state.scene_mut(1, "Open");
+        scene.source_excerpt = Some("A room.".into());
+        apply_stages(&mut state);
+        let scene = state.scene(1).unwrap();
+        let nav = navigation(graph(ProductionRecipe::NarrativeDialogue), scene);
+        let ids: Vec<_> = nav.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            WorkflowStage::ALL
+                .iter()
+                .map(|stage| stage.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(nav.iter().take(7).all(|item| item.work_area == "plan"));
+        assert!(nav
+            .iter()
+            .any(|item| item.id == "render" && item.work_area == "produce"));
+        assert!(nav
+            .iter()
+            .any(|item| item.id == "assemble" && item.work_area == "finish"));
+        let intent = nav.iter().find(|item| item.id == "scene_intent").unwrap();
+        assert!(!intent.available);
+        assert_eq!(intent.disabled_reason.as_deref(), Some("Waiting on Characters."));
+        assert!(nav.iter().any(|item| item.id == "script" && item.available));
+    }
+
+    #[test]
+    fn montage_navigation_omits_characters_and_lipsync() {
+        let mut state = ProjectState::new();
+        let scene = state.scene_mut(1, "Passing");
+        scene.source_excerpt = Some("Rails.".into());
+        let nav = navigation(graph(ProductionRecipe::Montage), scene);
+        assert!(nav.iter().all(|item| item.id != "characters"));
+        assert!(nav.iter().all(|item| {
+            graph(ProductionRecipe::Montage)
+                .stages
+                .iter()
+                .find(|stage| stage.id == item.id)
+                .is_some_and(|stage| !stage.required_roles.contains(&"mouth_policy"))
+        }));
+        assert_eq!(nav[0].id, "script");
+        assert_eq!(nav[1].id, "scene_intent");
+        assert_eq!(nav[1].work_area, "plan");
+    }
+
+    #[test]
+    fn an_unlisted_stage_can_appear_from_recipe_data() {
+        const EXTRA: &[RecipeStage] = &[
+            stage("script", "Script", WorkArea::Plan, &[], &[]),
+            stage(
+                "color_script",
+                "Color script",
+                WorkArea::Plan,
+                &["script"],
+                &[],
+            ),
+        ];
+        let graph = RecipeGraph {
+            id: "test_color",
+            label: "Color",
+            stages: EXTRA,
+        };
+        validate_graph(&graph).unwrap();
+        let mut state = ProjectState::new();
+        let scene = state.scene_mut(1, "Dawn");
+        scene.source_excerpt = Some("Light.".into());
+        apply_stages(&mut state);
+        let scene = state.scene(1).unwrap();
+        let nav = navigation(&graph, scene);
+        assert_eq!(nav.len(), 2);
+        assert_eq!(nav[1].id, "color_script");
+        assert_eq!(nav[1].label, "Color script");
+        assert_eq!(nav[1].work_area, "plan");
+        assert!(nav[1].available);
+        assert!(WorkflowStage::parse("color_script").is_none());
+    }
+
+    #[test]
+    fn unknown_recipe_and_version_one_files_load() {
+        let unknown = ProjectState::from_json(
+            r#"{"version":1,"profile":{"recipe":"opera","deliverables":[]}}"#,
+        )
+        .unwrap();
+        assert_eq!(unknown.version, 2);
+        assert_eq!(
+            unknown.profile.as_ref().unwrap().recipe,
+            ProductionRecipe::NarrativeDialogue
+        );
+        assert!(unknown
+            .notes
+            .iter()
+            .any(|note| note.contains("Unknown recipe `opera`")));
+
+        let old = ProjectState::from_json(r#"{"version":1,"project_name":"Lite"}"#).unwrap();
+        assert_eq!(old.version, 2);
+        assert_eq!(old.project_name.as_deref(), Some("Lite"));
+
+        let future = ProjectState::from_json(r#"{"version":99}"#);
+        assert!(future.is_err());
     }
 }

@@ -820,17 +820,12 @@ pub fn delete_image(
         .filter(|asset| asset.cut_id == Some(cut_id) && asset.role.is_cut_image())
         .ok_or_else(|| format!("cut image `{asset_id}` not found"))?
         .clone();
-    if !is_start_frame_rel(&asset.path) {
-        return Err(
-            "refusing to delete a cut image outside Preproduction/SceneN/start_frames".into(),
-        );
-    }
     let root_s = root.to_string_lossy().to_string();
     let path =
         resolve_under_project(&asset.path, Some(&root_s)).map_err(|error| error.to_string())?;
+    crate::project_path::under_scene_bucket(root, &path, "start_frames")?;
     if path.is_file() {
-        fs::remove_file(&path)
-            .map_err(|error| format!("could not delete `{}`: {error}", path.display()))?;
+        crate::project_path::move_to_trash(root, &path)?;
     }
     state.assets.retain(|item| item.id != asset_id);
     for item in &mut state.assets {
@@ -1408,6 +1403,7 @@ mod tests {
             scope: None,
             progress: None,
             cost: None,
+            estimated_cost: None,
             currency: None,
             retry_of: None,
         });

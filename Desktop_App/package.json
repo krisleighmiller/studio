@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "dev:host": "cargo build --manifest-path host/Cargo.toml",
-    "dev:app": "npm run dev:host && concurrently -k \"vite\" \"npx wait-on http://127.0.0.1:1420 && electron .\"",
+    "dev:app": "npm run dev:host && WORKBENCH_DEV=1 concurrently -k \"vite\" \"npx wait-on http://127.0.0.1:1420 && electron .\"",
     "build": "tsc && vite build",
     "build:host": "cargo build --release --manifest-path host/Cargo.toml",
     "preview": "vite preview",

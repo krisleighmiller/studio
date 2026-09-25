@@ -335,6 +335,7 @@ button {
 .surface-home #editor-tabs,
 .surface-home #find-bar,
 .surface-home #editor-toolbar,
+.surface-studio .editor-body > :not(#workflow-view),
 .surface-studio .explorer-panel,
 .surface-studio [data-splitter="explorer"],
 .surface-studio #editor-tabs,
@@ -383,6 +384,13 @@ button {
   flex: 0 0 auto;
   border-left: 1px solid transparent;
   position: relative;
+}
+
+.director-section {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .chat-panel.collapsed,
@@ -1984,11 +1992,11 @@ button {
 
 .workflow-body {
   display: grid;
-  grid-template-columns: minmax(180px, 240px) minmax(240px, 1fr) minmax(200px, 260px);
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) minmax(148px, 34%);
   grid-template-areas:
-    "scenes main side"
-    "jobs main side";
+    "scenes main"
+    "jobs main";
   min-height: 0;
 }
 
@@ -2008,15 +2016,25 @@ button {
   grid-area: main;
 }
 
-.studio-side {
-  grid-area: side;
-  display: flex;
+.studio-finish-mount {
+  display: none;
+  flex: 0 1 40%;
   flex-direction: column;
-  min-width: 0;
+  max-height: 42%;
   min-height: 0;
   overflow: hidden;
-  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
+}
+
+.surface-studio .studio-finish-mount {
+  display: flex;
+}
+
+.studio-finish-mount .studio-finish {
+  flex: 1 1 auto;
+  max-height: none;
+  min-height: 0;
 }
 
 .workflow-scenes,
@@ -2047,6 +2065,12 @@ button {
   margin: 0 0 10px;
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.studio-workspace-status {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .workflow-scene {
@@ -3016,21 +3040,14 @@ button {
   .workflow-body.jobs-collapsed,
   .workflow-body.scene-look-body {
     grid-template-columns: minmax(140px, 180px) minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) auto auto;
+    grid-template-rows: minmax(0, 1fr) auto;
     grid-template-areas:
       "scenes main"
-      "jobs main"
-      "side side";
+      "jobs main";
   }
 
-  .studio-side {
-    overflow: auto;
-    border-left: 0;
-    max-height: 320px;
-  }
-
-  .studio-side .studio-finish {
-    max-height: none;
+  .surface-studio .studio-finish-mount {
+    max-height: 36%;
   }
 
   .workflow-inspector {
@@ -3053,12 +3070,11 @@ button {
   .workflow-body.jobs-collapsed,
   .workflow-body.scene-look-body {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto minmax(240px, 1fr) auto;
+    grid-template-rows: auto auto minmax(240px, 1fr);
     grid-template-areas:
       "scenes"
       "jobs"
-      "main"
-      "side";
+      "main";
   }
 
   .workflow-scenes,
@@ -3069,16 +3085,8 @@ button {
     border-left: 0;
   }
 
-  .studio-side {
-    overflow: auto;
-    max-height: 320px;
-    border-right: 0;
-    border-left: 0;
-  }
-
-  .studio-side .studio-finish {
-    max-height: none;
-    overflow: visible;
+  .surface-studio .studio-finish-mount {
+    max-height: 32%;
   }
 
   .scene-look {

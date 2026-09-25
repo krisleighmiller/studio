@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: workbench-media:; media-src 'self' blob: workbench-media:; connect-src 'self' http://127.0.0.1:1420 ws://127.0.0.1:1420; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+    />
     <title>Video Workbench</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
@@ -272,7 +276,9 @@
           tabindex="0"
         ></div>
 
-        <aside id="chat-panel" class="panel chat-panel director-panel" aria-label="Director">
+        <aside id="chat-panel" class="panel chat-panel director-panel" aria-label="Director and Finish">
+          <section id="studio-finish-mount" class="studio-finish-mount"></section>
+          <section class="director-section" aria-label="Director">
           <header class="panel-header chat-header">
             <span class="director-title">Director</span>
             <div id="chat-tabs" class="tab-bar" role="tablist" aria-label="Director tabs"></div>
@@ -368,6 +374,7 @@
               </div>
             </div>
           </form>
+          </section>
         </aside>
         <button
           type="button"

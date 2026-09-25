@@ -20,7 +20,7 @@ pub struct ModelRef {
     pub model_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectorContext {
     pub project_root: Option<String>,
@@ -90,15 +90,10 @@ pub struct DirectorTurnResponse {
     pub continue_suggested: bool,
 }
 
-fn resolve_path(raw: &str, project_root: Option<&str>) -> PathBuf {
-    let path = PathBuf::from(raw.trim());
-    if path.is_absolute() {
-        return path;
-    }
-    if let Some(root) = project_root {
-        return PathBuf::from(root).join(path);
-    }
-    path
+fn resolve_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
+    crate::project_path::resolve(raw, project_root, crate::project_path::PathIntent::Read)
+        .map(|path| path.into_path_buf())
+        .map_err(|error| error.to_string())
 }
 
 fn looks_like_text_path(path: &PathBuf) -> bool {
@@ -121,7 +116,14 @@ fn append_attached_file_context(
     path_str: &str,
     project_root: Option<&str>,
 ) {
-    let path = resolve_path(path_str, project_root);
+    let path = match resolve_path(path_str, project_root) {
+        Ok(path) => path,
+        Err(error) => {
+            lines.push(format!("### Attached: {path_str}"));
+            lines.push(format!("(not attached: {error})"));
+            return;
+        }
+    };
     lines.push(format!("### Attached: {}", path.display()));
     if !path.exists() {
         lines.push("(path does not exist)".into());
@@ -496,7 +498,6 @@ fn answer_pending_plan_question(
     user_text: &str,
     project_root: Option<&str>,
 ) -> Option<String> {
-    use crate::director_actions::encode_pending_action;
     let specialist = pending.specialist.as_deref()?;
     let notes = match specialist {
         "still_image" => {
@@ -516,15 +517,10 @@ fn answer_pending_plan_question(
         "assemble" => crate::assemble::approval_notes(&pending.inputs, project_root),
         _ => return None,
     };
-    let mut reply = format!(
-        "Host answer (from Settings / validated pending plan) — for: _{}_\n\n{notes}\n\n{}",
-        user_text.trim(),
-        encode_pending_action(pending)
+    let reply = format!(
+        "Host answer (from Settings / the parked plan) — for: _{}_\n\n{notes}\n\nThe Approve button on the plan still runs it. Chat text does not.",
+        user_text.trim()
     );
-    if specialist == "still_image" || specialist == "scene_generation" || specialist == "text_sync"
-    {
-        reply.push_str("\n\nReply **Approved** to run this pending plan, or say what to change.");
-    }
     Some(reply)
 }
 
@@ -600,8 +596,7 @@ fn director_turn_inner(
     request: DirectorTurnRequest,
 ) -> Result<DirectorTurnResponse, String> {
     use crate::director_actions::{
-        find_pending_action_in_history, format_approval_request, parse_actions,
-        planner_system_prompt, validate_action, ActionKind, ACTION_CONSUMED,
+        format_approval_request, parse_actions, planner_system_prompt, validate_action, ActionKind,
     };
     use crate::specialists::{self, specialist_requires_approval, SpecialistLlm};
 
@@ -651,6 +646,7 @@ fn director_turn_inner(
         user_question: &user_question,
     };
     let mut context = request.context;
+    context.project_root = crate::session::root().map(|path| path.to_string_lossy().into_owned());
     // Per-turn adult routing from user keywords (adult / nsfw / …). Survives Approve/continue
     // via recent user-message history.
     context.adult_routing_requested = adult_routing_from_history(&request.messages);
@@ -661,14 +657,6 @@ fn director_turn_inner(
         .map(str::to_string);
     let project_root_ref = project_root.as_deref();
 
-    let history_pairs: Vec<(String, String)> = request
-        .messages
-        .iter()
-        .map(|m| (m.role.clone(), m.content.clone()))
-        .collect();
-    let user_approved = last_user_message(&request.messages).is_some_and(looks_like_paid_approval);
-    let user_continue =
-        last_user_message(&request.messages).is_some_and(looks_like_continue_request);
     let mut tool_events = Vec::new();
 
     if context.adult_routing_requested {
@@ -679,103 +667,29 @@ fn director_turn_inner(
         tool_events.push("adult_routing:on".into());
     }
 
-    // Pending specialist plan is still awaiting approval — answer model/plan
-    // questions from host Settings instead of re-emitting the same approval card.
-    if !user_approved && !user_continue {
-        if let Some(user_text) = last_user_message(&request.messages) {
-            if looks_like_pending_plan_question(user_text) {
-                if let Some(pending) = find_pending_action_in_history(&history_pairs) {
-                    if let Some(reply) = answer_pending_plan_question(
-                        &context,
-                        &pending,
-                        user_text,
-                        project_root_ref,
-                    ) {
-                        tool_events.push("pending_plan_question".into());
-                        return Ok(DirectorTurnResponse {
-                            reply,
-                            model,
-                            tool_events,
-                            continue_suggested: false,
-                        });
-                    }
+    // A question about the parked plan keeps that plan. Any other chat text,
+    // including "ok" and "continue", drops it. Only director_approve runs it.
+    if let Some(user_text) = last_user_message(&request.messages) {
+        if looks_like_pending_plan_question(user_text) {
+            if let Some(pending) = crate::pending::current() {
+                if let Some(reply) = answer_pending_plan_question(
+                    &context,
+                    &pending,
+                    user_text,
+                    project_root_ref,
+                ) {
+                    tool_events.push("pending_plan_question".into());
+                    return Ok(DirectorTurnResponse {
+                        reply,
+                        model,
+                        tool_events,
+                        continue_suggested: false,
+                    });
                 }
             }
         }
     }
-
-    // If the user approved/continued and a pending action is embedded in history, execute it.
-    if user_approved || user_continue {
-        if let Some(pending) = find_pending_action_in_history(&history_pairs) {
-            match validate_action(pending.clone(), project_root_ref) {
-                Ok(validated) => {
-                    app.emit(
-                        "director-progress",
-                        "Host executing pending specialist action…".to_string(),
-                    );
-                    let outcome = match validated.action.action {
-                        ActionKind::RunSpecialist => specialists::run_specialist(
-                            &app,
-                            &context,
-                            &validated,
-                            project_root_ref,
-                            Some(&specialist_llm),
-                        )
-                        .map(Some),
-                        ActionKind::Inspect => {
-                            specialists::run_inspect(&validated, project_root_ref).map(|text| {
-                                Some(specialists::SpecialistResult {
-                                    message: text,
-                                    continue_suggested: false,
-                                })
-                            })
-                        }
-                        ActionKind::AskUser | ActionKind::Done => {
-                            Ok(Some(specialists::SpecialistResult {
-                                message: validated.action.message.clone().unwrap_or_default(),
-                                continue_suggested: false,
-                            }))
-                        }
-                    };
-                    match outcome {
-                        Ok(Some(result)) => {
-                            tool_events.push(format!(
-                                "pending:{}",
-                                validated
-                                    .action
-                                    .specialist
-                                    .clone()
-                                    .unwrap_or_else(|| format!("{:?}", validated.action.action))
-                            ));
-                            return Ok(DirectorTurnResponse {
-                                reply: format!("{}\n\n{}", result.message, ACTION_CONSUMED),
-                                model,
-                                tool_events,
-                                continue_suggested: result.continue_suggested,
-                            });
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            return Ok(DirectorTurnResponse {
-                                reply: format!(
-                                    "Host could not execute pending action: {error}\n\n{ACTION_CONSUMED}"
-                                ),
-                                model,
-                                tool_events,
-                                continue_suggested: false,
-                            });
-                        }
-                    }
-                }
-                Err(error) => {
-                    app.emit(
-                        "director-progress",
-                        format!("Pending action failed validation: {error}"),
-                    );
-                }
-            }
-        }
-    }
+    crate::pending::cancel_all();
 
     let system = format!(
         "{}\n\n{}",
@@ -795,7 +709,7 @@ fn director_turn_inner(
         }
         api_messages.push(json!({
             "role": role,
-            "content": message.content,
+            "content": crate::pending::strip_control_text(&message.content),
         }));
     }
 
@@ -1018,7 +932,123 @@ pub fn director_turn(
     request: DirectorTurnRequest,
 ) -> Result<DirectorTurnResponse, String> {
     app.emit("director-progress", "Director turn started…".to_string());
-    director_turn_inner(app, request)
+    finish_director_reply(app.clone(), director_turn_inner(app, request))
+}
+
+pub fn director_approve(
+    app: HostCtx,
+    id: String,
+    model: String,
+    api_id: Option<String>,
+    mut context: DirectorContext,
+) -> Result<DirectorTurnResponse, String> {
+    use crate::director_actions::{validate_action, ActionKind};
+    use crate::specialists::{self, SpecialistLlm};
+
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return Err("Select a chat model in the chat dropdown (or Settings) first.".into());
+    }
+    let pending = crate::pending::take(id.trim())?;
+    context.project_root = crate::session::root().map(|path| path.to_string_lossy().into_owned());
+    let project_root = context
+        .project_root
+        .as_deref()
+        .filter(|root| !root.is_empty())
+        .map(str::to_string);
+    let project_root_ref = project_root.as_deref();
+    let validated = validate_action(pending, project_root_ref).map_err(|error| error.to_string())?;
+
+    let chat_api_id = api_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            settings::list_apis(&app).ok().and_then(|apis| {
+                apis.into_iter()
+                    .find(|api| api.enabled && api.kind != "elevenlabs" && api.kind != "sync-labs")
+                    .map(|api| api.id)
+            })
+        });
+    let bound = chat_api_id
+        .as_deref()
+        .map(|api_id| settings::api_key_for(&app, api_id))
+        .transpose()?;
+    app.emit(
+        "director-progress",
+        "Host executing approved action…".to_string(),
+    );
+    let outcome = match validated.action.action {
+        ActionKind::RunSpecialist => {
+            let (api, key) = bound.ok_or_else(|| {
+                "Select a chat model (with an API) before approving this plan.".to_string()
+            })?;
+            let specialist_llm = SpecialistLlm {
+                api: &api,
+                api_key: &key,
+                model: &model,
+                user_question: "",
+            };
+            specialists::run_specialist(
+                &app,
+                &context,
+                &validated,
+                project_root_ref,
+                Some(&specialist_llm),
+            )
+        }
+        ActionKind::Inspect => specialists::run_inspect(&validated, project_root_ref).map(|text| {
+            specialists::SpecialistResult {
+                message: text,
+                continue_suggested: false,
+            }
+        }),
+        ActionKind::AskUser | ActionKind::Done => Ok(specialists::SpecialistResult {
+            message: validated.action.message.clone().unwrap_or_default(),
+            continue_suggested: false,
+        }),
+    };
+    let result = match outcome {
+        Ok(result) => result,
+        Err(error) => {
+            return finish_director_reply(
+                app,
+                Ok(DirectorTurnResponse {
+                    reply: format!("Host could not execute the approved action: {error}"),
+                    model,
+                    tool_events: vec!["approve:error".into()],
+                    continue_suggested: false,
+                }),
+            );
+        }
+    };
+    finish_director_reply(
+        app,
+        Ok(DirectorTurnResponse {
+            reply: result.message,
+            model,
+            tool_events: vec![format!(
+                "approve:{}",
+                validated
+                    .action
+                    .specialist
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", validated.action.action))
+            )],
+            continue_suggested: result.continue_suggested,
+        }),
+    )
+}
+
+fn finish_director_reply(
+    app: HostCtx,
+    response: Result<DirectorTurnResponse, String>,
+) -> Result<DirectorTurnResponse, String> {
+    let mut response = response?;
+    response.reply = crate::pending::publish_user_text(&response.reply);
+    response.reply = crate::secrets::redact_text(&app, &response.reply);
+    Ok(response)
 }
 
 #[cfg(test)]

@@ -3,8 +3,70 @@
 use std::thread;
 use std::time::Duration;
 
+const DEFAULT_DOWNLOAD_CAP: u64 = 512_000_000;
+
+pub fn read_limited(mut response: reqwest::blocking::Response, max_bytes: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut body = Vec::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = response
+            .read(&mut buf)
+            .map_err(|error| format!("Could not read response: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        let next = body.len() as u64 + read as u64;
+        if next > max_bytes {
+            return Err(format!("Download is larger than {max_bytes} bytes."));
+        }
+        body.extend_from_slice(&buf[..read]);
+    }
+    Ok(body)
+}
+
+pub fn write_response_limited(
+    response: reqwest::blocking::Response,
+    dest: &std::path::Path,
+    max_bytes: u64,
+) -> Result<u64, String> {
+    use std::io::{Read, Write};
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create parent dirs: {error}"))?;
+        }
+    }
+    let mut file = std::fs::File::create(dest)
+        .map_err(|error| format!("Could not write {}: {error}", dest.display()))?;
+    let mut response = response;
+    let mut written = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = response
+            .read(&mut buf)
+            .map_err(|error| format!("Could not read download: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        written += read as u64;
+        if written > max_bytes {
+            let _ = std::fs::remove_file(dest);
+            return Err(format!("Download is larger than {max_bytes} bytes."));
+        }
+        file.write_all(&buf[..read])
+            .map_err(|error| format!("Could not write {}: {error}", dest.display()))?;
+    }
+    Ok(written)
+}
+
+pub fn max_download_bytes() -> u64 {
+    DEFAULT_DOWNLOAD_CAP
+}
+
 /// Flatten a reqwest error chain so TLS/DNS/connect causes are visible in the UI.
 pub fn format_reqwest_error(prefix: &str, error: reqwest::Error) -> String {
+    let error = error.without_url();
     let mut parts = vec![error.to_string()];
     let mut source = std::error::Error::source(&error);
     while let Some(err) = source {

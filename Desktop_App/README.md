@@ -36,7 +36,7 @@ npm run dev:host          # cargo build host/
 npm run build:host        # release host binary
 npm run build             # tsc + vite build
 npm run dev               # Vite only (no desktop shell)
-npm start                 # Electron against last Vite build / env URL
+npm start                 # Electron loads dist/index.html (not the dev server)
 ```
 
 Background: why Electron — `Studio/Dev_Notes/Electron_Fork_Decision.md`. Cutover notes — `Studio/Dev_Notes/Tauri_to_Electron_Migration.md`.

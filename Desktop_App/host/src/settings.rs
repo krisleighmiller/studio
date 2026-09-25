@@ -1,8 +1,9 @@
 use crate::ctx::HostCtx;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 const ATLAS_MODELS_URL: &str = "https://api.atlascloud.ai/api/v1/models";
 
@@ -210,6 +211,9 @@ fn ensure_apis_nonempty(mut value: Value) -> Value {
 
 pub fn load_settings(app: HostCtx) -> Result<Value, String> {
     let path = settings_path(&app)?;
+    if let Some(dir) = path.parent() {
+        tighten_settings_permissions(dir, &path)?;
+    }
     if !path.exists() {
         return Ok(default_settings());
     }
@@ -229,7 +233,115 @@ pub fn load_settings(app: HostCtx) -> Result<Value, String> {
     Ok(migrated)
 }
 
-pub fn save_settings(app: HostCtx, settings: Value) -> Result<(), String> {
+pub fn redact_settings_for_renderer(value: &mut Value) {
+    let Some(apis) = value.get_mut("apis").and_then(|item| item.as_array_mut()) else {
+        return;
+    };
+    for api in apis {
+        blank_secret(api, "apiKey", "hasKey");
+        blank_secret(api, "secretKey", "hasSecret");
+    }
+}
+
+fn blank_secret(api: &mut Value, field: &str, flag: &str) {
+    let present = api
+        .get(field)
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty());
+    if let Some(object) = api.as_object_mut() {
+        object.insert(flag.to_string(), json!(present));
+        object.insert(field.to_string(), json!(""));
+    }
+}
+
+fn preserve_saved_secrets(app: &HostCtx, incoming: &mut Value) {
+    let Ok(existing) = load_settings(app.clone()) else {
+        return;
+    };
+    let Some(saved) = existing.get("apis").and_then(|value| value.as_array()) else {
+        return;
+    };
+    let Some(apis) = incoming.get_mut("apis").and_then(|value| value.as_array_mut()) else {
+        return;
+    };
+    for api in apis {
+        let Some(id) = api.get("id").and_then(|value| value.as_str()).map(str::to_string) else {
+            continue;
+        };
+        let Some(previous) = saved
+            .iter()
+            .find(|item| item.get("id").and_then(|value| value.as_str()) == Some(id.as_str()))
+        else {
+            continue;
+        };
+        restore_blank(api, previous, "apiKey");
+        restore_blank(api, previous, "secretKey");
+    }
+}
+
+fn restore_blank(api: &mut Value, previous: &Value, field: &str) {
+    let incoming = api.get(field).and_then(|value| value.as_str()).unwrap_or("");
+    if !incoming.trim().is_empty() {
+        return;
+    }
+    let Some(saved) = previous.get(field).and_then(|value| value.as_str()) else {
+        return;
+    };
+    if saved.trim().is_empty() {
+        return;
+    }
+    if let Some(object) = api.as_object_mut() {
+        object.insert(field.to_string(), json!(saved));
+    }
+}
+
+pub fn fetch_catalog_for_renderer(app: &HostCtx, args: &Value) -> Result<Vec<CatalogModel>, String> {
+    let api_id = args
+        .get("apiId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut kind = args
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mut api_key = args
+        .get("apiKey")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mut base_url = args
+        .get("baseUrl")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let typed_key = !api_key.is_empty();
+    if let Some(api_id) = api_id {
+        if let Ok((api, stored_key)) = api_key_for(app, api_id) {
+            if !typed_key {
+                api_key = stored_key;
+                base_url = api.base_url.clone();
+                kind = api.kind.clone();
+            } else if base_url.is_empty() {
+                base_url = api.base_url.clone();
+            }
+            if kind.is_empty() {
+                kind = api.kind;
+            }
+        }
+    }
+    if kind.is_empty() {
+        return Err("Missing or invalid argument: kind".into());
+    }
+    fetch_api_catalog(kind, api_key, base_url)
+}
+
+pub fn save_settings(app: HostCtx, mut settings: Value) -> Result<(), String> {
+    preserve_saved_secrets(&app, &mut settings);
     let migrated = migrate_legacy_providers(settings);
     if migrated
         .get("apis")
@@ -262,7 +374,51 @@ pub fn save_settings(app: HostCtx, settings: Value) -> Result<(), String> {
     let path = settings_path(&app)?;
     let raw = serde_json::to_string_pretty(&migrated)
         .map_err(|error| format!("Could not serialize settings: {error}"))?;
-    fs::write(&path, raw).map_err(|error| format!("Could not write settings: {error}"))
+    write_settings_file(&path, &raw)
+}
+
+fn tighten_settings_permissions(dir: &Path, file: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            format!("Could not restrict config directory permissions: {error}")
+        })?;
+        if file.exists() {
+            fs::set_permissions(file, fs::Permissions::from_mode(0o600)).map_err(|error| {
+                format!("Could not restrict settings file permissions: {error}")
+            })?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (dir, file);
+    Ok(())
+}
+
+fn write_settings_file(path: &Path, raw: &str) -> Result<(), String> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| "settings path has no directory".to_string())?;
+    fs::create_dir_all(dir)
+        .map_err(|error| format!("Could not create config directory: {error}"))?;
+    tighten_settings_permissions(dir, path)?;
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&tmp)
+            .map_err(|error| format!("Could not write settings: {error}"))?;
+        file.write_all(raw.as_bytes())
+            .map_err(|error| format!("Could not write settings: {error}"))?;
+    }
+    fs::rename(&tmp, path).map_err(|error| format!("Could not write settings: {error}"))?;
+    tighten_settings_permissions(dir, path)
 }
 
 fn parse_api_entry(value: &Value) -> Option<ApiEntry> {
@@ -630,7 +786,7 @@ fn fetch_gemini_catalog(api_key: String, base_url: String) -> Result<Vec<Catalog
     } else {
         base
     };
-    let url = format!("{base}/models?key={key}");
+    let url = format!("{base}/models");
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -638,8 +794,11 @@ fn fetch_gemini_catalog(api_key: String, base_url: String) -> Result<Vec<Catalog
     let response = client
         .get(&url)
         .header("Accept", "application/json")
+        .header("x-goog-api-key", key)
         .send()
-        .map_err(|error| format!("Gemini catalog request failed: {error}"))?;
+        .map_err(|error| {
+            crate::http_util::format_reqwest_error("Gemini catalog request failed", error)
+        })?;
     let status = response.status();
     let body = response
         .text()

@@ -10,6 +10,9 @@ interface WorkbenchBridge {
   onMenu: (handler: (id: string) => void) => () => void;
   onDirectorProgress: (handler: (message: string) => void) => () => void;
   toMediaUrl: (path: string) => string;
+  openProject?: () => Promise<string | null>;
+  useProject?: (projectPath: string) => Promise<string | null>;
+  closeProject?: () => Promise<boolean>;
   openDialog: (opts: {
     title?: string;
     defaultPath?: string;
@@ -26,6 +29,7 @@ interface WorkbenchBridge {
     message: string,
     opts?: { title?: string; kind?: "info" | "warning" | "error" },
   ) => Promise<boolean>;
+  openExternal?: (url: string) => Promise<boolean>;
   listRecentProjects?: () => Promise<string[]>;
   rememberRecentProject?: (projectPath: string) => Promise<string[]>;
   removeRecentProject?: (projectPath: string) => Promise<string[]>;

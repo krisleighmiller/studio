@@ -55,10 +55,18 @@ pub fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
     Ok(entries)
 }
 
+const MAX_TEXT_BYTES: u64 = 10_000_000;
+
 pub fn read_text_file(path: String) -> Result<String, String> {
     let path = path_from_str(&path)?;
     if !path.is_file() {
         return Err(format!("Not a file: {}", path.display()));
+    }
+    let len = fs::metadata(&path)
+        .map_err(|error| format!("Could not read file: {error}"))?
+        .len();
+    if len > MAX_TEXT_BYTES {
+        return Err("Text file is larger than 10 MB.".into());
     }
     fs::read_to_string(&path).map_err(|error| format!("Could not read file: {error}"))
 }
@@ -276,14 +284,74 @@ pub fn can_open_in_editor(path: String) -> Result<bool, String> {
 }
 
 /// Return media file bytes as base64 (Electron may prefer a custom protocol instead).
+const MAX_MEDIA_READ_BYTES: u64 = 80_000_000;
+
 pub fn read_media_bytes(path: String) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     let path = path_from_str(&path)?;
     if !path.is_file() {
         return Err(format!("Not a file: {}", path.display()));
     }
+    let len = fs::metadata(&path)
+        .map_err(|error| format!("Could not read media file: {error}"))?
+        .len();
+    if len > MAX_MEDIA_READ_BYTES {
+        return Err("Media file is larger than 80 MB.".into());
+    }
     let data = fs::read(&path).map_err(|error| format!("Could not read media file: {error}"))?;
     Ok(B64.encode(data))
+}
+
+pub fn delete_scoped(path: String) -> Result<(), String> {
+    let path = path_from_str(&path)?;
+    let Some(root) = crate::session::root() else {
+        return Err("Open a project first.".into());
+    };
+    let root_canon = root
+        .canonicalize()
+        .map_err(|error| format!("project root: {error}"))?;
+    let meta = fs::symlink_metadata(&path)
+        .map_err(|error| format!("Not found: {} ({error})", path.display()))?;
+    if meta.file_type().is_symlink() {
+        let parent = path.parent().unwrap_or(&path);
+        let parent_canon = parent
+            .canonicalize()
+            .map_err(|error| format!("path error: {error}"))?;
+        if parent_canon != root_canon && !parent_canon.starts_with(&root_canon) {
+            return Err("Refusing to delete a file outside the project.".into());
+        }
+        return fs::remove_file(&path)
+            .map_err(|error| format!("Could not delete symlink: {error}"));
+    }
+    let canon = path
+        .canonicalize()
+        .map_err(|error| format!("path error: {error}"))?;
+    if canon == root_canon {
+        return Err("Refusing to delete the project root.".into());
+    }
+    if canon != root_canon && !canon.starts_with(&root_canon) {
+        return Err("Refusing to delete a file outside the project.".into());
+    }
+    if meta.is_file() {
+        crate::project_path::move_to_trash(&root_canon, &canon).map(|_| ())
+    } else if meta.is_dir() {
+        let trash = root_canon.join(".workbench-trash");
+        fs::create_dir_all(&trash).map_err(|error| format!("could not create trash: {error}"))?;
+        let name = canon
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "folder".into());
+        let dest = trash.join(format!(
+            "{}-{name}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0)
+        ));
+        fs::rename(&canon, &dest).map_err(|error| format!("Could not trash folder: {error}"))
+    } else {
+        Err("Refusing to delete that path.".into())
+    }
 }
 
 /// Extract the selected out-frame (near last decoded frame) for continuity I2V.
@@ -328,14 +396,8 @@ pub fn extract_frame_at(
         }
     }
 
-    let video_arg = video
-        .to_str()
-        .ok_or_else(|| "Video path is not valid UTF-8".to_string())?
-        .to_string();
-    let out_arg = out
-        .to_str()
-        .ok_or_else(|| "Output path is not valid UTF-8".to_string())?
-        .to_string();
+    let video_arg = crate::ffmpeg_path::ffmpeg_local_arg(&video)?;
+    let out_arg = crate::ffmpeg_path::ffmpeg_local_arg(&out)?;
     let mut command = Command::new("ffmpeg");
     command.arg("-y");
     if let Some(seconds) = at_seconds {

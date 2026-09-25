@@ -14,6 +14,7 @@ use crate::media;
 use crate::prompts;
 use crate::scene_plan::{RenderLane, RenderRequest};
 use crate::settings::{self, ApiEntry};
+use crate::text_writes::{authorize_text_write, change_summary};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -643,10 +644,10 @@ Short chat summary: paths written, scene/sidecar counts, open blockers. Do not p
 Rules:
 - Obey the specialist contract below for content, modes, phases, and formats.
 - Do not ask the user to approve ordinary local file writes — emit the files when ready.
-- Prefer project-relative paths. Defaults when the user did not name outputs:
-  - Script: `Scripts/` draft name inferred from the source/title when possible
-  - Character sheet: `Characters/<Name>_ref.md` (contract filename shape)
-  - Scene plan master: `prod.md`; sidecars: `Scene_Prompts/SceneN.txt`
+- Prefer project-relative paths. The host rejects anything outside these locations:
+  - Script: `Scripts/**/*.md` or `Scripts/**/*.txt`
+  - Character sheet: `Characters/**/*.md` (contract filename shape `Characters/<Name>_ref.md`)
+  - Scene plan is not written here. The host derives `prod.md` and `Scene_Prompts/SceneN.txt`.
 - If references/voices are not ready, still write the plan; leave `Character_Reference: none`, `Voice: none`, empty `reference_assets` as the contract allows.
 - Human-in-the-loop desk: stop after writing (or after one ask). Do not claim to generate media.
 "#;
@@ -1069,25 +1070,52 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
         )));
     }
 
-    let mut written = Vec::new();
-    for (raw_path, contents) in &emit.files {
-        let dest = resolve_under_project(raw_path, project_root).map_err(|e| e.to_string())?;
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Could not create directory {}: {e}", parent.display()))?;
-        }
-        app.emit(
-            "director-progress",
-            format!("{label} writing {}…", dest.display()),
-        );
-        // Preserve trailing newline for markdown/text handoffs.
+    let mut planned = Vec::new();
+    let mut total_bytes = 0usize;
+    for (index, (raw_path, contents)) in emit.files.iter().enumerate() {
         let body = if contents.ends_with('\n') {
             contents.clone()
         } else {
             format!("{contents}\n")
         };
-        fs::write(&dest, body).map_err(|e| format!("Could not write {}: {e}", dest.display()))?;
-        written.push(dest.display().to_string());
+        let authorized = authorize_text_write(
+            specialist,
+            raw_path,
+            project_root,
+            body.len(),
+            index,
+            total_bytes,
+        )?;
+        total_bytes += body.len();
+        planned.push((authorized, body));
+    }
+
+    let mut written = Vec::new();
+    let mut notes = Vec::new();
+    for (authorized, body) in planned {
+        if let Some(parent) = authorized.path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Could not create directory {}: {e}", parent.display()))?;
+        }
+        let previous = if authorized.replacing {
+            fs::read_to_string(&authorized.path).ok()
+        } else {
+            None
+        };
+        if authorized.replacing {
+            notes.push(format!(
+                "`{}`: {}",
+                authorized.relative,
+                change_summary(previous.as_deref(), &body)
+            ));
+        }
+        app.emit(
+            "director-progress",
+            format!("{label} writing {}…", authorized.path.display()),
+        );
+        fs::write(&authorized.path, &body)
+            .map_err(|e| format!("Could not write {}: {e}", authorized.path.display()))?;
+        written.push(authorized.path.display().to_string());
     }
 
     let mut message = emit
@@ -1097,6 +1125,12 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
         message.push_str("\n\n---\nSaved:\n");
         for path in &written {
             message.push_str(&format!("- `{path}`\n"));
+        }
+    }
+    if !notes.is_empty() {
+        message.push_str("\nChanges:\n");
+        for note in &notes {
+            message.push_str(&format!("- {note}\n"));
         }
     }
     if let Some(ask) = emit.ask {
@@ -1274,7 +1308,7 @@ fn run_production_helper(
     }
     if let Some(out) = output_path {
         user_block.push_str(&format!(
-            "## Optional digest output path\nIf you produce a research/idea digest, the host may save your reply to `{out}`. Structure it as digest markdown when mode is digest or the user asked for a digest file.\n\n"
+            "## Optional digest output path\nThe host saves a digest only when `{out}` is under `Research/**/*.md`. Structure the reply as digest markdown when mode is digest or the user asked for a digest file.\n\n"
         ));
     }
     user_block.push_str("## Document dossier\n\n");
@@ -1304,22 +1338,47 @@ fn run_production_helper(
 
     let mut message = reply.clone();
     if let Some(out) = output_path {
-        let dest = resolve_under_project(out, project_root).map_err(|e| e.to_string())?;
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "Could not create digest directory {}: {e}",
-                    parent.display()
-                )
-            })?;
+        let body = format!("{reply}\n");
+        match authorize_text_write("production_helper", out, project_root, body.len(), 0, 0) {
+            Ok(authorized) => {
+                if let Some(parent) = authorized.path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        format!(
+                            "Could not create digest directory {}: {e}",
+                            parent.display()
+                        )
+                    })?;
+                }
+                let previous = if authorized.replacing {
+                    fs::read_to_string(&authorized.path).ok()
+                } else {
+                    None
+                };
+                fs::write(&authorized.path, &body).map_err(|e| {
+                    format!("Could not write digest to {}: {e}", authorized.path.display())
+                })?;
+                message.push_str(&format!(
+                    "\n\n---\nSaved digest to `{}`.",
+                    authorized.path.display()
+                ));
+                if authorized.replacing {
+                    message.push_str(&format!(
+                        " {}",
+                        change_summary(previous.as_deref(), &body)
+                    ));
+                }
+                app.emit(
+                    "director-progress",
+                    format!(
+                        "Production Helper saved digest → {}",
+                        authorized.path.display()
+                    ),
+                );
+            }
+            Err(error) => {
+                message.push_str(&format!("\n\nDigest was not saved: {error}"));
+            }
         }
-        fs::write(&dest, format!("{reply}\n"))
-            .map_err(|e| format!("Could not write digest to {}: {e}", dest.display()))?;
-        message.push_str(&format!("\n\n---\nSaved digest to `{}`.", dest.display()));
-        app.emit(
-            "director-progress",
-            format!("Production Helper saved digest → {}", dest.display()),
-        );
     }
 
     Ok(SpecialistResult::done(message))
@@ -1896,7 +1955,7 @@ pub fn still_image_approval_notes(
     }
     body.push_str(&format!("\nBrief:\n```\n{brief}\n```\n"));
     body.push_str(
-        "\nReply **Approved** to generate with this Settings model, or change the slot in Settings.",
+        "\nUse the Approve button to generate with this Settings model, or change the slot in Settings.",
     );
     let _ = project_root;
     body
@@ -1939,7 +1998,7 @@ fn still_image_batch_approval_notes(
         body.push_str(&format!("- {index}. `{output}`\n"));
     }
     body.push_str(
-        "\nReply **Approved** to generate every still in this plan with the Settings model, or change the slot in Settings.",
+        "\nUse the Approve button to generate every still in this plan with the Settings model, or change the slot in Settings.",
     );
     let _ = project_root;
     body
@@ -3719,7 +3778,7 @@ fn run_model_sheet(
 - shot: `{}`\n\
 - path: `{}`\n\
 - model: `{}`\n\n\
-Review this plate. Reply **Approved** to unlock and generate the remaining pack shots (host-run, one at a time).\n\n{result}\n\n{}",
+Review this plate. Use the Approve button to unlock and generate the remaining pack shots (host-run, one at a time).\n\n{result}\n\n{}",
             shot.id,
             shot.path,
             model.model_id,
@@ -3861,7 +3920,7 @@ pub fn text_sync_approval_notes(
 - handles: head={head_s:.1}s + sync_ms={sync_ms}; tail={tail_s:.1}s\n\
 - output audio: `{out_audio}`\n\
 - output video: `{out_video}`\n\n\
-Paid calls: TTS (unless reusing WAV) + talking video. Reply **Approved** to run."
+Paid calls: TTS (unless reusing WAV) + talking video. Use the Approve button to run."
     )
 }
 
@@ -4054,7 +4113,7 @@ Prompt:\n```\n{prompt}\n```"
 - duration: {duration}s · aspect: {aspect}\n\
 - reference assets (host will upload → `image_urls` / schema fields):\n{ref_lines}\n\n\
 Prompt excerpt:\n```\n{prompt}\n```\n\n\
-Reply **Approved** only if this model + refs + output path look right."
+Use the Approve button only if this model + refs + output path look right."
     )
 }
 

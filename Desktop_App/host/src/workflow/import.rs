@@ -1284,11 +1284,62 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
     })
 }
 
+fn is_persisted_path_key(key: &str) -> bool {
+    key == "path" || key == "dir" || key.ends_with("_path") || key == "approved_start_frame"
+}
+
+fn reject_persisted_path(key: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    if value.contains('\0') {
+        return Err(format!("workflow state field `{key}` contains a NUL byte"));
+    }
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return Err(format!(
+            "workflow state field `{key}` is an absolute path"
+        ));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!("workflow state field `{key}` contains `..`"));
+    }
+    Ok(())
+}
+
+fn reject_unsafe_persisted_paths(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                if is_persisted_path_key(key) {
+                    if let Some(path) = child.as_str() {
+                        reject_persisted_path(key, path)?;
+                    }
+                }
+                reject_unsafe_persisted_paths(child)?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                reject_unsafe_persisted_paths(child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
     let path = project_root.join(STATE_REL);
     if path.is_file() {
         let text = fs::read_to_string(&path)
             .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        let parsed: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| format!("workflow state is not valid JSON: {error}"))?;
+        reject_unsafe_persisted_paths(&parsed)?;
         let mut state = ProjectState::from_json(&text)?;
         let mut repaired = uniquify_duplicate_asset_ids(&mut state);
         repaired |= restore_approved_look_pointers(&mut state);
@@ -1422,6 +1473,7 @@ mod tests {
             scope: None,
             progress: None,
             cost: None,
+            estimated_cost: None,
             currency: None,
             retry_of: None,
         });
@@ -1517,6 +1569,7 @@ mod tests {
             scope: None,
             progress: None,
             cost: None,
+            estimated_cost: None,
             currency: None,
             retry_of: None,
         });
@@ -1573,6 +1626,7 @@ mod tests {
             scope: None,
             progress: None,
             cost: None,
+            estimated_cost: None,
             currency: None,
             retry_of: None,
         });
@@ -1710,6 +1764,7 @@ mod tests {
             scope: None,
             progress: None,
             cost: None,
+            estimated_cost: None,
             currency: None,
             retry_of: None,
         }
@@ -1761,5 +1816,27 @@ mod tests {
                 .and_then(|source| source.asset_id.as_deref()),
             Some("asset_78")
         );
+    }
+
+    #[test]
+    fn load_rejects_parent_and_absolute_state_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(STATE_REL);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"assets":[{"path":"../escape.png"}]}"#,
+        )
+        .unwrap();
+        let error = load_or_import(dir.path()).unwrap_err();
+        assert!(error.contains(".."), "{error}");
+
+        fs::write(
+            &path,
+            r#"{"assets":[{"path":"/etc/passwd"}]}"#,
+        )
+        .unwrap();
+        let error = load_or_import(dir.path()).unwrap_err();
+        assert!(error.contains("absolute"), "{error}");
     }
 }

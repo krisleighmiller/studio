@@ -10,8 +10,6 @@ use base64::Engine;
 use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
-use std::fs;
-use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -153,28 +151,8 @@ fn resolve_image_input(raw: &str, project_root: Option<&str>) -> Result<String, 
     if raw.starts_with("http://") || raw.starts_with("https://") || raw.starts_with("data:") {
         return Ok(raw.to_string());
     }
-    let path = if PathBuf::from(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else if let Some(root) = project_root {
-        PathBuf::from(root).join(raw)
-    } else {
-        PathBuf::from(raw)
-    };
-    if !path.is_file() {
-        return Err(format!("Kling image path not found: {}", path.display()));
-    }
-    let bytes = fs::read(&path).map_err(|error| format!("Could not read image: {error}"))?;
-    let mime = match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        _ => "image/png",
-    };
+    let path = crate::media_util::resolve_path(raw, project_root)?;
+    let (mime, bytes) = crate::media_util::load_media(&path)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(format!("data:{mime};base64,{b64}"))
 }

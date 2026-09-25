@@ -68,6 +68,7 @@ pub struct SceneReport {
     pub mix_verdict: MixVerdict,
     pub warnings: Vec<String>,
     pub summary: String,
+    pub navigation: Vec<crate::workflow::recipe::StageNav>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,7 +85,7 @@ pub struct ProjectReport {
     pub recipes: Vec<crate::workflow::recipe::RecipeChoice>,
 }
 
-fn scene_report(scene: &SceneRecord) -> SceneReport {
+fn scene_report(scene: &SceneRecord, graph: &crate::workflow::recipe::RecipeGraph) -> SceneReport {
     let mix = MixCounts::of(scene);
     let approved_start_frames = scene
         .cuts
@@ -216,11 +217,23 @@ fn scene_report(scene: &SceneRecord) -> SceneReport {
         mix_verdict,
         warnings,
         summary: lines.join("\n"),
+        navigation: crate::workflow::recipe::navigation(graph, scene),
     }
 }
 
 pub fn project_report(state: &ProjectState) -> ProjectReport {
-    let scenes: Vec<SceneReport> = state.scenes.iter().map(scene_report).collect();
+    let active = crate::workflow::recipe::graph(
+        state
+            .profile
+            .as_ref()
+            .map(|profile| profile.recipe)
+            .unwrap_or_default(),
+    );
+    let scenes: Vec<SceneReport> = state
+        .scenes
+        .iter()
+        .map(|scene| scene_report(scene, active))
+        .collect();
     let identity_ready = state.characters.iter().filter(|c| c.identity_ready).count();
     let voice_ready = state.characters.iter().filter(|c| c.voice_ready).count();
     let mut warnings = state.notes.clone();

@@ -57,16 +57,8 @@ fn map_size(params: &Value) -> String {
 }
 
 fn resolve_local_image(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
-    let path = if PathBuf::from(raw).is_absolute() {
-        PathBuf::from(raw)
-    } else if let Some(root) = project_root {
-        PathBuf::from(root).join(raw)
-    } else {
-        PathBuf::from(raw)
-    };
-    if !path.is_file() {
-        return Err(format!("Image path not found: {}", path.display()));
-    }
+    let path = crate::media_util::resolve_path(raw, project_root)?;
+    crate::media_util::ensure_media_file(&path)?;
     Ok(path)
 }
 
@@ -79,28 +71,18 @@ fn client() -> Result<reqwest::blocking::Client, String> {
 }
 
 fn write_b64_image(b64: &str, dest: &str, project_root: Option<&str>) -> Result<String, String> {
-    let path = {
-        let raw = dest.trim();
-        let path = if PathBuf::from(raw).is_absolute() {
-            PathBuf::from(raw)
-        } else if let Some(root) = project_root {
-            PathBuf::from(root).join(raw)
-        } else {
-            PathBuf::from(raw)
-        };
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)
-                    .map_err(|error| format!("Could not create parent dirs: {error}"))?;
-            }
-        }
-        path
-    };
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
         .map_err(|error| format!("Could not decode image base64: {error}"))?;
     if bytes.is_empty() {
         return Err("OpenAI image response was empty".into());
+    }
+    let path = crate::media_util::resolve_write_path(dest, project_root)?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create parent dirs: {error}"))?;
+        }
     }
     fs::write(&path, &bytes).map_err(|error| format!("Could not write image: {error}"))?;
     Ok(json!({

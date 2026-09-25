@@ -9,7 +9,7 @@ use crate::scene_plan::strategy::SceneStrategy;
 use crate::script::{DialogueLine, ScriptBeat};
 use serde::{Deserialize, Serialize};
 
-pub const WORKFLOW_VERSION: u32 = 1;
+pub const WORKFLOW_VERSION: u32 = 2;
 pub const STATE_REL: &str = "Preproduction/workflow_state.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +53,21 @@ impl WorkflowStage {
             Self::Render => "render",
             Self::TakeReview => "take_review",
             Self::Assemble => "assemble",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|stage| stage.as_str() == value)
+    }
+}
+
+impl StageStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Present => "present",
+            Self::Draft => "draft",
+            Self::Approved => "approved",
         }
     }
 }
@@ -1113,6 +1128,8 @@ pub struct JobRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
     /// Job id this attempt retries. The previous job stays in the ledger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1167,6 +1184,7 @@ impl JobRecord {
             scope: None,
             progress: None,
             cost: None,
+            estimated_cost: None,
             currency: None,
             retry_of: None,
             attempts: vec![JobAttempt {
@@ -1636,6 +1654,41 @@ pub struct ProjectState {
     pub notes: Vec<String>,
 }
 
+/// Accept workflow files from the previous schema and unknown recipe ids.
+/// Newer files than this build are refused. Recipe work areas stay derived.
+fn migrate_workflow_json(value: &mut serde_json::Value) -> Result<Vec<String>, String> {
+    let version = value.get("version").and_then(|item| item.as_u64()).unwrap_or(1);
+    if version > u64::from(WORKFLOW_VERSION) {
+        return Err(format!(
+            "workflow state version {version} is not supported (expected {WORKFLOW_VERSION})"
+        ));
+    }
+    let mut warnings = Vec::new();
+    if let Some(recipe) = value
+        .pointer("/profile/recipe")
+        .and_then(|item| item.as_str())
+    {
+        if ProductionRecipe::parse(recipe).is_none() {
+            warnings.push(format!(
+                "Unknown recipe `{recipe}` loaded as narrative dialogue."
+            ));
+            if let Some(profile) = value.get_mut("profile").and_then(|item| item.as_object_mut()) {
+                profile.insert(
+                    "recipe".into(),
+                    serde_json::Value::String("narrative_dialogue".into()),
+                );
+            }
+        }
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "version".into(),
+            serde_json::Value::from(WORKFLOW_VERSION),
+        );
+    }
+    Ok(warnings)
+}
+
 impl ProjectState {
     pub fn new() -> Self {
         ProjectState {
@@ -1655,15 +1708,18 @@ impl ProjectState {
     }
 
     pub fn from_json(text: &str) -> Result<Self, String> {
-        let value: serde_json::Value =
+        let mut value: serde_json::Value =
             serde_json::from_str(text).map_err(|e| format!("workflow state json: {e}"))?;
-        let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
-        if version != u64::from(WORKFLOW_VERSION) {
-            return Err(format!(
-                "workflow state version {version} is not supported (expected {WORKFLOW_VERSION})"
-            ));
+        let warnings = migrate_workflow_json(&mut value)?;
+        let mut state: Self = serde_json::from_value(value)
+            .map_err(|e| format!("workflow state json: {e}"))?;
+        for warning in warnings {
+            if !state.notes.iter().any(|note| note == &warning) {
+                state.notes.push(warning);
+            }
         }
-        serde_json::from_value(value).map_err(|e| format!("workflow state json: {e}"))
+        state.version = WORKFLOW_VERSION;
+        Ok(state)
     }
 
     pub fn to_json(&self) -> Result<String, String> {
@@ -1824,6 +1880,7 @@ mod tests {
         assert!(job.started_at.is_none());
         assert!(job.completed_at.is_none());
         assert!(job.cost.is_none());
+        assert!(job.estimated_cost.is_none());
         assert!(job.currency.is_none());
         assert!(job.scope.is_none());
         assert_eq!(job.elapsed_label(), "unknown");

@@ -19,6 +19,8 @@ export function renderSurfaceNav(
     button.type = "button";
     button.className = item.active ? "active" : "";
     button.dataset.status = item.status;
+    button.disabled = !item.available;
+    if (item.disabledReason) button.title = item.disabledReason;
     if (item.active) button.setAttribute("aria-current", "page");
     const dot = document.createElement("span");
     dot.className = "studio-surface-dot";
@@ -32,7 +34,10 @@ export function renderSurfaceNav(
       status.textContent = item.statusLabel;
       button.append(status);
     }
-    button.addEventListener("click", () => onSelect(item.id));
+    button.addEventListener("click", () => {
+      if (!item.available) return;
+      onSelect(item.id);
+    });
     nav.append(button);
   }
   return nav;

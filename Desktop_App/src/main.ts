@@ -2,9 +2,12 @@ import {
   ask,
   bindHostEvents,
   decodeOpenRecentMenuAction,
+  closeProjectSession,
   invoke,
   openDialog,
+  openProjectFolder,
   rememberRecentProject,
+  useRecentProject,
   removeRecentProject,
   saveDialog,
   toMediaUrlAsync,
@@ -1382,7 +1385,21 @@ function renderChat(): void {
           ? "Director"
           : "Workbench";
     bubble.querySelector(".role")!.textContent = roleLabel;
-    bubble.querySelector("p")!.textContent = message.text;
+    const approval = message.text.match(/\[\[workbench_approve:([A-Za-z0-9]+)\]\]/);
+    bubble.querySelector("p")!.textContent = message.text
+      .replace(/\[\[workbench_approve:[A-Za-z0-9]+\]\]/, "")
+      .trim();
+    if (approval && message.role === "assistant") {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "primary-button";
+      button.textContent = "Approve";
+      const actionId = approval[1];
+      button.addEventListener("click", () => {
+        void approveDirectorAction(message.id, actionId);
+      });
+      bubble.append(button);
+    }
     els.chatMessages.append(bubble);
   }
 
@@ -2809,8 +2826,21 @@ async function confirmOpenProjectSwitch(): Promise<boolean> {
   );
 }
 
-async function openProjectAt(selected: string): Promise<void> {
+async function openProjectAt(
+  selected: string,
+  options?: { sessionReady?: boolean },
+): Promise<void> {
   const root = selected.replace(/\/+$/, "");
+  if (!options?.sessionReady) {
+    if (!(await confirmOpenProjectSwitch())) return;
+    try {
+      await useRecentProject(root);
+    } catch {
+      setStatus("Recent project folder is missing", root);
+      void removeRecentProject(root);
+      return;
+    }
+  }
   try {
     await invoke("list_dir", { path: root });
   } catch {
@@ -2818,8 +2848,6 @@ async function openProjectAt(selected: string): Promise<void> {
     void removeRecentProject(root);
     return;
   }
-
-  if (!(await confirmOpenProjectSwitch())) return;
 
   projectRoot = root;
   selectedPath = null;
@@ -2844,13 +2872,10 @@ async function openProjectAt(selected: string): Promise<void> {
 }
 
 async function openProject(): Promise<void> {
-  const selected = await openDialog({
-    directory: true,
-    multiple: false,
-    title: "Open Project Folder",
-  });
-  if (!selected || Array.isArray(selected)) return;
-  await openProjectAt(selected);
+  if (!(await confirmOpenProjectSwitch())) return;
+  const selected = await openProjectFolder();
+  if (!selected) return;
+  await openProjectAt(selected, { sessionReady: true });
 }
 
 async function closeProject(): Promise<void> {
@@ -2878,6 +2903,7 @@ async function closeProject(): Promise<void> {
   delete els.mediaVideo.dataset.path;
   delete els.mediaAudio.dataset.path;
   closeFindBar();
+  await closeProjectSession();
   await renderExplorer();
   renderEditor();
   setStatus("Project closed");
@@ -3222,6 +3248,94 @@ function clearDirectorProgressMessage(): void {
   directorProgressMessageId = null;
 }
 
+function currentDirectorContext() {
+  const settings = getSettings();
+  const editor = activeEditor();
+  const scope = directorTurnSelection();
+  const tab = activeChat();
+  return {
+    projectRoot,
+    selectedPath,
+    focusedEditorPath: isWorkflowTab(editor)
+      ? workflowSelection().path
+      : (editor?.path ?? null),
+    focusedEditorExcerpt: focusedEditorExcerpt(editor),
+    attachedPaths: [...(tab?.attachments ?? [])],
+    capabilityDefaults: settings.capabilityDefaults ?? {},
+    adultContentEnabled: Boolean(settings.adultContentEnabled),
+    adultCapabilityDefaults: settings.adultCapabilityDefaults ?? {},
+    workflowStage: scope.stage,
+    workflowSceneId: scope.sceneId,
+    workflowSceneStableId: scope.sceneStableId,
+    workflowShotStableId: scope.shotStableId,
+    workflowAssetId: scope.assetId,
+    workflowLookSlotId: scope.lookSlotId,
+    workflowRequirementId: scope.requirementId,
+    workflowWorkArea: scope.workArea,
+  };
+}
+
+async function approveDirectorAction(
+  messageId: string,
+  actionId: string,
+): Promise<void> {
+  const tab = activeChat();
+  if (!tab || tab.busy || chatSendInFlight) return;
+  const selected = getSettings().selectedChatModel;
+  if (!selected?.modelId) {
+    setStatus("Select a chat model before approving");
+    return;
+  }
+  tab.busy = true;
+  chatSendInFlight = true;
+  renderChat();
+  setStatus("Running approved plan…", selected.modelId);
+  try {
+    const result = await invoke<{
+      reply: string;
+      model: string;
+      toolEvents: string[];
+      continueSuggested?: boolean;
+    }>("director_approve", {
+      id: actionId,
+      model: selected.modelId,
+      apiId: selected.apiId,
+      context: currentDirectorContext(),
+    });
+    const source = tab.messages.find((message) => message.id === messageId);
+    if (source) {
+      source.text = source.text
+        .replace(/\[\[workbench_approve:[A-Za-z0-9]+\]\]/, "")
+        .trim();
+    }
+    tab.messages.push({
+      id: uid("msg"),
+      role: "assistant",
+      text: result.reply,
+    });
+    setStatus("Approved plan finished", result.model);
+    if (projectRoot) {
+      await renderExplorer();
+      try {
+        await refreshWorkflowDesk();
+      } catch {
+        /* desk refresh is best-effort after an approval */
+      }
+    }
+  } catch (error) {
+    tab.messages.push({
+      id: uid("msg"),
+      role: "system",
+      text: `Approval failed: ${error}`,
+    });
+    setStatus(`Approval error: ${error}`);
+  } finally {
+    tab.busy = false;
+    chatSendInFlight = false;
+    renderChat();
+  }
+}
+
 async function sendChatMessage(
   text: string,
   options?: { autoContinue?: boolean; resume?: boolean },
@@ -3288,8 +3402,6 @@ async function sendChatMessage(
   );
   await paintSoon();
 
-  const editor = activeEditor();
-  const scope = directorTurnSelection();
   try {
     const result = await invoke<{
       reply: string;
@@ -3304,26 +3416,7 @@ async function sendChatMessage(
         apiId: selected.apiId,
         messages: directorHistory(tab),
         resume: isResume,
-        context: {
-          projectRoot,
-          selectedPath,
-          focusedEditorPath: isWorkflowTab(editor)
-            ? workflowSelection().path
-            : (editor?.path ?? null),
-          focusedEditorExcerpt: focusedEditorExcerpt(editor),
-          attachedPaths: [...tab.attachments],
-          capabilityDefaults: settings.capabilityDefaults ?? {},
-          adultContentEnabled: Boolean(settings.adultContentEnabled),
-          adultCapabilityDefaults: settings.adultCapabilityDefaults ?? {},
-          workflowStage: scope.stage,
-          workflowSceneId: scope.sceneId,
-          workflowSceneStableId: scope.sceneStableId,
-          workflowShotStableId: scope.shotStableId,
-          workflowAssetId: scope.assetId,
-          workflowLookSlotId: scope.lookSlotId,
-          workflowRequirementId: scope.requirementId,
-          workflowWorkArea: scope.workArea,
-        },
+        context: currentDirectorContext(),
       },
     });
 
@@ -3387,9 +3480,13 @@ async function sendChatMessage(
     }
 
     // Specialist hop (model sheet / collect) with a pending action in the reply.
+    const awaitingApproval = /\[\[workbench_approve:[A-Za-z0-9]+\]\]/.test(
+      result.reply,
+    );
     if (
       !halted &&
       result.continueSuggested &&
+      !awaitingApproval &&
       autoContinueDepth < MAX_AUTO_CONTINUE
     ) {
       autoContinueDepth += 1;
@@ -4487,7 +4584,44 @@ async function bindMenuAndProgress(): Promise<void> {
   });
 }
 
+function bindPreviewLinkGuard(): void {
+  const onClick = (event: MouseEvent) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const anchor = target.closest("a");
+    if (!(anchor instanceof HTMLAnchorElement)) return;
+    const host = anchor.closest("#markdown-preview, #docs-view");
+    if (!host) return;
+    const href = anchor.getAttribute("href") || "";
+    if (href.startsWith("#") && !href.startsWith("#/")) {
+      event.preventDefault();
+      const id = decodeURIComponent(href.slice(1));
+      host.querySelector(`#${CSS.escape(id)}`)?.scrollIntoView();
+      return;
+    }
+    event.preventDefault();
+    void openPreviewLink(href);
+  };
+  document.addEventListener("click", onClick);
+  document.addEventListener("auxclick", onClick);
+}
+
+async function openPreviewLink(href: string): Promise<void> {
+  const openExternal = window.workbench?.openExternal;
+  if (!openExternal) {
+    setStatus("That link stays in the app");
+    return;
+  }
+  try {
+    const opened = await openExternal(href);
+    setStatus(opened ? "Opened the link in your browser" : "Link was not opened");
+  } catch (error) {
+    setStatus(`Could not open link: ${error}`);
+  }
+}
+
 async function boot(): Promise<void> {
+  bindPreviewLinkGuard();
   bindSettingsHost({
     root: els.settingsView,
     onStatus: setStatus,

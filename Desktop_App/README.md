@@ -1,13 +1,14 @@
 # Video Workbench
 
-Desktop production desk. Shell is **Electron** (Chromium); job/host logic runs in a **Rust sidecar** (`host/`). Built stage by stage against `Studio/Dev_Notes/Workbench_Spec.md`.
+Desktop production studio. Shell is **Electron** (Chromium); job/host logic runs in a **Rust sidecar** (`host/`).
 
-## Current stage — desk + Director specialists
+Opening a project lands in **Studio**. The rail is Home, Studio, Files, Assets, and Voices. Studio is the production workspace: Plan, Produce, and Finish over the recipe stages, with Jobs under the scene list and Director on the right. Files, media viewing, Settings, and Voices stay on their own surfaces. **View → Studio** (`Ctrl+Alt+P`) returns there.
+
+## Director and specialists
 
 - Native menu bar: File / Edit / View / Help
-- Resizable three-panel layout: Explorer | Editor | Chat
-- Editor tabs (text, markdown preview, image / audio / video)
-- File → Open Project… opens any folder as the project root
+- Files keeps the explorer, editor tabs (text, markdown preview, image, audio, video), and media viewer
+- File → Open Project… opens any folder as the project root and lands in Studio
 - Settings: user-named APIs with protocol kinds (Atlas, OpenAI-compatible, Anthropic, Gemini, Ollama, ElevenLabs, Kling, Replicate, fal.ai, Stability, Runway, Luma, Sync Labs), model catalogs, **Generation defaults** + optional **Adult content** (spicy) slots, chat model picker. Say **adult** / **nsfw** in Director chat to use Adult slots for that turn.
 - Generative routing by model → Settings API: Atlas, Kling (JWT), OpenAI Images, Gemini/Imagen, Replicate, fal.ai, Stability, Runway, Luma, Sync Labs (lip sync)
 - Director action protocol: models propose validated actions; host enforces paths, approval, and provider calls

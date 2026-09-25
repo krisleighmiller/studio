@@ -1,6 +1,7 @@
 //! Recipe graphs. The host reads stages, dependencies, required roles, and
 //! readiness from this data. It does not branch on the recipe name.
 use crate::scene_plan::handoff::SpeechMode;
+use crate::workflow::post::CutVersionStage;
 use crate::workflow::state::{
     CutRecord, ProductionRecipe, ProjectState, SceneRecord, StageStatus, WorkflowStage,
 };
@@ -278,6 +279,29 @@ pub fn clear_mouth(cut: &mut CutRecord) {
     }
 }
 
+fn assemble_readiness(scene: &SceneRecord) -> StageStatus {
+    let Some(post) = scene.post.as_ref() else {
+        return StageStatus::Missing;
+    };
+    if post.picture_locked_id.is_some() {
+        return StageStatus::Approved;
+    }
+    if post.versions.iter().any(|version| {
+        version
+            .assembly_path
+            .as_ref()
+            .is_some_and(|path| !path.is_empty())
+            || matches!(
+                version.stage,
+                CutVersionStage::Assembly | CutVersionStage::FineCut | CutVersionStage::PictureLock
+            )
+    }) {
+        StageStatus::Present
+    } else {
+        StageStatus::Missing
+    }
+}
+
 fn readiness(stage: WorkflowStage, scene: &SceneRecord, any_characters: bool) -> StageStatus {
     match stage {
         WorkflowStage::Script => {
@@ -366,7 +390,7 @@ fn readiness(stage: WorkflowStage, scene: &SceneRecord, any_characters: bool) ->
                 StageStatus::Missing
             }
         }
-        WorkflowStage::Assemble => StageStatus::Missing,
+        WorkflowStage::Assemble => assemble_readiness(scene),
     }
 }
 
@@ -530,5 +554,49 @@ mod tests {
             .requirements
             .iter()
             .all(|item| item.kind != RequirementKind::Cast && item.kind != RequirementKind::Voice));
+    }
+
+    #[test]
+    fn assemble_readiness_follows_a_review_export() {
+        let mut state = ProjectState::new();
+        let mut cut = CutRecord::new(CutId::new(1, 1));
+        cut.stable_id = "shot_1".into();
+        cut.takes.push(TakeRecord {
+            id: "take_1".into(),
+            path: "a.mp4".into(),
+            status: TakeStatus::Selected,
+            notes: None,
+        });
+        cut.selected_take = Some("take_1".into());
+        state.scene_mut(1, "Scene 1").cuts = vec![cut];
+        apply_stages(&mut state);
+        assert_eq!(
+            state.scene(1).unwrap().stages.assemble,
+            StageStatus::Missing
+        );
+        crate::workflow::post::attach_review_export(&mut state, 1, "Final/Scene1_master.mp4")
+            .unwrap();
+        assert_eq!(
+            state.scene(1).unwrap().cuts[0].selected_take.as_deref(),
+            Some("take_1")
+        );
+        assert_eq!(
+            state.scene(1).unwrap().cuts[0].takes[0].status,
+            TakeStatus::UsedInAssembly
+        );
+        apply_stages(&mut state);
+        assert_eq!(
+            state.scene(1).unwrap().stages.assemble,
+            StageStatus::Present
+        );
+        let version = state.scene(1).unwrap().post.as_ref().unwrap().versions[0]
+            .id
+            .clone();
+        crate::workflow::post::lock_picture(&mut state, 1, &version).unwrap();
+        apply_stages(&mut state);
+        assert_eq!(
+            state.scene(1).unwrap().stages.assemble,
+            StageStatus::Approved
+        );
     }
 }

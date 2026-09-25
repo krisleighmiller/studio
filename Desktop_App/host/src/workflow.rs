@@ -12,6 +12,7 @@ pub mod production;
 pub mod recipe;
 pub mod report;
 pub mod route;
+pub mod scope;
 pub mod sketches;
 pub mod sources;
 pub mod start_frames;
@@ -55,6 +56,26 @@ fn arg_u32(args: &Value, key: &str) -> Result<u32, String> {
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
         })
         .ok_or_else(|| format!("Missing or invalid argument: {key}"))
+}
+
+fn opt_f64(args: &Value, key: &str) -> Result<Option<f64>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| format!("{key} must be a finite number")),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
+        Some(Value::String(value)) => value
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|parsed| parsed.is_finite())
+            .map(Some)
+            .ok_or_else(|| format!("{key} must be a finite number")),
+        _ => Err(format!("{key} must be a finite number")),
+    }
 }
 
 fn opt_str(args: &Value, key: &str) -> Option<String> {
@@ -1086,18 +1107,6 @@ pub fn cmd_set_visual_source(args: &Value) -> Result<Value, String> {
         predecessor,
         asset_id.as_deref(),
     )?;
-    let bound_path = predecessor
-        .filter(|predecessor| {
-            state
-                .scene(predecessor.source_scene)
-                .and_then(|scene| scene.cuts.iter().find(|cut| cut.id == *predecessor))
-                .and_then(|cut| cut.selected_take.as_ref())
-                .is_some()
-        })
-        .map(|_| {
-            sources::bind_selected_exit_frame(Path::new(&root), &mut state, scene_id, cut_number)
-        })
-        .transpose()?;
     let ready = state
         .scene(scene_id)
         .and_then(|scene| scene.cuts.iter().find(|cut| cut.id.cut == cut_number))
@@ -1113,9 +1122,11 @@ pub fn cmd_set_visual_source(args: &Value) -> Result<Value, String> {
             } else {
                 "planned; concrete source unresolved"
             },
-            bound_path
-                .map(|path| format!(" Bound selected predecessor exit frame: `{path}`."))
-                .unwrap_or_default()
+            if strategy == VisualSourceStrategy::PreviousSelectedTakeExitFrame && !ready {
+                " Bind a reviewed continuity frame before this cut can render."
+            } else {
+                ""
+            }
         ),
     )
 }
@@ -1124,14 +1135,28 @@ pub fn cmd_bind_continuity_frame(args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;
     let cut_number = arg_u32(args, "cut")?;
+    let frame_time = opt_f64(args, "frameTimeSeconds")?;
     let mut state = import::load_state(Path::new(&root))?;
-    let path =
-        sources::bind_selected_exit_frame(Path::new(&root), &mut state, scene_id, cut_number)?;
+    let path = sources::bind_selected_exit_frame(
+        Path::new(&root),
+        &mut state,
+        scene_id,
+        cut_number,
+        frame_time,
+    )?;
+    let stored = state
+        .scene(scene_id)
+        .and_then(|scene| scene.cuts.iter().find(|cut| cut.id.cut == cut_number))
+        .and_then(|cut| cut.visual_source.as_ref())
+        .and_then(|source| source.frame_time_seconds);
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_note(
         imported,
         format!(
-            "Bound selected predecessor exit frame to Scene {scene_id} Cut {cut_number}: `{path}`."
+            "Bound continuity frame at {}s to Scene {scene_id} Cut {cut_number}: `{path}`.",
+            stored
+                .map(|value| format!("{value:.3}"))
+                .unwrap_or_else(|| "unknown".into())
         ),
     )
 }
@@ -1147,52 +1172,19 @@ pub fn cmd_set_take_status(args: &Value) -> Result<Value, String> {
     })?;
     let mut state = import::load_state(Path::new(&root))?;
     let invalidated = sources::set_take_status(&mut state, scene_id, cut_number, &take_id, status)?;
-    let dependent_cuts: Vec<(u32, u32)> = if status == TakeStatus::Selected {
-        let predecessor = CutId::new(scene_id, cut_number);
-        state
-            .scenes
-            .iter()
-            .flat_map(|scene| {
-                scene.cuts.iter().filter_map(move |cut| {
-                    cut.visual_source
-                        .as_ref()
-                        .filter(|source| {
-                            source.strategy == VisualSourceStrategy::PreviousSelectedTakeExitFrame
-                                && source.predecessor == Some(predecessor)
-                        })
-                        .map(|_| (scene.id, cut.id.cut))
-                })
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let mut rebound = 0;
-    for (dependent_scene, dependent_cut) in dependent_cuts {
-        sources::bind_selected_exit_frame(
-            Path::new(&root),
-            &mut state,
-            dependent_scene,
-            dependent_cut,
-        )?;
-        rebound += 1;
-    }
     let imported = import::save_project(Path::new(&root), state)?;
     let suffix = if invalidated == 0 {
         String::new()
     } else {
-        format!(" {invalidated} dependent continuity source(s) must be rebound.")
+        format!(
+            " {invalidated} dependent continuity source(s) are unbound and stay render-blocked until a frame is bound again."
+        )
     };
     result_with_note(
         imported,
         format!(
-            "Marked take `{take_id}` as `{}` for Scene {scene_id} Cut {cut_number}.{suffix}{}",
-            status.label(),
-            if rebound == 0 {
-                String::new()
-            } else {
-                format!(" Rebound {rebound} dependent continuity frame(s).")
-            }
+            "Marked take `{take_id}` as `{}` for Scene {scene_id} Cut {cut_number}.{suffix}",
+            status.label()
         ),
     )
 }
@@ -1226,6 +1218,7 @@ pub fn cmd_prepare_assemble(args: &Value) -> Result<Value, String> {
     let cut_count = cuts.len();
     let mut missing = Vec::new();
     let mut selected = Vec::new();
+    let mut take_ids = Vec::new();
     for cut in cuts {
         let take = cut.selected_take.as_ref().and_then(|selected| {
             cut.takes
@@ -1233,6 +1226,7 @@ pub fn cmd_prepare_assemble(args: &Value) -> Result<Value, String> {
                 .find(|take| take.id == *selected || take.path == *selected)
         });
         if let Some(take) = take {
+            take_ids.push(take.id.clone());
             selected.push(json!({ "id": cut.id.cut, "video": take.path }));
         } else {
             missing.push(cut.id.cut);
@@ -1279,17 +1273,57 @@ pub fn cmd_prepare_assemble(args: &Value) -> Result<Value, String> {
     let mut card =
         format!("Assemble Scene {scene_id}\nCuts: {cut_count}\nMaster: `{output_path}`\n\n");
     card.push_str(&format_approval_request(&action, &validated));
+    crate::workflow::identity::assign(&mut state);
+    let scene_stable = state
+        .scene(scene_id)
+        .map(|scene| scene.stable_id.clone())
+        .unwrap_or_default();
     let job_id = state.next_job_id();
-    state.jobs.push(crate::workflow::state::JobRecord {
-        output_path: Some(output_path.clone()),
-        raw_provider_id: Some(format!("scene_{scene_id}")),
-        ..crate::workflow::state::JobRecord::open(job_id, "assemble")
-    });
+    let mut job = crate::workflow::state::JobRecord::open(job_id, "assemble");
+    job.output_path = Some(output_path.clone());
+    job.raw_provider_id = Some(format!("scene_{scene_id}"));
+    job.input_asset_ids = take_ids;
+    if !scene_stable.is_empty() {
+        job.scope = Some(crate::workflow::state::JobScope {
+            kind: "scene".into(),
+            id: scene_stable,
+        });
+    }
+    state.jobs.push(job);
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_pending(
         imported,
         format!("Prepared Scene {scene_id} assembly from {cut_count} selected takes."),
         card,
+    )
+}
+
+pub fn cmd_add_alternate_shot(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let stable_id = identity::add_alternate_shot(&mut state, scene_id)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    let cut = imported
+        .state
+        .scene(scene_id)
+        .and_then(|scene| {
+            scene
+                .cuts
+                .iter()
+                .find(|cut| cut.stable_id == stable_id)
+        })
+        .ok_or_else(|| format!("alternate shot `{stable_id}` was not saved"))?;
+    if cut.production_note_path.is_some() || cut.visual_source.is_some() {
+        return Err("alternate shot must stay incomplete until a source and note are chosen".into());
+    }
+    if cut.sketch.is_none() {
+        return Err("alternate shot is missing an editable sketch".into());
+    }
+    let label = cut.id.cut;
+    result_with_note(
+        imported,
+        format!("Added alternate angle Cut {label} as `{stable_id}`. Existing shot ids were left unchanged."),
     )
 }
 

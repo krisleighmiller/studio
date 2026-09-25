@@ -29,11 +29,24 @@ import {
   type ShotRole,
   type SpeechMode,
   type StageId,
-  type StageStatus,
   type TakeRecord,
   type VisualSourceStrategy,
   type WorkflowImportResult,
 } from "./workflowTypes";
+import { buildSceneList, buildSceneLook, sceneSelectionKey } from "./studio/sceneLookModel";
+import { renderSceneListView, renderSceneLookView, type SceneLookIntent } from "./studio/sceneLookView";
+import { buildJobsModel, type JobFilter } from "./studio/jobsModel";
+import { renderJobsView, type JobsIntent } from "./studio/jobsView";
+import { buildFinishModel, latestReviewExport } from "./studio/finishModel";
+import { renderFinishView, type FinishIntent } from "./studio/finishView";
+import {
+  surfaceBanner,
+  surfacesForArea,
+  workAreaForStage,
+  type SurfaceId,
+  type WorkArea,
+} from "./studio/surfaces";
+import { renderSurfaceNav } from "./studio/surfaceNav";
 
 export type WorkflowSelection = {
   sceneId: number | null;
@@ -41,6 +54,12 @@ export type WorkflowSelection = {
   path: string | null;
   excerpt: string | null;
   stage: StageId | null;
+  sceneStableId: string | null;
+  shotStableId: string | null;
+  assetId: string | null;
+  lookSlotId: string | null;
+  requirementId: string | null;
+  workArea: "plan" | "produce" | "finish" | null;
 };
 
 type DeskHooks = {
@@ -73,8 +92,16 @@ let report: ProjectReport | null = null;
 let loadError: string | null = null;
 let selectedSceneId: number | null = null;
 let selectedCut: number | null = null;
+let selectedLookSlotId: string | null = null;
+const suppressedDirectorScope = new Set<string>();
+let focusedLookSlotId: string | null = null;
+let focusedLookAssetId: string | null = null;
+let selectedRequirementId: string | null = null;
 let selectedStage: StageId = "production_notes";
-let jobsOpen = false;
+let selectedSurface: SurfaceId = "production_notes";
+let detailsOpen = false;
+let jobsOpen = true;
+let jobsFilter: JobFilter | "all" = "all";
 let busy: string | null = null;
 let actionNote: string | null = null;
 let intentDraft: SceneIntent | null = null;
@@ -100,13 +127,184 @@ export function bindWorkflowDesk(next: DeskHooks): void {
 export function workflowSelection(): WorkflowSelection {
   const scene = selectedScene();
   const cut = selectedCutRecord();
+  const lookSlot = selectedLookSlot(scene);
+  const requirement = selectedRequirement();
   return {
     sceneId: selectedSceneId,
     cut: selectedCut,
     path: resolveProjectPath(cut?.production_note_path ?? scene?.source_path ?? null),
     excerpt: selectionExcerpt(scene, cut, sceneReport(selectedSceneId)),
     stage: selectedStage,
+    sceneStableId: scene?.stable_id || null,
+    shotStableId: cut?.stable_id || null,
+    assetId: directorAssetId(cut, lookSlot),
+    lookSlotId: lookSlot?.id ?? null,
+    requirementId: requirement?.id ?? null,
+    workArea: workAreaFor(selectedStage),
   };
+}
+
+export type DirectorContextEntry = {
+  kind: "workArea" | "scene" | "shot" | "asset" | "lookSlot" | "requirement";
+  id: string;
+  /** Exact host scope line, without the leading dash. */
+  label: string;
+  /** Name shown in the Director panel. */
+  name: string;
+};
+
+function directorScopeKey(kind: string, id: string): string {
+  return `${kind}:${id}`;
+}
+
+function scopeHidden(kind: string, id: string | null | undefined): boolean {
+  return Boolean(id && suppressedDirectorScope.has(directorScopeKey(kind, id)));
+}
+
+/** Selection actually sent with the next Director turn. */
+export function directorTurnSelection(): WorkflowSelection {
+  const selection = workflowSelection();
+  if (!state) {
+    return {
+      ...selection,
+      sceneId: null,
+      cut: null,
+      sceneStableId: null,
+      shotStableId: null,
+      assetId: null,
+      lookSlotId: null,
+      requirementId: null,
+      workArea: null,
+      stage: null,
+    };
+  }
+  const sceneHidden = scopeHidden("scene", selection.sceneStableId);
+  const shotHidden = scopeHidden("shot", selection.shotStableId);
+  const areaHidden = scopeHidden("workArea", selection.workArea);
+  return {
+    ...selection,
+    sceneId: sceneHidden ? null : selection.sceneId,
+    sceneStableId: sceneHidden ? null : selection.sceneStableId,
+    cut: shotHidden ? null : selection.cut,
+    shotStableId: shotHidden ? null : selection.shotStableId,
+    assetId: scopeHidden("asset", selection.assetId) ? null : selection.assetId,
+    lookSlotId: scopeHidden("lookSlot", selection.lookSlotId) ? null : selection.lookSlotId,
+    requirementId: scopeHidden("requirement", selection.requirementId)
+      ? null
+      : selection.requirementId,
+    workArea: areaHidden ? null : selection.workArea,
+    stage: areaHidden ? null : selection.stage,
+  };
+}
+
+export function directorContextEntries(): DirectorContextEntry[] {
+  return scopeEntries(directorTurnSelection());
+}
+
+export function omittedDirectorEntries(): DirectorContextEntry[] {
+  if (!state) return [];
+  const sent = new Set(directorContextEntries().map((entry) => directorScopeKey(entry.kind, entry.id)));
+  return scopeEntries(workflowSelection()).filter(
+    (entry) => !sent.has(directorScopeKey(entry.kind, entry.id)),
+  );
+}
+
+export function detachDirectorContext(kind: DirectorContextEntry["kind"], id: string): void {
+  suppressedDirectorScope.add(directorScopeKey(kind, id));
+  if (kind === "lookSlot" && selectedLookSlotId === id) selectedLookSlotId = null;
+  if (kind === "requirement" && selectedRequirementId === id) selectedRequirementId = null;
+  renderWorkflowDesk();
+  emitSelection();
+}
+
+export function attachDirectorContext(kind: DirectorContextEntry["kind"], id: string): void {
+  suppressedDirectorScope.delete(directorScopeKey(kind, id));
+  if (kind === "lookSlot") {
+    selectedLookSlotId = id;
+    focusedLookSlotId = id;
+  }
+  if (kind === "requirement") selectedRequirementId = id;
+  renderWorkflowDesk();
+  emitSelection();
+}
+
+function scopeEntries(selection: WorkflowSelection): DirectorContextEntry[] {
+  const scene = state?.scenes.find((item) => item.stable_id === selection.sceneStableId);
+  const cut = scene?.cuts.find((item) => item.stable_id === selection.shotStableId);
+  const lookSlot = scene?.look_board?.slots?.find((slot) => slot.id === selection.lookSlotId);
+  const requirement = state?.requirements?.find((item) => item.id === selection.requirementId);
+  const asset = selection.assetId
+    ? state?.assets?.find((item) => item.id === selection.assetId)
+    : undefined;
+  const entries: DirectorContextEntry[] = [];
+  if (selection.workArea) {
+    const area = `${selection.workArea.slice(0, 1).toUpperCase()}${selection.workArea.slice(1)}`;
+    entries.push({ kind: "workArea", id: selection.workArea, label: `work area: ${selection.workArea}`, name: area });
+  }
+  if (selection.sceneStableId) {
+    const name = scene ? `Scene ${scene.id}` : "Unresolved scene";
+    entries.push({
+      kind: "scene",
+      id: selection.sceneStableId,
+      label: `scene: ${selection.sceneStableId} — ${scene ? sceneScopeLabel(scene) : "unresolved"}`,
+      name,
+    });
+  }
+  if (selection.shotStableId) {
+    const name = cut ? shotScopeLabel(cut) : "Unresolved shot";
+    entries.push({
+      kind: "shot",
+      id: selection.shotStableId,
+      label: `shot: ${selection.shotStableId} — ${cut ? shotScopeLabel(cut) : "unresolved"}`,
+      name,
+    });
+  }
+  if (selection.assetId) {
+    entries.push({
+      kind: "asset",
+      id: selection.assetId,
+      label: `asset: ${selection.assetId} — ${asset?.role ?? "unresolved"}`,
+      name: asset ? lookSlotLabel({ id: asset.id, role: asset.role, title: "" }) : "Unresolved asset",
+    });
+  }
+  if (selection.lookSlotId) {
+    const name = lookSlot ? lookSlotLabel(lookSlot) : "Unresolved look slot";
+    entries.push({
+      kind: "lookSlot",
+      id: selection.lookSlotId,
+      label: `look slot: ${selection.lookSlotId} — ${lookSlot ? lookSlotLabel(lookSlot) : "unresolved"}`,
+      name,
+    });
+  }
+  if (selection.requirementId) {
+    entries.push({
+      kind: "requirement",
+      id: selection.requirementId,
+      label: `requirement: ${selection.requirementId} — ${
+        requirement ? `${requirement.name} (${requirement.status})` : "unresolved"
+      }`,
+      name: requirement?.name ?? "Unresolved requirement",
+    });
+  }
+  return entries;
+}
+
+export function directorScopeHeadline(): string {
+  const selection = directorTurnSelection();
+  if (!state) return "No project open";
+  const scene = state.scenes.find((item) => item.stable_id === selection.sceneStableId);
+  const stage = WORKFLOW_STAGES.find((item) => item.id === selection.stage)?.label ?? null;
+  const sceneName = scene ? `Scene ${scene.id}` : null;
+  if (sceneName && stage) return `${sceneName} · ${stage}`;
+  if (sceneName) return sceneName;
+  if (stage) return stage;
+  return "Nothing selected";
+}
+
+export function directorScopeText(): string {
+  const entries = directorContextEntries();
+  if (!entries.length) return "";
+  return ["Workflow scope:", ...entries.map((entry) => `- ${entry.label}`)].join("\n");
 }
 
 export async function refreshWorkflowDesk(): Promise<void> {
@@ -129,7 +327,7 @@ export async function refreshWorkflowDesk(): Promise<void> {
     scene?.intent &&
     !scene.intent_approved
   ) {
-    selectedStage = "scene_intent";
+    useStage("scene_intent");
   }
   renderWorkflowDesk();
   emitSelection();
@@ -147,7 +345,14 @@ export function clearWorkflowDesk(): void {
   loadError = null;
   selectedSceneId = null;
   selectedCut = null;
+  selectedLookSlotId = null;
+  suppressedDirectorScope.clear();
+  focusedLookSlotId = null;
+  focusedLookAssetId = null;
+  selectedRequirementId = null;
   selectedStage = "scene_intent";
+  selectedSurface = "scene_intent";
+  detailsOpen = false;
   busy = null;
   actionNote = null;
   intentDraft = null;
@@ -172,7 +377,7 @@ export async function loadWorkflowDesk(projectRoot: string): Promise<void> {
     selectedSceneId = first?.id ?? null;
     selectedCut = first?.cuts[0]?.id.cut ?? null;
     const scene = result.state.scenes.find((item) => item.id === selectedSceneId);
-    selectedStage = defaultStage(scene);
+    useStage(defaultStage(scene));
     renderWorkflowDesk();
     emitSelection();
   } catch (error) {
@@ -244,6 +449,11 @@ async function runAction(
   }
 }
 
+export function openJobsDrawer(): void {
+  jobsOpen = true;
+  renderWorkflowDesk();
+}
+
 export function renderWorkflowDesk(): void {
   const root = hooks?.root;
   if (!root) return;
@@ -263,16 +473,16 @@ export function renderWorkflowDesk(): void {
     return;
   }
 
+  ensureSurface();
   const desk = document.createElement("div");
   desk.className = "workflow-desk";
   desk.dataset.sceneId = selectedSceneId?.toString() ?? "";
-  desk.dataset.stage = selectedStage;
+  desk.dataset.stage = selectedSurface;
   if (busy) desk.classList.add("busy");
   const head = document.createElement("div");
   if (actionNote) head.append(block(noteClass(actionNote), actionNote));
   if (busy) head.append(block("workflow-banner", busy));
-  head.append(renderProjectProfile(), renderStageRail());
-  desk.append(head, renderBody(), renderJobs());
+  desk.append(head, renderBody());
   root.append(desk);
   restoreWorkflowViewport(root, viewport);
 }
@@ -354,6 +564,122 @@ function selectedScene(): SceneRecord | undefined {
 
 function selectedCutRecord(): CutRecord | undefined {
   return selectedScene()?.cuts.find((cut) => cut.id.cut === selectedCut);
+}
+
+function workAreaFor(stage: StageId | null): "plan" | "produce" | "finish" | null {
+  if (!stage) return null;
+  return workAreaForStage(stage);
+}
+
+function useStage(stage: StageId): void {
+  selectedStage = stage;
+  selectedSurface = stage;
+}
+
+function ensureSurface(): void {
+  if (selectedSurface === "profile") return;
+  const stages = activeStages();
+  if (!stages.some((stage) => stage.id === selectedStage)) useStage(stages[0]?.id ?? "script");
+  else selectedSurface = selectedStage;
+}
+
+export function setStudioWorkArea(area: WorkArea): void {
+  const current = workAreaFor(selectedStage);
+  if (current === area) return;
+  const next = activeStages().find((stage) => workAreaForStage(stage.id) === area);
+  if (!next) {
+    if (area === "plan") {
+      selectedSurface = "profile";
+      profileOpen = true;
+      renderWorkflowDesk();
+      emitSelection();
+    }
+    return;
+  }
+  useStage(next.id);
+  renderWorkflowDesk();
+  emitSelection();
+}
+
+function selectedLookSlot(scene: SceneRecord | undefined): LookSlot | undefined {
+  if (!scene || !selectedLookSlotId) return undefined;
+  return scene.look_board?.slots?.find((slot) => slot.id === selectedLookSlotId);
+}
+
+function selectedRequirement(): RequirementRecord | undefined {
+  if (!selectedRequirementId) return undefined;
+  return state?.requirements?.find((item) => item.id === selectedRequirementId);
+}
+
+function directorAssetId(
+  cut: CutRecord | undefined,
+  lookSlot: LookSlot | undefined,
+): string | null {
+  if (cut?.visual_source?.asset_id) return cut.visual_source.asset_id;
+  if (
+    cut?.selected_take &&
+    state?.assets?.some((asset) => asset.id === cut.selected_take)
+  ) {
+    return cut.selected_take;
+  }
+  return lookSlot?.approved_asset_id ?? null;
+}
+
+function sceneScopeLabel(scene: SceneRecord): string {
+  const title = scene.title.trim();
+  return title ? `Scene ${scene.id} ${title}` : `Scene ${scene.id}`;
+}
+
+function shotScopeLabel(cut: CutRecord): string {
+  const title = cut.title?.trim() ?? "";
+  return title ? `Cut ${cut.id.cut} ${title}` : `Cut ${cut.id.cut}`;
+}
+
+function lookSlotLabel(slot: LookSlot): string {
+  const title = slot.title?.trim();
+  if (title) return title;
+  const display: Record<string, string> = {
+    interior_reference: "Interior",
+    exterior_reference: "Exterior",
+    location_reference: "Location",
+    wardrobe_reference: "Wardrobe",
+    wardrobe_plate: "Wardrobe plate",
+    prop_reference: "Prop",
+    mood_reference: "Mood",
+    lighting_reference: "Lighting",
+    composition_reference: "Composition",
+    group_reference: "Group",
+  };
+  return display[slot.role] ?? slot.role;
+}
+
+function continuityDependents(predecessor: CutRecord): string[] {
+  const labels: string[] = [];
+  for (const scene of state?.scenes ?? []) {
+    for (const cut of scene.cuts) {
+      const source = cut.visual_source;
+      if (
+        !source ||
+        source.strategy !== "previous_selected_take_exit_frame" ||
+        !source.asset_id
+      ) {
+        continue;
+      }
+      const linked =
+        (source.predecessor?.source_scene === predecessor.id.source_scene &&
+          source.predecessor.cut === predecessor.id.cut) ||
+        Boolean(
+          predecessor.stable_id &&
+            source.predecessor_shot_id === predecessor.stable_id,
+        );
+      if (linked) labels.push(`Scene ${scene.id} Cut ${cut.id.cut}`);
+    }
+  }
+  return labels;
+}
+
+function reviewExportPath(scene: SceneRecord): string | null {
+  return latestReviewExport(scene, state?.jobs ?? []);
 }
 
 function sceneReport(id: number | null): SceneReport | undefined {
@@ -681,102 +1007,126 @@ function renderRequirements(): HTMLElement {
   return section;
 }
 
-function renderStageRail(): HTMLElement {
-  const scene = selectedScene();
-  const stages = activeStages();
-  if (!stages.some((stage) => stage.id === selectedStage)) {
-    selectedStage = stages[0]?.id ?? "script";
-  }
-  const nav = document.createElement("nav");
-  nav.className = "workflow-stage-rail";
-  nav.setAttribute("aria-label", "Production stages");
-  for (const stage of stages) {
-    const status = scene?.stages[stage.id] ?? "missing";
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `workflow-stage${selectedStage === stage.id ? " active" : ""}`;
-    button.dataset.status = status;
-    button.innerHTML = `<span class="workflow-stage-dot" aria-hidden="true"></span><span class="workflow-stage-label"></span><span class="workflow-stage-status"></span>`;
-    button.querySelector(".workflow-stage-label")!.textContent = stage.label;
-    button.querySelector(".workflow-stage-status")!.textContent = statusLabel(status);
-    button.addEventListener("click", () => {
-      selectedStage = stage.id;
-      renderWorkflowDesk();
-    });
-    nav.append(button);
-  }
-  return nav;
-}
-
 function renderBody(): HTMLElement {
   const body = document.createElement("div");
-  body.className = "workflow-body";
-  body.append(renderSceneList(), renderMain(), renderInspector());
+  body.className = `workflow-body${jobsOpen ? "" : " jobs-collapsed"}`;
+  body.classList.add("scene-look-body");
+  const scenes = renderSceneList();
+  scenes.classList.add("studio-scenes-list");
+  body.append(scenes, renderJobsPanel(), renderMain(), renderSide());
   return body;
 }
 
+function renderSide(): HTMLElement {
+  const side = document.createElement("div");
+  side.className = "studio-side";
+  side.append(renderFinishPanel());
+  return side;
+}
+
 function renderSceneList(): HTMLElement {
-  const aside = document.createElement("aside");
-  aside.className = "workflow-scenes";
-  aside.setAttribute("aria-label", "Scenes");
-  const heading = document.createElement("h2");
-  heading.textContent = "Scenes";
-  aside.append(heading);
+  const selected = selectedScene();
+  const blockerCounts = new Map<number, number>();
+  for (const scene of state?.scenes ?? []) {
+    blockerCounts.set(scene.id, sceneBlockers(scene.id).length);
+  }
+  const aside = renderSceneListView(
+    buildSceneList({
+      scenes: state?.scenes ?? [],
+      reports: report?.scenes ?? [],
+      assets: state?.assets ?? [],
+      selectedKey: selected ? sceneSelectionKey(selected) : null,
+      blockerCounts,
+      resolvePath: resolveProjectPath,
+    }),
+    (key) => {
+      const scene = state?.scenes.find((item) => sceneSelectionKey(item) === key);
+      if (!scene) return;
+      selectedSceneId = scene.id;
+      selectedCut = scene.cuts[0]?.id.cut ?? null;
+      useStage(defaultStage(scene));
+      focusedLookSlotId = null;
+      focusedLookAssetId = null;
+      renderWorkflowDesk();
+      emitSelection();
+    },
+  );
   if (report) {
     const meta = document.createElement("p");
     meta.className = "workflow-scenes-meta";
     meta.textContent = `${report.script_count} script · ${report.character_count} characters · ${report.scenes.length} scenes`;
-    aside.append(meta);
+    aside.querySelector("h2")?.after(meta);
   }
-  for (const scene of state?.scenes ?? []) {
-    const sceneStatus = sceneReport(scene.id);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `workflow-scene${scene.id === selectedSceneId ? " active" : ""}`;
-    const mix = sceneStatus ? mixLabel(sceneStatus.mix) : `${scene.cuts.length} cuts`;
-    button.innerHTML = `<span class="workflow-scene-title"></span><span class="workflow-scene-mix"></span>`;
-    button.querySelector(".workflow-scene-title")!.textContent = scene.title;
-    button.querySelector(".workflow-scene-mix")!.textContent = mix;
-    if (sceneStatus?.effectively_performance_heavy) {
-      button.classList.add("heavy");
-    }
-    button.addEventListener("click", () => {
-      selectedSceneId = scene.id;
-      selectedCut = scene.cuts[0]?.id.cut ?? null;
-      selectedStage = defaultStage(scene);
-      renderWorkflowDesk();
-      emitSelection();
-    });
-    aside.append(button);
-  }
+  queueLookThumbs(aside);
   return aside;
+}
+
+function showSurface(id: SurfaceId): void {
+  selectedSurface = id;
+  if (id !== "profile") selectedStage = id;
+  if (id === "profile") profileOpen = true;
+  renderWorkflowDesk();
+  emitSelection();
 }
 
 function renderMain(): HTMLElement {
   const main = document.createElement("section");
   main.className = "workflow-main";
-  main.setAttribute("aria-label", "Stage");
+  main.setAttribute("aria-label", "Workspace");
   const scene = selectedScene();
-  const sceneStatus = sceneReport(selectedSceneId);
-  const title = document.createElement("header");
-  title.className = "workflow-main-header";
-  const heading = document.createElement("h1");
-  heading.textContent =
-    activeStages().find((stage) => stage.id === selectedStage)?.label ?? selectedStage;
-  const sub = document.createElement("p");
-  sub.textContent = scene
-    ? sceneStatus
-      ? `${scene.title} · ${mixLabel(sceneStatus.mix)} · ${sceneStatus.approved_start_frames} start frames`
-      : `${scene.title} · ${scene.cuts.length} cuts`
-    : "No scene selected";
+  const area = workAreaFor(selectedStage) ?? "plan";
+  main.append(
+    renderSurfaceNav(
+      surfacesForArea({
+        area,
+        stages: activeStages(),
+        scene: scene ?? null,
+        active: selectedSurface,
+      }),
+      showSurface,
+    ),
+  );
   const blockers = scene ? sceneBlockers(scene.id) : [];
-  if (blockers.length) {
-    sub.textContent += ` · Blocked on ${blockers.map((item) => item.name).join(", ")}`;
+  const banner = surfaceBanner({
+    surface: selectedSurface,
+    hasScene: Boolean(scene),
+    blockers: blockers.map((item) => item.name),
+    busy,
+  });
+  if (banner?.tone === "empty") {
+    main.append(block("empty-state", banner.text));
+    return main;
   }
-  title.append(heading, sub);
-  main.append(title);
-
-  if (sceneStatus?.effectively_performance_heavy && selectedStage === "production_notes") {
+  if (banner?.tone === "blocked") {
+    const notice = document.createElement("div");
+    notice.className = "workflow-banner warn";
+    notice.textContent = banner.text;
+    for (const item of blockers) {
+      const attach = actionButton(
+        selectedRequirementId === item.id ? `${item.name} attached` : `Attach ${item.name}`,
+        () => {
+          if (selectedRequirementId === item.id) detachDirectorContext("requirement", item.id);
+          else attachDirectorContext("requirement", item.id);
+        },
+      );
+      attach.disabled = Boolean(busy);
+      notice.append(document.createTextNode(" "), attach);
+    }
+    main.append(notice);
+  }
+  if (selectedSurface === "profile") {
+    profileOpen = true;
+    main.append(renderProjectProfile(), renderRequirements());
+    return main;
+  }
+  const sceneStatus = sceneReport(selectedSceneId);
+  if (scene && sceneStatus) {
+    const summary = document.createElement("p");
+    summary.className = "studio-scene-line";
+    summary.textContent = `${scene.title} · ${mixLabel(sceneStatus.mix)} · ${sceneStatus.approved_start_frames} start frames`;
+    main.append(summary);
+  }
+  if (sceneStatus?.effectively_performance_heavy && selectedSurface === "production_notes") {
     main.append(
       block(
         "workflow-banner warn",
@@ -784,8 +1134,16 @@ function renderMain(): HTMLElement {
       ),
     );
   }
-
-  main.append(renderStageContent(scene, sceneStatus));
+  if (selectedSurface === "scene_look" && scene) main.append(renderSceneLookWorkspace(scene));
+  else if (selectedSurface === "characters") main.append(renderCharactersStage());
+  else main.append(renderStageContent(scene, sceneStatus));
+  if (!scene) return main;
+  const details = actionButton(detailsOpen ? "Hide details" : "Details", () => {
+    detailsOpen = !detailsOpen;
+    renderWorkflowDesk();
+  });
+  main.append(details);
+  if (detailsOpen) main.append(renderInspector());
   return main;
 }
 
@@ -805,9 +1163,6 @@ function renderStageContent(scene: SceneRecord | undefined, sceneStatus: SceneRe
       break;
     case "scene_intent":
       wrap.append(renderIntentStage(scene));
-      break;
-    case "scene_look":
-      wrap.append(renderLookStage(scene));
       break;
     case "cut_sketches":
       wrap.append(renderSketchStage(scene, sceneStatus));
@@ -932,213 +1287,112 @@ function renderIntentStage(scene: SceneRecord): HTMLElement {
   return wrap;
 }
 
-function renderLookStage(scene: SceneRecord): HTMLElement {
-  const wrap = document.createElement("div");
-  wrap.className = "workflow-look";
-  const board = scene.look_board;
-  const slots = board?.slots ?? [];
-  const approved = slots.filter((slot) => slot.approved_asset_id).length;
-  wrap.append(
-    block(
-      approved ? "workflow-banner" : "workflow-missing",
-      approved
-        ? `${approved} approved scene look still(s). Character model-sheet closeups stay under Characters/.`
-        : "Scene look is location, wardrobe, prop, mood, and lighting stills — not talking-head identity refs. Draft prompts, attach or generate, then approve.",
-    ),
-  );
-  const toolbar = document.createElement("div");
-  toolbar.className = "workflow-sketch-toolbar";
-  toolbar.append(
-    actionButton("Draft look board", () => {
-      const chat = requireChat();
-      if (!chat) return;
-      void runAction("Drafting scene look…", "workflow_draft_look", {
-        sceneId: scene.id,
-        ...chat,
-      });
+function renderSceneLookWorkspace(scene: SceneRecord): HTMLElement {
+  const slot = scene.look_board?.slots?.find((item) => item.id === focusedLookSlotId)
+    ?? scene.look_board?.slots?.find((item) => item.id === selectedLookSlotId)
+    ?? scene.look_board?.slots?.[0];
+  const workspace = renderSceneLookView(
+    buildSceneLook({
+      scene,
+      report: sceneReport(scene.id),
+      assets: state?.assets ?? [],
+      jobs: state?.jobs ?? [],
+      characters: (state?.characters ?? []).map((character) => ({ id: character.id, name: character.name })),
+      blockers: sceneBlockers(scene.id).map((requirement) => requirement.name),
+      focusedSlotId: focusedLookSlotId,
+      focusedAssetId: focusedLookAssetId,
+      directorSlotId: selectedLookSlotId,
+      identityHint: slot ? lookIdentityHint(scene, slot) : null,
+      busy,
+      resolvePath: resolveProjectPath,
     }),
+    (intent) => handleSceneLookIntent(scene, intent),
   );
-  wrap.append(toolbar);
-  if (board?.notes?.length) {
-    wrap.append(block("workflow-banner", board.notes.join(" · ")));
-  }
-  if (!slots.length) {
-    wrap.append(
-      missingPanel(
-        "No look slots yet.",
-        "Draft from scene intent, or wait until intent is approved if you want the model to use it.",
-      ),
-    );
-    return wrap;
-  }
-  for (const slot of slots) {
-    wrap.append(renderLookSlot(scene, slot));
-  }
-  queueLookThumbs(wrap);
-  return wrap;
+  queueLookThumbs(workspace);
+  return workspace;
 }
 
-function renderLookSlot(scene: SceneRecord, slot: LookSlot): HTMLElement {
-  const card = document.createElement("article");
-  card.className = "workflow-look-slot";
-  const head = document.createElement("header");
-  const roleLabel = document.createElement("label");
-  roleLabel.className = "workflow-field inline";
-  const roleTitle = document.createElement("span");
-  roleTitle.textContent = "Role";
-  const roleSelect = document.createElement("select");
-  for (const option of LOOK_ROLES) {
-    const item = document.createElement("option");
-    item.value = option.id;
-    item.textContent = option.label;
-    roleSelect.append(item);
-  }
-  roleSelect.value = LOOK_ROLES.some((item) => item.id === slot.role)
-    ? slot.role
-    : "location_reference";
-  roleLabel.append(roleTitle, roleSelect);
-  const status = document.createElement("span");
-  status.className = "workflow-look-status";
-  status.textContent = slot.approved_asset_id
-    ? "Approved"
-    : (slot.asset_ids?.length ?? 0) > 0
-      ? "Draft still"
-      : "Prompt only";
-  head.append(roleLabel, status);
-  card.append(head);
-
-  const titleLabel = document.createElement("label");
-  titleLabel.className = "workflow-field";
-  const titleSpan = document.createElement("span");
-  titleSpan.textContent = "Title";
-  const titleInput = document.createElement("input");
-  titleInput.type = "text";
-  titleInput.value = slot.title ?? "";
-  titleLabel.append(titleSpan, titleInput);
-
-  const promptLabel = document.createElement("label");
-  promptLabel.className = "workflow-field";
-  const promptSpan = document.createElement("span");
-  promptSpan.textContent = "Prompt";
-  const promptInput = document.createElement("textarea");
-  promptInput.rows = 3;
-  promptInput.value = slot.prompt ?? "";
-  promptLabel.append(promptSpan, promptInput);
-
-  const negLabel = document.createElement("label");
-  negLabel.className = "workflow-field";
-  const negSpan = document.createElement("span");
-  negSpan.textContent = "Negative";
-  const negInput = document.createElement("textarea");
-  negInput.rows = 2;
-  negInput.value = slot.negative_prompt ?? "";
-  negLabel.append(negSpan, negInput);
-  card.append(titleLabel, promptLabel, negLabel);
-  const promptActions = document.createElement("div");
-  promptActions.className = "workflow-inspector-actions";
-  promptActions.append(
-    actionButton("Save prompt", () => {
+function handleSceneLookIntent(scene: SceneRecord, intent: SceneLookIntent): void {
+  const slot = scene.look_board?.slots?.find((item) => item.id === ("slotId" in intent ? intent.slotId : focusedLookSlotId));
+  switch (intent.type) {
+    case "select-slot":
+      focusedLookSlotId = intent.slotId;
+      focusedLookAssetId = null;
+      renderWorkflowDesk();
+      break;
+    case "select-version":
+      focusedLookAssetId = intent.assetId;
+      renderWorkflowDesk();
+      break;
+    case "draft-board": {
+      const chat = requireChat();
+      if (!chat) return;
+      void runAction("Drafting scene look…", "workflow_draft_look", { sceneId: scene.id, ...chat });
+      break;
+    }
+    case "save-prompt":
       void runAction("Saving reference prompt…", "workflow_update_look_slot", {
         sceneId: scene.id,
-        slotId: slot.id,
-        role: roleSelect.value,
-        title: titleInput.value,
-        prompt: promptInput.value,
-        negativePrompt: negInput.value,
+        slotId: intent.slotId,
+        role: intent.role,
+        title: intent.title,
+        prompt: intent.prompt,
+        negativePrompt: intent.negative,
       });
-    }),
-  );
-  card.append(promptActions);
-
-  const identityHint = lookIdentityHint(scene, slot);
-  if (identityHint) {
-    const hint = document.createElement("p");
-    hint.className = "workflow-look-identity";
-    hint.textContent = identityHint;
-    card.append(hint);
-  }
-
-  const versions = document.createElement("div");
-  versions.className = "workflow-look-versions";
-  const ids = slot.asset_ids ?? [];
-  if (!ids.length) {
-    versions.append(block("empty-state", "No stills yet. Attach an image or generate one."));
-  } else {
-    for (const assetId of ids) {
-      const asset = findLookAsset(slot, assetId);
-      if (!asset) continue;
-      const fig = document.createElement("figure");
-      fig.className = `workflow-look-thumb${
-        slot.approved_asset_id === assetId ? " approved" : ""
-      }${asset?.status === "rejected" ? " rejected" : ""}`;
-      const img = document.createElement("img");
-      img.alt = slot.title || slot.role;
-      img.dataset.lookPath = resolveProjectPath(asset?.path ?? null) ?? "";
-      const cap = document.createElement("figcaption");
-      cap.textContent = `${asset?.status ?? "draft"}${
-        slot.approved_asset_id === assetId ? " · current" : ""
-      }`;
-      const versionActions = document.createElement("div");
-      versionActions.className = "workflow-look-thumb-actions";
-      versionActions.append(
-        actionButton("Use", () => {
-          void runAction("Approving look still…", "workflow_approve_look", {
-            sceneId: scene.id,
-            slotId: slot.id,
-            assetId,
-          });
-        }),
-        actionButton("Reject", () => {
-          void runAction("Rejecting look still…", "workflow_reject_look", {
-            sceneId: scene.id,
-            slotId: slot.id,
-            assetId,
-          });
-        }),
-        actionButton("Delete", () => {
-          void deleteLookImage(scene, slot, asset);
-        }),
-      );
-      fig.append(img, cap, versionActions);
-      img.addEventListener("click", () => {
-        if (asset.path) hooks?.onOpenPath(resolveProjectPath(asset.path) ?? asset.path);
-      });
-      versions.append(fig);
-    }
-  }
-  card.append(versions);
-  if (slot.role === "wardrobe_reference") {
-    card.append(renderWardrobePlates(scene));
-  }
-
-  const actions = document.createElement("div");
-  actions.className = "workflow-inspector-actions";
-  actions.append(
-    actionButton("Attach image", () => {
-      void attachLookImage(scene.id, slot.id);
-    }),
-    actionButton("Generate still", () => {
+      break;
+    case "attach":
+      void attachLookImage(scene.id, intent.slotId);
+      break;
+    case "generate":
       void runAction("Preparing look generate…", "workflow_generate_look", {
         sceneId: scene.id,
-        slotId: slot.id,
-        role: roleSelect.value,
-        title: titleInput.value,
-        prompt: promptInput.value,
-        negativePrompt: negInput.value,
+        slotId: intent.slotId,
+        role: intent.role,
+        title: intent.title,
+        prompt: intent.prompt,
+        negativePrompt: intent.negative,
       });
-    }),
-  );
-  if (slot.role === "wardrobe_reference" && approvedLookAsset(slot)) {
-    actions.append(
-      actionButton("Build wardrobe plates", () => {
-        void runAction("Preparing wardrobe plates…", "workflow_generate_wardrobe_plate", {
-          sceneId: scene.id,
-        });
-      }),
-    );
+      break;
+    case "approve":
+      focusedLookAssetId = intent.assetId;
+      void runAction("Approving look still…", "workflow_approve_look", {
+        sceneId: scene.id,
+        slotId: intent.slotId,
+        assetId: intent.assetId,
+      });
+      break;
+    case "reject":
+      void runAction("Rejecting look still…", "workflow_reject_look", {
+        sceneId: scene.id,
+        slotId: intent.slotId,
+        assetId: intent.assetId,
+      });
+      break;
+    case "delete": {
+      if (!slot) return;
+      const asset = findLookAsset(slot, intent.assetId);
+      if (!asset) return;
+      void deleteLookImage(scene, slot, asset);
+      break;
+    }
+    case "open":
+      hooks?.onOpenPath(intent.path);
+      break;
+    case "attach-director":
+      if (selectedLookSlotId === intent.slotId) detachDirectorContext("lookSlot", intent.slotId);
+      else attachDirectorContext("lookSlot", intent.slotId);
+      break;
+    case "build-plates":
+      void runAction("Preparing wardrobe plates…", "workflow_generate_wardrobe_plate", { sceneId: scene.id });
+      break;
+    case "delete-plate": {
+      const asset = state?.assets?.find((item) => item.id === intent.assetId);
+      if (asset) void deleteWardrobePlate(asset);
+      break;
+    }
+    default:
+      break;
   }
-  card.append(actions);
-  return card;
 }
 
 const LOOK_PEOPLE_ROLES = new Set([
@@ -1148,46 +1402,6 @@ const LOOK_PEOPLE_ROLES = new Set([
   "location_reference",
   "composition_reference",
 ]);
-
-function renderWardrobePlates(scene: SceneRecord): HTMLElement {
-  const section = document.createElement("section");
-  section.className = "workflow-look-versions";
-  const heading = document.createElement("p");
-  heading.className = "workflow-field-hint";
-  const plates = (state?.assets ?? []).filter(
-    (asset) =>
-      asset.role === "wardrobe_plate" &&
-      asset.scene_id === scene.id &&
-      asset.status !== "rejected",
-  );
-  heading.textContent = plates.length
-    ? "These plates replace bare model sheets for later stills. Build wardrobe plates sends every missing close-up and standing plate in one approval."
-    : "One approval builds a close-up and a standing plate for each named character.";
-  section.append(heading);
-  for (const asset of plates) {
-    const character = state?.characters?.find((item) => item.id === asset.character_id);
-    const fig = document.createElement("figure");
-    fig.className = "workflow-look-thumb approved";
-    const img = document.createElement("img");
-    img.alt = `${character?.name ?? "Character"} ${asset.notes ?? "wardrobe plate"}`;
-    img.dataset.lookPath = resolveProjectPath(asset.path) ?? asset.path;
-    img.addEventListener("click", () => {
-      hooks?.onOpenPath(resolveProjectPath(asset.path) ?? asset.path);
-    });
-    const cap = document.createElement("figcaption");
-    cap.textContent = `${character?.name ?? "Character"} · ${(asset.notes ?? "plate").replace(/_/g, " ")}`;
-    const versionActions = document.createElement("div");
-    versionActions.className = "workflow-look-thumb-actions";
-    versionActions.append(
-      actionButton("Delete", () => {
-        void deleteWardrobePlate(asset);
-      }),
-    );
-    fig.append(img, cap, versionActions);
-    section.append(fig);
-  }
-  return section;
-}
 
 async function deleteWardrobePlate(asset: AssetRecord): Promise<void> {
   const confirmed = await ask(
@@ -1462,16 +1676,42 @@ function renderStartFrameCard(
     void runAction("Saving visual-source strategy…", "workflow_set_visual_source", args);
   });
   sourceActions.append(saveSource);
-  const bindContinuity = actionButton("Bind selected exit frame", () => {
-    void runAction("Binding predecessor exit frame…", "workflow_bind_continuity_frame", {
-      sceneId: scene.id,
-      cut: cut.id.cut,
-    });
+  const frameTimeLabel = document.createElement("label");
+  frameTimeLabel.className = "workflow-field";
+  const frameTimeTitle = document.createElement("span");
+  frameTimeTitle.textContent = "Frame time (seconds)";
+  const frameTime = document.createElement("input");
+  frameTime.type = "number";
+  frameTime.min = "0";
+  frameTime.step = "0.1";
+  frameTime.value =
+    cut.visual_source?.frame_time_seconds != null
+      ? String(cut.visual_source.frame_time_seconds)
+      : "";
+  frameTimeLabel.append(frameTimeTitle, frameTime);
+  const preview = document.createElement("video");
+  preview.controls = true;
+  preview.muted = true;
+  preview.preload = "metadata";
+  preview.className = "workflow-take-video";
+  let frameTimeEdited = frameTime.value !== "";
+  frameTime.addEventListener("input", () => {
+    frameTimeEdited = true;
+  });
+  preview.addEventListener("loadedmetadata", () => {
+    if (frameTimeEdited || !Number.isFinite(preview.duration)) return;
+    const nearEnd = Math.max(0, preview.duration - 0.1);
+    frameTime.value = nearEnd.toFixed(3);
+  });
+  const bindContinuity = actionButton("Bind selected frame", () => {
+    void bindContinuityFrame(scene, cut, predecessorSelect.value, frameTime.value);
   });
   sourceActions.append(bindContinuity);
   sourceControls.append(
     strategyLabel,
     predecessorLabel,
+    frameTimeLabel,
+    preview,
     sharedLabel,
     sourceHint,
     sourceActions,
@@ -1480,13 +1720,28 @@ function renderStartFrameCard(
 
   const toggleSourceFields = (): void => {
     const strategy = strategySelect.value as VisualSourceStrategy;
-    predecessorLabel.hidden = strategy !== "previous_selected_take_exit_frame";
+    const continuity = strategy === "previous_selected_take_exit_frame";
+    predecessorLabel.hidden = !continuity;
+    frameTimeLabel.hidden = !continuity;
+    preview.hidden = !continuity;
     sharedLabel.hidden = strategy !== "shared_reference";
-    bindContinuity.hidden = strategy !== "previous_selected_take_exit_frame";
+    bindContinuity.hidden = !continuity;
     const predecessor = earlierCuts.find(
       (candidate) => candidate.id.cut === Number(predecessorSelect.value),
     );
-    bindContinuity.disabled = Boolean(busy) || !predecessor?.selected_take;
+    const take = predecessor?.takes?.find(
+      (candidate) =>
+        candidate.id === predecessor?.selected_take ||
+        candidate.path === predecessor?.selected_take,
+    );
+    bindContinuity.disabled = Boolean(busy) || !take;
+    if (take) {
+      preview.dataset.takePath = resolveProjectPath(take.path) ?? take.path;
+    } else {
+      delete preview.dataset.takePath;
+      preview.removeAttribute("src");
+    }
+    queueTakeVideos(sourceControls);
   };
   strategySelect.addEventListener("change", toggleSourceFields);
   predecessorSelect.addEventListener("change", toggleSourceFields);
@@ -1810,7 +2065,14 @@ function renderSketchStage(scene: SceneRecord, sceneStatus: SceneReport | undefi
     });
   });
   overrideLabel.append(override, document.createTextNode(" Override mix rejection"));
-  toolbar.append(strategyLabel, overrideLabel);
+  const alternate = actionButton("Add alternate angle", () => {
+    void runAction("Adding alternate angle…", "workflow_add_alternate_shot", {
+      sceneId: scene.id,
+    });
+  });
+  alternate.disabled = Boolean(busy);
+  alternate.title = "Allocates a new shot id, an editable sketch, and animatic timing. The source strategy and production note stay empty.";
+  toolbar.append(strategyLabel, overrideLabel, alternate);
   wrap.append(toolbar);
 
   if (verdict && (verdict.mix.performance + verdict.mix.other_dialogue + verdict.mix.silent) > 0) {
@@ -2911,12 +3173,7 @@ function renderProductionNoteCard(
         ["needs_rerender", "Needs rerender"],
       ] as const) {
         const review = actionButton(label, () => {
-          void runAction("Updating take review…", "workflow_set_take_status", {
-            sceneId: scene.id,
-            cut: cut.id.cut,
-            takeId: take.id,
-            status,
-          });
+          void confirmTakeStatus(scene, cut, take.id, status);
         });
         review.disabled = Boolean(busy) || take.status === status;
         reviewActions.append(review);
@@ -2933,6 +3190,71 @@ function renderProductionNoteCard(
     queueTakeVideos(takeList);
   }
   return card;
+}
+
+async function bindContinuityFrame(
+  scene: SceneRecord,
+  cut: CutRecord,
+  predecessorCut: string,
+  frameTime: string,
+): Promise<void> {
+  const seconds = Number(frameTime);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    await ask("Enter a frame time in seconds. The default is near the end of the selected take.", {
+      title: "Choose a continuity frame",
+      kind: "warning",
+    });
+    return;
+  }
+  const predecessor = scene.cuts.find((candidate) => candidate.id.cut === Number(predecessorCut));
+  const dependents = predecessor ? continuityDependents(predecessor) : [];
+  const replacing = Boolean(cut.visual_source?.asset_id);
+  if (replacing || dependents.length) {
+    const stale = dependents.length
+      ? `These shots will need review:\n${dependents.join("\n")}`
+      : "This cut's current continuity frame will be replaced.";
+    const confirmed = await ask(
+      `Bind the frame at ${seconds}s?\n\n${stale}\n\nThe successor stays render-blocked until this bind finishes.`,
+      { title: `Bind Scene ${scene.id} Cut ${cut.id.cut}`, kind: "warning" },
+    );
+    if (!confirmed) return;
+  }
+  await runAction("Binding continuity frame…", "workflow_bind_continuity_frame", {
+    sceneId: scene.id,
+    cut: cut.id.cut,
+    frameTimeSeconds: seconds,
+  });
+}
+
+async function confirmTakeStatus(
+  scene: SceneRecord,
+  cut: CutRecord,
+  takeId: string,
+  status: string,
+): Promise<void> {
+  if (status === "selected") {
+    const dependents = continuityDependents(cut).filter((label) => {
+      const match = /Scene (\d+) Cut (\d+)/.exec(label);
+      if (!match) return true;
+      const dependent = state?.scenes
+        ?.find((item) => item.id === Number(match[1]))
+        ?.cuts.find((item) => item.id.cut === Number(match[2]));
+      return Boolean(dependent?.visual_source?.asset_id);
+    });
+    if (dependents.length) {
+      const confirmed = await ask(
+        `Selecting this take unbinds continuity frames on:\n${dependents.join("\n")}\n\nThose shots stay render-blocked until you bind a reviewed frame. This does not approve a replacement.`,
+        { title: `Select Scene ${scene.id} Cut ${cut.id.cut}`, kind: "warning" },
+      );
+      if (!confirmed) return;
+    }
+  }
+  await runAction("Updating take review…", "workflow_set_take_status", {
+    sceneId: scene.id,
+    cut: cut.id.cut,
+    takeId,
+    status,
+  });
 }
 
 async function deleteProductionTake(
@@ -3037,7 +3359,16 @@ function renderAssembleStage(scene: SceneRecord): HTMLElement {
   assemble.title = missing.length
     ? "Select a take for every cut in Production Notes first."
     : "Prepare a local ffmpeg assembly for approval. No provider credits are used.";
-  controls.append(assemble);
+  const reviewPath = reviewExportPath(scene);
+  const openReview = actionButton("Open review export", () => {
+    if (!reviewPath) return;
+    hooks?.onOpenPath(resolveProjectPath(reviewPath) ?? reviewPath);
+  });
+  openReview.disabled = Boolean(busy) || !reviewPath;
+  openReview.title = reviewPath
+    ? reviewPath
+    : "No review export yet. Prepare an assembly and refresh after the file is written.";
+  controls.append(assemble, openReview);
   const note = document.createElement("p");
   note.className = "workflow-field-hint";
   note.textContent =
@@ -3280,14 +3611,23 @@ function renderInspector(): HTMLElement {
   aside.append(renderReadiness(scene, sceneStatus));
   const blockers = sceneBlockers(scene.id);
   if (blockers.length) {
-    aside.append(
-      block(
-        "workflow-banner warn",
-        `Blocked on ${blockers
-          .map((item) => `${item.name} (${item.kind.replace(/_/g, " ")})`)
-          .join(", ")}.`,
-      ),
-    );
+    const blockerBlock = document.createElement("div");
+    blockerBlock.className = "workflow-banner warn";
+    blockerBlock.textContent = "Blocked on:";
+    for (const item of blockers) {
+      const attach = actionButton(
+        selectedRequirementId === item.id
+          ? `${item.name} attached`
+          : `Attach ${item.name}`,
+        () => {
+          if (selectedRequirementId === item.id) detachDirectorContext("requirement", item.id);
+          else attachDirectorContext("requirement", item.id);
+        },
+      );
+      attach.disabled = Boolean(busy);
+      blockerBlock.append(document.createTextNode(" "), attach);
+    }
+    aside.append(blockerBlock);
   }
   if (sceneStatus) {
     const summary = document.createElement("pre");
@@ -3342,42 +3682,86 @@ function mouthLabel(policy: MouthPolicy | null | undefined): string {
   return MOUTH_POLICIES.find((item) => item.id === policy)?.label ?? "—";
 }
 
-function renderJobs(): HTMLElement {
-  const drawer = document.createElement("section");
-  drawer.className = `workflow-jobs${jobsOpen ? " open" : ""}`;
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  toggle.className = "workflow-jobs-toggle";
-  const count = state?.jobs?.length ?? 0;
-  toggle.textContent = `Jobs (${count})`;
-  toggle.addEventListener("click", () => {
+function renderJobsPanel(): HTMLElement {
+  return renderJobsView(
+    buildJobsModel({
+      jobs: state?.jobs ?? [],
+      scenes: state?.scenes ?? [],
+      assets: state?.assets ?? [],
+      filter: jobsFilter,
+    }),
+    jobsOpen,
+    jobsFilter,
+    handleJobsIntent,
+  );
+}
+
+function handleJobsIntent(intent: JobsIntent): void {
+  if (intent.type === "toggle") {
     jobsOpen = !jobsOpen;
     renderWorkflowDesk();
-  });
-  drawer.append(toggle);
-  if (jobsOpen) {
-    const body = document.createElement("div");
-    body.className = "workflow-jobs-body";
-    if (!count) {
-      body.append(
-        block(
-          "empty-state",
-          "No provider jobs recorded yet. Look generation, start frames, renders, and assembly land here.",
-        ),
-      );
-    } else {
-      for (const job of state?.jobs ?? []) {
-        const row = document.createElement("p");
-        const attempts = job.attempts?.length ?? 0;
-        row.textContent = `${job.kind} · ${job.status ?? "unknown"} · ${attempts} attempt${
-          attempts === 1 ? "" : "s"
-        } · ${job.output_path ?? job.model ?? job.provider ?? job.id}`;
-        body.append(row);
-      }
-    }
-    drawer.append(body);
+    return;
   }
-  return drawer;
+  if (intent.type === "filter") {
+    jobsFilter = intent.filter;
+    renderWorkflowDesk();
+    return;
+  }
+  const row = buildJobsModel({
+    jobs: state?.jobs ?? [],
+    scenes: state?.scenes ?? [],
+    assets: state?.assets ?? [],
+    filter: "all",
+  }).rows.find((item) => item.id === intent.jobId);
+  if (!row) return;
+  if (row.sceneId != null) {
+    const scene = state?.scenes.find((item) => item.id === row.sceneId);
+    if (scene) {
+      selectedSceneId = scene.id;
+      if (row.cut != null && scene.cuts.some((cut) => cut.id.cut === row.cut)) selectedCut = row.cut;
+      if (row.stage) useStage(row.stage);
+      if (row.lookSlotId) {
+        selectedLookSlotId = row.lookSlotId;
+        focusedLookSlotId = row.lookSlotId;
+      }
+      renderWorkflowDesk();
+      emitSelection();
+    }
+  }
+  if (!row.outputPath) return;
+  hooks?.onOpenPath(resolveProjectPath(row.outputPath) ?? row.outputPath);
+}
+
+function renderFinishPanel(): HTMLElement {
+  const scene = selectedScene();
+  return renderFinishView(
+    buildFinishModel({
+      scene: scene ?? null,
+      jobs: state?.jobs ?? [],
+      deliverables: state?.profile?.deliverables ?? [],
+      busyReason: busy,
+    }),
+    (intent) => handleFinishIntent(intent),
+  );
+}
+
+function handleFinishIntent(intent: FinishIntent): void {
+  const scene = selectedScene();
+  if (!scene) return;
+  if (intent.type === "open-review") {
+    const path = latestReviewExport(scene, state?.jobs ?? []);
+    if (!path) return;
+    hooks?.onOpenPath(resolveProjectPath(path) ?? path);
+    return;
+  }
+  if (intent.type === "assemble") {
+    void runAction("Preparing assembly…", "workflow_prepare_assemble", { sceneId: scene.id });
+    return;
+  }
+  void runAction("Checking deliverable…", "workflow_check_deliverable", {
+    sceneId: scene.id,
+    deliverableId: intent.deliverableId,
+  });
 }
 
 function renderTakeReviewStage(scene: SceneRecord): HTMLElement {
@@ -3389,7 +3773,7 @@ function renderTakeReviewStage(scene: SceneRecord): HTMLElement {
   wrap.append(
     block(
       "workflow-banner",
-      "A generated clip is a take until you select it. Changing a selected take clears any dependent continuity binding made from the old take.",
+      "A generated clip is a take until you select it. Changing a selected take unbinds dependent continuity frames. It does not approve a replacement frame.",
     ),
     refresh,
   );
@@ -3423,12 +3807,7 @@ function renderTakeReviewStage(scene: SceneRecord): HTMLElement {
         ["needs_rerender", "Needs rerender"],
       ] as const) {
         const button = actionButton(label, () => {
-          void runAction("Updating take review…", "workflow_set_take_status", {
-            sceneId: scene.id,
-            cut: cut.id.cut,
-            takeId: take.id,
-            status,
-          });
+          void confirmTakeStatus(scene, cut, take.id, status);
         });
         button.disabled = Boolean(busy) || take.status === status;
         actions.append(button);
@@ -3517,19 +3896,6 @@ function addFact(dl: HTMLDListElement, label: string, value: string): void {
   const dd = document.createElement("dd");
   dd.textContent = value;
   dl.append(dt, dd);
-}
-
-function statusLabel(status: StageStatus): string {
-  switch (status) {
-    case "present":
-      return "ready";
-    case "draft":
-      return "draft";
-    case "approved":
-      return "approved";
-    default:
-      return "missing";
-  }
 }
 
 function speechLabel(mode: SpeechMode | null | undefined): string {

@@ -667,10 +667,23 @@ pub fn prepare_render(
             input_asset_ids.push(asset_id.clone());
         }
     }
+    crate::workflow::identity::assign(state);
+    let shot_id = state
+        .scene(scene_id)
+        .and_then(|scene| scene.cuts.iter().find(|cut| cut.id == id))
+        .map(|cut| cut.stable_id.clone())
+        .unwrap_or_default();
+    let scope = (!shot_id.is_empty()).then(|| crate::workflow::state::JobScope {
+        kind: "shot".into(),
+        id: shot_id,
+    });
     if let Some(index) = reusable_job {
         state.jobs[index].input_asset_ids = input_asset_ids;
         state.jobs[index].output_path = Some(output_path);
         state.jobs[index].error = None;
+        if state.jobs[index].scope.is_none() {
+            state.jobs[index].scope = scope;
+        }
     } else {
         let job_id = state.next_job_id();
         state.jobs.push(JobRecord {
@@ -678,6 +691,7 @@ pub fn prepare_render(
             input_asset_ids,
             output_path: Some(output_path),
             raw_provider_id: Some(id.code()),
+            scope,
             ..JobRecord::open(job_id, "render")
         });
     }

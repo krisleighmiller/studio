@@ -19,6 +19,64 @@ enum Relink {
     LabelsOnly,
 }
 
+/// Add one shot with a new stable id and the next display number.
+/// Existing shot ids and cut numbers stay put. The sketch is editable and
+/// the source strategy and production note stay empty.
+pub fn add_alternate_shot(state: &mut ProjectState, scene_id: u32) -> Result<String, String> {
+    let label = {
+        let scene = state
+            .scenes
+            .iter()
+            .find(|scene| scene.id == scene_id)
+            .ok_or_else(|| format!("Scene {scene_id} not found"))?;
+        scene.cuts.iter().map(|cut| cut.id.cut).max().unwrap_or(0) + 1
+    };
+    let kept: Vec<String> = state
+        .scene(scene_id)
+        .map(|scene| {
+            scene
+                .cuts
+                .iter()
+                .map(|cut| cut.stable_id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let scene = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .ok_or_else(|| format!("Scene {scene_id} not found"))?;
+    let mut cut = CutRecord::new(CutId::new(scene_id, label));
+    cut.title = Some(format!("Alternate {label}"));
+    cut.sketch = Some(crate::workflow::state::CutSketch {
+        title: Some(format!("Alternate {label}")),
+        visual_prompt: Some(String::new()),
+        ..crate::workflow::state::CutSketch::default()
+    });
+    scene.cuts.push(cut);
+    assign(state);
+    let stable = state
+        .scene(scene_id)
+        .and_then(|scene| scene.cuts.iter().find(|cut| cut.id.cut == label))
+        .map(|cut| cut.stable_id.clone())
+        .unwrap_or_default();
+    if stable.is_empty() {
+        return Err("could not allocate a stable shot id".into());
+    }
+    let scene = state
+        .scene(scene_id)
+        .ok_or_else(|| format!("Scene {scene_id} not found"))?;
+    if scene
+        .cuts
+        .iter()
+        .filter(|cut| cut.id.cut != label)
+        .any(|cut| !kept.iter().any(|id| id == &cut.stable_id))
+    {
+        return Err("adding an alternate angle renumbered an existing shot id".into());
+    }
+    Ok(stable)
+}
+
 pub fn assign(state: &mut ProjectState) -> bool {
     let mut next_scene = next_numeric(state, true);
     let mut next_shot = next_numeric(state, false);
@@ -659,5 +717,33 @@ mod tests {
         assert_eq!(state.scene(1).unwrap().stable_id, "scene_1");
         assert_eq!(state.scene(1).unwrap().cuts[0].stable_id, "shot_1");
         assert!(!assign(&mut state));
+    }
+
+    #[test]
+    fn alternate_angle_allocates_a_new_shot_without_renumbering() {
+        let mut state = ProjectState::new();
+        let scene = state.scene_mut(1, "Scene 1");
+        let mut existing = CutRecord::new(CutId::new(1, 8));
+        existing.stable_id = "shot_8".into();
+        existing.title = Some("Arrival".into());
+        scene.cuts.push(existing);
+        let stable = add_alternate_shot(&mut state, 1).unwrap();
+        crate::workflow::animatic::sync(&mut state);
+        let scene = state.scene(1).unwrap();
+        assert_eq!(scene.cuts[0].stable_id, "shot_8");
+        assert_eq!(scene.cuts[0].id.cut, 8);
+        let added = scene.cuts.iter().find(|cut| cut.stable_id == stable).unwrap();
+        assert_ne!(added.stable_id, "shot_8");
+        assert_eq!(added.id.cut, 9);
+        assert!(added.sketch.as_ref().is_some_and(|sketch| !sketch.is_empty()));
+        assert!(added.visual_source.is_none());
+        assert!(added.production_note_path.is_none());
+        assert!(scene
+            .animatic
+            .as_ref()
+            .unwrap()
+            .shots
+            .iter()
+            .any(|shot| shot.cut_id == added.id));
     }
 }

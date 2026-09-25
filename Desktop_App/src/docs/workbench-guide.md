@@ -4,16 +4,16 @@ In-app Help. Specialist sections list required inputs and a basic prompt for eac
 
 ## What this is
 
-A **stoppable desktop production desk** for video projects: open a project folder, edit and preview locally, and direct work through chat. Specialists (script → characters → scene plan → stills/gen → assemble) run under a thin Director — not as separate agent rooms you have to babysit.
+A desktop production studio for video projects. **File → Open Project…** opens the folder in **Studio**. Plan, Produce, and Finish cover the recipe stages. Jobs stay under the scene list, and Director sits on the right. Files, Assets, Voices, and Settings stay on their own surfaces.
 
 ## First run
 
 1. **Edit → Settings…** (`Ctrl+,`) — add at least one named API (pick a protocol: Atlas, OpenAI-compatible, Anthropic, Gemini, Ollama, ElevenLabs, Kling). Fetch the model library where supported, set **Generation defaults**, and pin chat LLMs if needed. Use **+** to add more APIs.
 2. Pick a **chat model** in the dropdown at the bottom of the chat panel.
-3. **File → Open Project…** — any folder on disk can be the project root.
+3. **File → Open Project…** — any folder on disk can be the project root. The project opens in Studio. **View → Studio** (`Ctrl+Alt+P`) returns there.
 4. Attach context with **drag-and-drop** onto chat, or explorer / tab **Add to Chat**.
 
-You own model choice. The desk is not locked to one vendor; specialists use your Settings defaults unless you override them in chat or a handoff.
+You own model choice. Studio is not locked to one vendor; specialists use your Settings defaults unless you override them in chat or a handoff.
 
 ## Director chat
 
@@ -31,7 +31,7 @@ Each turn includes project root, selected explorer path, focused editor file (an
 
 **Judgement override:** If you are in a hurry, want a basic pack, or do not know how to answer a style/character/runtime menu, say **stop asking**, **you decide**, or **use your best judgement**. Director picks remaining brief items from the script, records them in Creative Direction, and writes files. It should not keep offering menus.
 
-**Long scripts:** A full production plan is written in steps (brief, then one script section at a time). After you answer any brief questions, leave the desk running — it continues until `prod.md` and `Scene_Prompts/` are complete.
+**Long scripts:** A full production plan is written in steps (brief, then one script section at a time). After you answer any brief questions, leave Studio running — it continues until `prod.md` and `Scene_Prompts/` are complete.
 
 Say **`adult`** / **`nsfw`** on a generate turn to use **Settings → Adult content** slots (see Settings tips).
 
@@ -383,15 +383,18 @@ Project/
 
 **Basic use:** Open the tab → Record or Library → Approve / Choose to save under the character folder. Then point Text-Sync / Scene Generation at that WAV or profile.
 
-## Desk (non-chat)
+## Studio
 
 | Area | Notes |
 |------|--------|
-| **Explorer** | Tree, new file/folder, rename (`F2`), delete (`Del`, confirms), copy path, Add to Chat |
-| **Editor** | Tabs for text, images, audio/video; Save / Save As; markdown preview; Rename / Delete for saved files |
-| **Player** | Scrub, play/pause, rates ~0.25x–1x (`Shift+,` / `Shift+.`) |
-| **Settings** | Opens as an editor tab (Edit menu) |
-| **Character Voice** | View → Character Voice (or explorer → Open Character Voice…). Record / ElevenLabs library / Design traits; no Director |
+| **Studio** | Default production workspace after a project opens. Plan, Produce, and Finish. View → Studio |
+| **Jobs** | Ledger under the scene list. Open a finished or failed job to reach its image, video, audio, or review export |
+| **Finish** | Takes, review export, picture lock, post, and QC for the selected scene |
+| **Director** | Right-hand panel. Attached context is what the next turn sends |
+| **Files** | Explorer, editor tabs, and the media player. Rename (`F2`), delete (`Del`, confirms), copy path, Add to Chat |
+| **Assets** | Project media filtered from the same files. Opens in the media viewer |
+| **Settings** | Edit → Settings… |
+| **Voices** | View → Character Voice (or a character’s Create voice / Edit voice). Record / ElevenLabs library / Design traits |
 
 ## Settings tips
 

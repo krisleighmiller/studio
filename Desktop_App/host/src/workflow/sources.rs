@@ -191,6 +191,7 @@ pub fn bind_selected_exit_frame(
     state: &mut ProjectState,
     scene_id: u32,
     cut_number: u32,
+    frame_time: Option<f64>,
 ) -> Result<String, String> {
     let cut_id = CutId::new(scene_id, cut_number);
     let source = state
@@ -268,15 +269,35 @@ pub fn bind_selected_exit_frame(
             video.display()
         ));
     }
+    let chosen = match frame_time {
+        Some(value) if value.is_finite() && value >= 0.0 => value,
+        Some(_) => {
+            return Err("frame time must be a non-negative number of seconds".into());
+        }
+        None => {
+            let duration = fs_ops::probe_duration_seconds(
+                video
+                    .to_str()
+                    .ok_or_else(|| "selected take path is not valid UTF-8".to_string())?,
+            )?;
+            (duration - 0.1).max(0.0)
+        }
+    };
+    let previous_asset = state
+        .scene(scene_id)
+        .and_then(|scene| scene.cuts.iter().find(|cut| cut.id == cut_id))
+        .and_then(|cut| cut.visual_source.as_ref())
+        .and_then(|source| source.asset_id.clone());
     let rel = next_continuity_rel(root, state, scene_id, cut_number, predecessor.cut);
     let output = root.join(&rel);
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("could not create continuity-frame folder: {error}"))?;
     }
-    fs_ops::extract_out_frame(
+    fs_ops::extract_frame_at(
         video.to_string_lossy().to_string(),
         Some(output.to_string_lossy().to_string()),
+        Some(chosen),
     )?;
     let asset_id = state.push_asset(AssetRecord {
         id: String::new(),
@@ -289,10 +310,15 @@ pub fn bind_selected_exit_frame(
         source_job_id: None,
         parent_asset_id,
         notes: Some(format!(
-            "selected exit frame from Scene {} Cut {} take {}",
+            "selected exit frame from Scene {} Cut {} take {} at {chosen:.3}s",
             predecessor.source_scene, predecessor.cut, take_id
         )),
     });
+    crate::workflow::identity::record_version(
+        state,
+        &asset_id,
+        AssetStatus::Approved,
+    );
     let cut = state
         .scenes
         .iter_mut()
@@ -303,9 +329,9 @@ pub fn bind_selected_exit_frame(
         .visual_source
         .as_mut()
         .ok_or_else(|| "visual-source strategy disappeared".to_string())?;
-    source.asset_id = Some(asset_id);
+    source.asset_id = Some(asset_id.clone());
     source.source_take_id = Some(take_id);
-    source.frame_time_seconds = None;
+    source.frame_time_seconds = Some(chosen);
     source.predecessor = Some(predecessor);
     if source
         .predecessor_shot_id
@@ -316,7 +342,51 @@ pub fn bind_selected_exit_frame(
     {
         source.predecessor_shot_id = Some(resolved_shot_id);
     }
+    if let Some(old) = previous_asset.filter(|old| old != &asset_id) {
+        crate::workflow::identity::mark_asset_dependents(state, scene_id, &old);
+        crate::workflow::identity::mark_upstream_changed(
+            state,
+            scene_id,
+            cut_number,
+            std::slice::from_ref(&old),
+        );
+    }
     Ok(rel)
+}
+
+/// Shots whose bound continuity frame comes from this cut. Replacing the
+/// predecessor selection clears those bindings; it does not approve a new frame.
+pub fn continuity_dependents(
+    state: &ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+) -> Vec<String> {
+    let cut_id = CutId::new(scene_id, cut_number);
+    let stable = state
+        .scene(scene_id)
+        .and_then(|scene| scene.cuts.iter().find(|cut| cut.id == cut_id))
+        .map(|cut| cut.stable_id.clone())
+        .unwrap_or_default();
+    let mut labels = Vec::new();
+    for scene in &state.scenes {
+        for cut in &scene.cuts {
+            let Some(source) = cut.visual_source.as_ref() else {
+                continue;
+            };
+            if source.strategy != VisualSourceStrategy::PreviousSelectedTakeExitFrame
+                || source.asset_id.is_none()
+            {
+                continue;
+            }
+            let linked = source.predecessor == Some(cut_id)
+                || (!stable.is_empty()
+                    && source.predecessor_shot_id.as_deref() == Some(stable.as_str()));
+            if linked {
+                labels.push(format!("Scene {} Cut {}", scene.id, cut.id.cut));
+            }
+        }
+    }
+    labels
 }
 
 pub fn invalidate_dependents(
@@ -563,5 +633,125 @@ mod tests {
         assert!(state.assets.is_empty());
         assert!(state.scenes[0].cuts[0].takes.is_empty());
         assert!(state.scenes[0].cuts[0].selected_take.is_none());
+    }
+
+    #[test]
+    fn changing_the_predecessor_selection_unbinds_without_approving_a_replacement() {
+        let mut state = ProjectState::new();
+        let first = state.scene_mut(1, "Scene 1").cut_mut(1);
+        first.stable_id = "shot_1".into();
+        first.takes.push(TakeRecord {
+            id: "take_a".into(),
+            path: "a.mp4".into(),
+            status: TakeStatus::Selected,
+            notes: None,
+        });
+        first.takes.push(TakeRecord {
+            id: "take_b".into(),
+            path: "b.mp4".into(),
+            status: TakeStatus::Alternate,
+            notes: None,
+        });
+        first.selected_take = Some("take_a".into());
+        let second = state.scene_mut(1, "Scene 1").cut_mut(2);
+        second.stable_id = "shot_2".into();
+        let mut source = VisualSourceSpec::new(VisualSourceStrategy::PreviousSelectedTakeExitFrame);
+        source.predecessor = Some(CutId::new(1, 1));
+        source.predecessor_shot_id = Some("shot_1".into());
+        source.asset_id = Some("frame_1".into());
+        source.source_take_id = Some("take_a".into());
+        source.frame_time_seconds = Some(1.25);
+        second.visual_source = Some(source);
+        state.assets.push(AssetRecord {
+            id: "frame_1".into(),
+            path: "Preproduction/Scene1/continuity_frames/old.png".into(),
+            role: AssetRole::ContinuityFrame,
+            status: AssetStatus::Approved,
+            scene_id: Some(1),
+            cut_id: Some(CutId::new(1, 2)),
+            character_id: None,
+            source_job_id: None,
+            parent_asset_id: Some("take_a".into()),
+            notes: None,
+        });
+
+        let invalidated = set_take_status(&mut state, 1, 1, "take_b", TakeStatus::Selected).unwrap();
+        assert_eq!(invalidated, 1);
+        let bound = state.scenes[0].cuts[1].visual_source.as_ref().unwrap();
+        assert!(bound.asset_id.is_none());
+        assert!(bound.source_take_id.is_none());
+        assert!(bound.frame_time_seconds.is_none());
+        assert!(!state.scenes[0].cuts[1].visual_source_ready());
+        assert_eq!(state.assets.len(), 1);
+        assert_eq!(continuity_dependents(&state, 1, 1), Vec::<String>::new());
+    }
+
+    #[test]
+    fn binding_persists_the_chosen_frame_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("Scenes/Scene1/Cut1/take.mp4");
+        fs::create_dir_all(video.parent().unwrap()).unwrap();
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:r=25",
+                "-t",
+                "2",
+                video.to_str().unwrap(),
+            ])
+            .output();
+        let Ok(status) = status else {
+            panic!("ffmpeg is required to bind a reviewed continuity frame");
+        };
+        assert!(
+            status.status.success(),
+            "ffmpeg could not write a test clip: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let mut state = ProjectState::new();
+        let first = state.scene_mut(1, "Scene 1").cut_mut(1);
+        first.stable_id = "shot_1".into();
+        first.takes.push(TakeRecord {
+            id: "take_a".into(),
+            path: "Scenes/Scene1/Cut1/take.mp4".into(),
+            status: TakeStatus::Selected,
+            notes: None,
+        });
+        first.selected_take = Some("take_a".into());
+        state.assets.push(AssetRecord {
+            id: "take_a".into(),
+            path: "Scenes/Scene1/Cut1/take.mp4".into(),
+            role: AssetRole::VideoTake,
+            status: AssetStatus::Present,
+            scene_id: Some(1),
+            cut_id: Some(CutId::new(1, 1)),
+            character_id: None,
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: None,
+        });
+        let second = state.scene_mut(1, "Scene 1").cut_mut(2);
+        second.stable_id = "shot_2".into();
+        let mut source = VisualSourceSpec::new(VisualSourceStrategy::PreviousSelectedTakeExitFrame);
+        source.predecessor = Some(CutId::new(1, 1));
+        source.predecessor_shot_id = Some("shot_1".into());
+        second.visual_source = Some(source);
+
+        let path = bind_selected_exit_frame(dir.path(), &mut state, 1, 2, Some(0.4)).unwrap();
+        assert!(dir.path().join(&path).is_file());
+        let bound = state.scenes[0].cuts[1].visual_source.as_ref().unwrap();
+        assert_eq!(bound.frame_time_seconds, Some(0.4));
+        assert_eq!(bound.source_take_id.as_deref(), Some("take_a"));
+        let asset = state.asset(bound.asset_id.as_deref().unwrap()).unwrap();
+        assert_eq!(asset.parent_asset_id.as_deref(), Some("take_a"));
+        assert_eq!(asset.role, AssetRole::ContinuityFrame);
+        assert!(state
+            .versions
+            .iter()
+            .any(|version| version.asset_id == asset.id && version.path == path));
+        assert!(state.scenes[0].cuts[1].visual_source_ready());
     }
 }

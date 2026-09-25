@@ -292,6 +292,15 @@ pub fn extract_out_frame(
     video_path: String,
     output_path: Option<String>,
 ) -> Result<String, String> {
+    extract_frame_at(video_path, output_path, None)
+}
+
+/// Extract one frame. `at_seconds` uses an accurate seek; `None` stays near the end.
+pub fn extract_frame_at(
+    video_path: String,
+    output_path: Option<String>,
+    at_seconds: Option<f64>,
+) -> Result<String, String> {
     let video = path_from_str(&video_path)?;
     if !video.is_file() {
         return Err(format!("Not a video file: {}", video.display()));
@@ -319,23 +328,36 @@ pub fn extract_out_frame(
         }
     }
 
-    // Specialist contract: last-frame fallback via -sseof -0.1 (never bare -frames:v 1).
-    let status = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-sseof",
-            "-0.1",
-            "-i",
-            video
-                .to_str()
-                .ok_or_else(|| "Video path is not valid UTF-8".to_string())?,
-            "-frames:v",
-            "1",
-            "-q:v",
-            "2",
-            out.to_str()
-                .ok_or_else(|| "Output path is not valid UTF-8".to_string())?,
-        ])
+    let video_arg = video
+        .to_str()
+        .ok_or_else(|| "Video path is not valid UTF-8".to_string())?
+        .to_string();
+    let out_arg = out
+        .to_str()
+        .ok_or_else(|| "Output path is not valid UTF-8".to_string())?
+        .to_string();
+    let mut command = Command::new("ffmpeg");
+    command.arg("-y");
+    if let Some(seconds) = at_seconds {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err("frame time must be a non-negative number of seconds".into());
+        }
+        // Decode up to the requested time so the still is that frame, not a nearby keyframe.
+        command
+            .arg("-i")
+            .arg(&video_arg)
+            .arg("-ss")
+            .arg(format!("{seconds:.3}"));
+    } else {
+        // Specialist contract: last-frame fallback via -sseof -0.1 (never bare -frames:v 1).
+        command
+            .arg("-sseof")
+            .arg("-0.1")
+            .arg("-i")
+            .arg(&video_arg);
+    }
+    let status = command
+        .args(["-frames:v", "1", "-q:v", "2", &out_arg])
         .output()
         .map_err(|error| format!("Could not run ffmpeg (is it installed on PATH?): {error}"))?;
 
@@ -353,12 +375,19 @@ pub fn extract_out_frame(
         ));
     }
     let bytes = fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+    let note = match at_seconds {
+        Some(seconds) => format!(
+            "Out-frame extracted at {seconds:.3}s. Upload this path as the start frame; do not treat it as a character reference."
+        ),
+        None => "Out-frame extracted near end of clip (-sseof -0.1). Upload this path as the start frame; do not treat it as a character reference.".into(),
+    };
     Ok(json!({
         "ok": true,
         "video_path": video.to_string_lossy(),
         "output_path": out.to_string_lossy(),
+        "frame_time_seconds": at_seconds,
         "bytes": bytes,
-        "note": "Out-frame extracted near end of clip (-sseof -0.1). Upload this path as the start frame; do not treat it as a character reference.",
+        "note": note,
     })
     .to_string())
 }

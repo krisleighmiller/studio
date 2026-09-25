@@ -327,7 +327,7 @@ function createMenu(recentProjects = loadRecentProjects()) {
           click: () => send("open-voice"),
         },
         {
-          label: "Production Desk",
+          label: "Studio",
           accelerator: "CmdOrCtrl+Alt+P",
           click: () => send("open-workflow"),
         },
@@ -373,7 +373,7 @@ function createMenu(recentProjects = loadRecentProjects()) {
               title: "About Video Workbench",
               message: "Video Workbench",
               detail:
-                "Stoppable desktop production desk for video projects.\nElectron + Rust host sidecar.",
+                "Desktop production studio for video projects.\nElectron + Rust host sidecar.",
             });
           },
         },

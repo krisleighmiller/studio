@@ -1001,6 +1001,143 @@ fn restore_render_jobs(project_root: &Path, state: &mut ProjectState) -> bool {
     changed
 }
 
+fn restore_assemble_jobs(project_root: &Path, state: &mut ProjectState) -> bool {
+    let jobs: Vec<(String, String, Option<String>, crate::workflow::state::JobStatus)> = state
+        .jobs
+        .iter()
+        .filter(|job| job.kind == "assemble")
+        .filter_map(|job| {
+            Some((
+                job.id.clone(),
+                job.output_path.clone()?,
+                job.raw_provider_id.clone(),
+                job.status,
+            ))
+        })
+        .collect();
+    let mut changed = false;
+    for (job_id, requested, raw, status) in jobs {
+        if matches!(
+            status,
+            crate::workflow::state::JobStatus::Failed
+                | crate::workflow::state::JobStatus::Cancelled
+        ) {
+            continue;
+        }
+        let Some(actual) = existing_media_path(project_root, &requested) else {
+            continue;
+        };
+        let actual_rel = rel(project_root, &actual);
+        let scene_id = raw
+            .as_deref()
+            .and_then(|value| value.strip_prefix("scene_"))
+            .and_then(|value| value.parse::<u32>().ok())
+            .or_else(|| scene_id_from_final_path(&actual_rel));
+        let Some(scene_id) = scene_id else {
+            continue;
+        };
+        if state.scene(scene_id).is_none() {
+            continue;
+        }
+        let asset_id = if let Some(existing) = state
+            .assets
+            .iter()
+            .find(|asset| {
+                asset.path == actual_rel
+                    && matches!(
+                        asset.role,
+                        AssetRole::AssemblyDraft | AssetRole::FinalExport
+                    )
+            })
+            .map(|asset| asset.id.clone())
+        {
+            existing
+        } else {
+            let id = state.push_asset(AssetRecord {
+                id: String::new(),
+                path: actual_rel.clone(),
+                role: AssetRole::AssemblyDraft,
+                status: AssetStatus::Present,
+                scene_id: Some(scene_id),
+                cut_id: None,
+                character_id: None,
+                source_job_id: Some(job_id.clone()),
+                parent_asset_id: None,
+                notes: Some("review export".into()),
+            });
+            crate::workflow::identity::record_version(
+                state,
+                &id,
+                AssetStatus::Present,
+            );
+            changed = true;
+            id
+        };
+        if let Some(asset) = state.asset_mut(&asset_id) {
+            if asset.source_job_id.as_deref() != Some(job_id.as_str()) {
+                asset.source_job_id = Some(job_id.clone());
+                changed = true;
+            }
+            if asset.scene_id != Some(scene_id) {
+                asset.scene_id = Some(scene_id);
+                changed = true;
+            }
+        }
+        let versions_before = state
+            .scene(scene_id)
+            .and_then(|scene| scene.post.as_ref())
+            .map(|post| post.versions.len())
+            .unwrap_or(0);
+        let selected_before = selected_take_count(state, scene_id);
+        if crate::workflow::post::attach_review_export(state, scene_id, &actual_rel).is_ok() {
+            let versions_after = state
+                .scene(scene_id)
+                .and_then(|scene| scene.post.as_ref())
+                .map(|post| post.versions.len())
+                .unwrap_or(0);
+            if versions_after != versions_before || selected_take_count(state, scene_id) != selected_before
+            {
+                changed = true;
+            }
+        }
+        if let Some(job) = state.jobs.iter_mut().find(|job| job.id == job_id) {
+            let was_complete = job.status == crate::workflow::state::JobStatus::Completed
+                && job.output_asset_ids.contains(&asset_id)
+                && job.completed_at.is_some();
+            job.finish(Some(&actual_rel), Some(&asset_id));
+            if !was_complete {
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+fn selected_take_count(state: &ProjectState, scene_id: u32) -> usize {
+    state
+        .scene(scene_id)
+        .map(|scene| {
+            scene
+                .cuts
+                .iter()
+                .filter(|cut| {
+                    cut.takes.iter().any(|take| {
+                        take.status == crate::workflow::state::TakeStatus::Selected
+                            && cut.selected_take.as_deref() == Some(take.id.as_str())
+                    })
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn scene_id_from_final_path(path: &str) -> Option<u32> {
+    let normalized = path.replace('\\', "/");
+    let rest = normalized.split("Final/Scene").nth(1)?;
+    let number: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    number.parse().ok()
+}
+
 fn existing_media_path(root: &Path, requested: &str) -> Option<PathBuf> {
     let requested = {
         let path = PathBuf::from(requested);
@@ -1110,6 +1247,7 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
     }
     restore_wardrobe_plate_assets(project_root, &mut state);
     restore_render_jobs(project_root, &mut state);
+    restore_assemble_jobs(project_root, &mut state);
     prune_missing_scene_look_assets(project_root, &mut state);
     restore_visual_sources(&mut state);
     crate::workflow::breakdown::apply(&mut state, &script_texts);
@@ -1156,6 +1294,7 @@ pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
         repaired |= restore_approved_look_pointers(&mut state);
         repaired |= restore_wardrobe_plate_assets(project_root, &mut state);
         repaired |= restore_render_jobs(project_root, &mut state);
+        repaired |= restore_assemble_jobs(project_root, &mut state);
         prune_missing_scene_look_assets(project_root, &mut state);
         repaired |= restore_visual_sources(&mut state);
         if state.profile.is_none() {
@@ -1277,6 +1416,14 @@ mod tests {
             raw_provider_id: None,
             error: None,
             attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost: None,
+            currency: None,
+            retry_of: None,
         });
 
         assert!(uniquify_duplicate_asset_ids(&mut state));
@@ -1364,6 +1511,14 @@ mod tests {
             raw_provider_id: Some("pip_vale|closeup_front".into()),
             error: None,
             attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost: None,
+            currency: None,
+            retry_of: None,
         });
 
         assert!(restore_wardrobe_plate_assets(dir.path(), &mut state));
@@ -1412,6 +1567,14 @@ mod tests {
             raw_provider_id: Some("S01C02".into()),
             error: None,
             attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost: None,
+            currency: None,
+            retry_of: None,
         });
 
         assert!(restore_render_jobs(dir.path(), &mut state));
@@ -1419,6 +1582,137 @@ mod tests {
         assert_eq!(state.jobs[0].output_asset_ids, vec!["asset_7"]);
         assert_eq!(state.assets[0].source_job_id.as_deref(), Some("job_3"));
         assert!(!restore_render_jobs(dir.path(), &mut state));
+    }
+
+    #[test]
+    fn assembly_output_becomes_a_versioned_review_export() {
+        use crate::scene_plan::handoff::CutId;
+        use crate::workflow::state::{CutRecord, JobAttempt, TakeRecord, TakeStatus};
+
+        let dir = tempfile::tempdir().unwrap();
+        let first = "Final/Scene1_master.mp4";
+        let second = "Final/Scene1_master_v2.mp4";
+        fs::create_dir_all(dir.path().join("Final")).unwrap();
+        fs::write(dir.path().join(first), b"master").unwrap();
+        let mut state = ProjectState::new();
+        let mut cut = CutRecord::new(CutId::new(1, 1));
+        cut.stable_id = "shot_1".into();
+        cut.takes.push(TakeRecord {
+            id: "take_1".into(),
+            path: "Scenes/Scene1/Cut1/take.mp4".into(),
+            status: TakeStatus::Selected,
+            notes: None,
+        });
+        cut.selected_take = Some("take_1".into());
+        state.scene_mut(1, "Scene 1").cuts = vec![cut];
+        state.scene_mut(1, "Scene 1").stable_id = "scene_1".into();
+        state.jobs.push(JobRecord {
+            id: "job_9".into(),
+            kind: "assemble".into(),
+            status: JobStatus::Pending,
+            output_path: Some(first.into()),
+            raw_provider_id: Some("scene_1".into()),
+            attempts: vec![JobAttempt {
+                id: "job_9_attempt_1".into(),
+                status: JobStatus::Pending,
+                error: None,
+                output_asset_ids: Vec::new(),
+                started_at: None,
+                completed_at: None,
+            }],
+            ..pending_job_fields()
+        });
+        state.jobs.push(JobRecord {
+            id: "job_8".into(),
+            kind: "assemble".into(),
+            status: JobStatus::Failed,
+            output_path: Some("Final/Scene1_master_failed.mp4".into()),
+            raw_provider_id: Some("scene_1".into()),
+            error: Some("ffmpeg failed".into()),
+            attempts: vec![JobAttempt {
+                id: "job_8_attempt_1".into(),
+                status: JobStatus::Failed,
+                error: Some("ffmpeg failed".into()),
+                output_asset_ids: Vec::new(),
+                started_at: None,
+                completed_at: None,
+            }],
+            ..pending_job_fields()
+        });
+
+        assert!(restore_assemble_jobs(dir.path(), &mut state));
+        let job = state.jobs.iter().find(|job| job.id == "job_9").unwrap();
+        assert_eq!(job.status, JobStatus::Completed);
+        assert_eq!(job.attempts[0].status, JobStatus::Completed);
+        assert!(job.completed_at.is_some());
+        assert_eq!(job.output_asset_ids.len(), 1);
+        let asset = state.asset(job.output_asset_ids[0].as_str()).unwrap();
+        assert_eq!(asset.role, AssetRole::AssemblyDraft);
+        assert_eq!(asset.scene_id, Some(1));
+        assert_eq!(asset.notes.as_deref(), Some("review export"));
+        let scene = state.scene(1).unwrap();
+        assert_eq!(scene.post.as_ref().unwrap().versions.len(), 1);
+        assert_eq!(
+            scene.post.as_ref().unwrap().versions[0]
+                .assembly_path
+                .as_deref(),
+            Some(first)
+        );
+        assert_eq!(scene.cuts[0].selected_take.as_deref(), Some("take_1"));
+        assert_eq!(scene.cuts[0].takes[0].status, TakeStatus::UsedInAssembly);
+        assert_eq!(
+            state.jobs.iter().find(|job| job.id == "job_8").unwrap().status,
+            JobStatus::Failed
+        );
+        assert!(!restore_assemble_jobs(dir.path(), &mut state));
+
+        fs::write(dir.path().join(second), b"master-2").unwrap();
+        state.jobs.push(JobRecord {
+            id: "job_10".into(),
+            kind: "assemble".into(),
+            status: JobStatus::Pending,
+            output_path: Some(second.into()),
+            raw_provider_id: Some("scene_1".into()),
+            attempts: vec![JobAttempt {
+                id: "job_10_attempt_1".into(),
+                status: JobStatus::Pending,
+                error: None,
+                output_asset_ids: Vec::new(),
+                started_at: None,
+                completed_at: None,
+            }],
+            ..pending_job_fields()
+        });
+        assert!(restore_assemble_jobs(dir.path(), &mut state));
+        let versions = &state.scene(1).unwrap().post.as_ref().unwrap().versions;
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].assembly_path.as_deref(), Some(first));
+        assert_eq!(versions[1].assembly_path.as_deref(), Some(second));
+        assert_ne!(versions[0].id, versions[1].id);
+    }
+
+    fn pending_job_fields() -> JobRecord {
+        JobRecord {
+            id: String::new(),
+            kind: String::new(),
+            provider: None,
+            model: None,
+            input_asset_ids: Vec::new(),
+            output_asset_ids: Vec::new(),
+            status: JobStatus::Pending,
+            output_path: None,
+            raw_provider_id: None,
+            error: None,
+            attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost: None,
+            currency: None,
+            retry_of: None,
+        }
     }
 
     #[test]

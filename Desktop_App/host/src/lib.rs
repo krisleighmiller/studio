@@ -256,6 +256,7 @@ pub fn dispatch(
         "workflow_set_take_status" => workflow::cmd_set_take_status(args),
         "workflow_delete_take" => workflow::cmd_delete_take(args),
         "workflow_prepare_assemble" => workflow::cmd_prepare_assemble(args),
+        "workflow_add_alternate_shot" => workflow::cmd_add_alternate_shot(args),
         "workflow_mark_cut_version" => workflow::cmd_mark_cut_version(args),
         "workflow_set_cut_version_stage" => workflow::cmd_set_cut_version_stage(args),
         "workflow_lock_picture" => workflow::cmd_lock_picture(args),

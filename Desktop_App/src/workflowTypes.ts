@@ -332,6 +332,13 @@ export type JobAttempt = {
   status?: string;
   error?: string | null;
   output_asset_ids?: string[];
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+
+export type JobScope = {
+  kind: string;
+  id: string;
 };
 
 export type JobRecord = {
@@ -342,8 +349,18 @@ export type JobRecord = {
   status?: string;
   error?: string | null;
   output_path?: string | null;
+  raw_provider_id?: string | null;
   output_asset_ids?: string[];
+  input_asset_ids?: string[];
   attempts?: JobAttempt[];
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  scope?: JobScope | null;
+  progress?: string | null;
+  cost?: number | null;
+  currency?: string | null;
+  retry_of?: string | null;
 };
 
 export type ProductionRecipe = "narrative_dialogue" | "montage";

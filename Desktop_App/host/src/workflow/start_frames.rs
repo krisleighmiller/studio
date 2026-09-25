@@ -1402,6 +1402,14 @@ mod tests {
             raw_provider_id: Some("s1_c1".into()),
             error: None,
             attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost: None,
+            currency: None,
+            retry_of: None,
         });
         assert_eq!(
             next_frame_rel(root, &state, 1, 1, "png"),

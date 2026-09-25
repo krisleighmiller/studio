@@ -5,7 +5,9 @@
 //! editorial is recorded as an external NLE decision and leaves the files put.
 use serde::{Deserialize, Serialize};
 
-use crate::workflow::state::{CutRecord, ProductionProfile, ProjectState, SceneRecord, TakeRecord};
+use crate::workflow::state::{
+    CutRecord, ProductionProfile, ProjectState, SceneRecord, TakeRecord, TakeStatus,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -283,6 +285,88 @@ pub fn mark_cut_version(state: &mut ProjectState, scene_id: u32) -> Result<Strin
         editorial_path: editorial,
     });
     Ok(id)
+}
+
+/// Record a review export on a new cut version. An existing version for this
+/// path is left alone, and selected takes stay selected.
+pub fn attach_review_export(
+    state: &mut ProjectState,
+    scene_id: u32,
+    assembly_path: &str,
+) -> Result<String, String> {
+    if let Some(existing) = state.scene(scene_id).and_then(|scene| {
+        scene.post.as_ref().and_then(|post| {
+            post.versions
+                .iter()
+                .find(|version| version.assembly_path.as_deref() == Some(assembly_path))
+                .map(|version| version.id.clone())
+        })
+    }) {
+        mark_selected_takes_used(state, scene_id)?;
+        return Ok(existing);
+    }
+    let scene = scene_mut(state, scene_id)?;
+    let mut shots = Vec::new();
+    let mut ordered = scene.cuts.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|cut| cut.id.cut);
+    for cut in ordered {
+        if let Some(take) = selected_take(cut) {
+            shots.push(VersionShot {
+                shot_id: cut.stable_id.clone(),
+                cut_label: cut.id.cut,
+                take_id: take.id.clone(),
+                path: take.path.clone(),
+            });
+        }
+    }
+    let editorial = scene
+        .post
+        .as_ref()
+        .map(|post| post.editorial_path)
+        .unwrap_or_default();
+    let number = scene
+        .post
+        .as_ref()
+        .map(|post| {
+            post.versions
+                .iter()
+                .filter(|version| version.stage == CutVersionStage::Assembly)
+                .count()
+        })
+        .unwrap_or(0)
+        + 1;
+    let id = next_version_id(state);
+    let scene = scene_mut(state, scene_id)?;
+    let post = scene.post.get_or_insert_with(ScenePost::default);
+    post.versions.push(CutVersion {
+        id: id.clone(),
+        label: format!("Assembly {number}"),
+        stage: CutVersionStage::Assembly,
+        assembly_path: Some(assembly_path.to_string()),
+        shots,
+        editorial_path: editorial,
+    });
+    mark_selected_takes_used(state, scene_id)?;
+    Ok(id)
+}
+
+fn mark_selected_takes_used(state: &mut ProjectState, scene_id: u32) -> Result<(), String> {
+    let scene = scene_mut(state, scene_id)?;
+    for cut in &mut scene.cuts {
+        let Some(selected) = cut.selected_take.clone() else {
+            continue;
+        };
+        if let Some(take) = cut
+            .takes
+            .iter_mut()
+            .find(|take| take.id == selected || take.path == selected)
+        {
+            if take.status == TakeStatus::Selected {
+                take.status = TakeStatus::UsedInAssembly;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn set_version_stage(

@@ -36,8 +36,16 @@ import {
   bindWorkflowDesk,
   clearWorkflowDesk,
   loadWorkflowDesk,
+  openJobsDrawer,
+  setStudioWorkArea,
   refreshWorkflowDesk,
   renderWorkflowDesk,
+  attachDirectorContext,
+  detachDirectorContext,
+  directorContextEntries,
+  directorScopeHeadline,
+  directorTurnSelection,
+  omittedDirectorEntries,
   workflowSelection,
   workflowStatusLine,
 } from "./workflowDesk";
@@ -135,6 +143,14 @@ const OPEN_FILTERS = [
 
 const els = {
   projectName: document.querySelector<HTMLElement>("#project-name")!,
+  shellProjectName: document.querySelector<HTMLElement>("#shell-project-name")!,
+  shellWorkArea: document.querySelector<HTMLSelectElement>("#shell-work-area")!,
+  homeTitle: document.querySelector<HTMLElement>("#home-title")!,
+  homeDetail: document.querySelector<HTMLElement>("#home-detail")!,
+  assetsList: document.querySelector<HTMLElement>("#assets-list")!,
+  navRail: document.querySelector<HTMLElement>("#nav-rail")!,
+  jobsBtn: document.querySelector<HTMLButtonElement>("#jobs-btn")!,
+  settingsBtn: document.querySelector<HTMLButtonElement>("#settings-btn")!,
   fileTree: document.querySelector<HTMLElement>("#file-tree")!,
   newFileBtn: document.querySelector<HTMLButtonElement>("#new-file-btn")!,
   newFolderBtn: document.querySelector<HTMLButtonElement>("#new-folder-btn")!,
@@ -181,6 +197,8 @@ const els = {
   chatMessages: document.querySelector<HTMLElement>("#chat-messages")!,
   chatForm: document.querySelector<HTMLFormElement>("#chat-form")!,
   chatAttachments: document.querySelector<HTMLElement>("#chat-attachments")!,
+  directorContext: document.querySelector<HTMLElement>("#director-context")!,
+  directorScope: document.querySelector<HTMLElement>("#director-scope")!,
   chatInput: document.querySelector<HTMLTextAreaElement>("#chat-input")!,
   chatSendBtn: document.querySelector<HTMLButtonElement>("#chat-send-btn")!,
   chatStopBtn: document.querySelector<HTMLButtonElement>("#chat-stop-btn")!,
@@ -196,6 +214,14 @@ const els = {
   chatRail: document.querySelector<HTMLButtonElement>("#chat-rail")!,
   contextMenu: document.querySelector<HTMLElement>("#context-menu")!,
 };
+
+const SHELL_SURFACES = ["home", "studio", "files", "assets", "voices", "settings"] as const;
+type ShellSurface = (typeof SHELL_SURFACES)[number];
+
+let shellSurface: ShellSurface = "home";
+let shellReturn: ShellSurface = "home";
+let filesEditorId: string | null = null;
+let assetRenderSeq = 0;
 
 let projectRoot: string | null = null;
 let selectedPath: string | null = null;
@@ -319,6 +345,50 @@ function removeChatAttachment(path: string): void {
   renderChatAttachments();
 }
 
+function renderDirectorContext(): void {
+  els.directorScope.textContent = directorScopeHeadline();
+  const entries = directorContextEntries().filter((entry) => entry.kind !== "workArea");
+  const omitted = omittedDirectorEntries().filter((entry) => entry.kind !== "workArea");
+  els.directorContext.replaceChildren();
+  if (!entries.length && !omitted.length) {
+    els.directorContext.classList.add("hidden");
+    return;
+  }
+  els.directorContext.classList.remove("hidden");
+  const heading = document.createElement("p");
+  heading.className = "director-context-heading";
+  heading.textContent = "Attached context";
+  const list = document.createElement("ul");
+  for (const entry of entries) {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = entry.name;
+    name.title = entry.label;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.title = "Remove from the next Director turn";
+    remove.setAttribute("aria-label", `Remove ${entry.name}`);
+    remove.textContent = "×";
+    remove.addEventListener("click", () => detachDirectorContext(entry.kind, entry.id));
+    item.append(name, remove);
+    list.append(item);
+  }
+  els.directorContext.append(heading, list);
+  if (!omitted.length) return;
+  const restore = document.createElement("div");
+  restore.className = "director-context-restore";
+  for (const entry of omitted) {
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "ghost-button";
+    add.textContent = `Attach ${entry.name}`;
+    add.title = entry.label;
+    add.addEventListener("click", () => attachDirectorContext(entry.kind, entry.id));
+    restore.append(add);
+  }
+  els.directorContext.append(restore);
+}
+
 function renderChatAttachments(): void {
   const tab = activeChat();
   els.chatAttachments.innerHTML = "";
@@ -391,12 +461,198 @@ function hideSpecialViews(): void {
   els.docsView.classList.add("hidden");
 }
 
+function isFileTab(tab: EditorTab): boolean {
+  return tab.kind === "text" || tab.kind === "docs" || isMediaKind(tab.kind);
+}
+
+function rememberFileTab(tab: EditorTab | undefined): void {
+  if (tab && isFileTab(tab)) filesEditorId = tab.id;
+}
+
+function paintSurface(): void {
+  const app = document.querySelector("#app");
+  app?.classList.remove(...SHELL_SURFACES.map((name) => `surface-${name}`));
+  app?.classList.add(`surface-${shellSurface}`);
+  for (const button of els.navRail.querySelectorAll<HTMLButtonElement>(".nav-item")) {
+    const on = button.dataset.surface === shellSurface;
+    button.classList.toggle("active", on);
+    if (on) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+  els.settingsBtn.setAttribute("aria-pressed", shellSurface === "settings" ? "true" : "false");
+  const labels: Record<ShellSurface, string> = {
+    home: "Home",
+    studio: "Studio",
+    files: "Files",
+    assets: "Assets",
+    voices: "Voices",
+    settings: "Settings",
+  };
+  document.querySelector("#editor-panel")?.setAttribute("aria-label", labels[shellSurface]);
+  updateShellChrome();
+}
+
+function updateShellChrome(): void {
+  const name = projectRoot ? basename(projectRoot) : "No project";
+  els.shellProjectName.textContent = name;
+  els.shellProjectName.title = projectRoot ?? "";
+  const area = projectRoot ? workflowSelection().workArea : null;
+  els.shellWorkArea.disabled = !area;
+  if (area) els.shellWorkArea.value = area;
+}
+
+function renderHome(): void {
+  if (!projectRoot) {
+    els.homeTitle.textContent = "Production Studio";
+    els.homeDetail.textContent = "Open a project folder to work on scenes, cuts, and review exports.";
+    return;
+  }
+  els.homeTitle.textContent = basename(projectRoot);
+  const status = workflowStatusLine();
+  els.homeDetail.textContent = status ? `${projectRoot}\n${status}` : projectRoot;
+}
+
+function showFileBackedSurface(): void {
+  const preferred = editorTabs.find((tab) => tab.id === filesEditorId && isFileTab(tab));
+  const fallback = [...editorTabs].reverse().find((tab) => isFileTab(tab));
+  activeEditorId = (preferred ?? fallback)?.id ?? null;
+  renderEditor();
+}
+
+function revealSurfaceBody(): void {
+  if (shellSurface === "studio") {
+    openWorkflowTab();
+    return;
+  }
+  if (shellSurface === "voices") {
+    openVoiceTab();
+    return;
+  }
+  if (shellSurface === "settings") {
+    openSettingsTab();
+    return;
+  }
+  if (shellSurface === "files" || shellSurface === "assets") {
+    showFileBackedSurface();
+    if (shellSurface === "assets") void renderAssetBrowser();
+    return;
+  }
+  renderHome();
+}
+
+function showShell(next: ShellSurface): void {
+  if (next === "settings" && shellSurface === "settings") {
+    shellSurface = shellReturn === "settings" ? "home" : shellReturn;
+    paintSurface();
+    revealSurfaceBody();
+    return;
+  }
+  if (next === shellSurface) {
+    paintSurface();
+    if (next === "assets") void renderAssetBrowser();
+    if (next === "home") renderHome();
+    if (next === "studio") renderWorkflowDesk();
+    return;
+  }
+  if (shellSurface !== "settings" && next === "settings") shellReturn = shellSurface;
+  shellSurface = next;
+  paintSurface();
+  revealSurfaceBody();
+}
+
+function placeFileSurface(tab: EditorTab, forceFiles = false): void {
+  rememberFileTab(tab);
+  if (!forceFiles && (shellSurface === "files" || shellSurface === "assets")) return;
+  shellSurface = "files";
+  paintSurface();
+}
+
+const MEDIA_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "mp4",
+  "m4v",
+  "webm",
+  "mov",
+  "mkv",
+  "wav",
+  "mp3",
+  "ogg",
+  "opus",
+  "flac",
+  "m4a",
+  "aac",
+]);
+
+async function collectProjectMedia(
+  dir: string,
+  out: DirEntry[],
+  depth: number,
+): Promise<void> {
+  if (depth > 8 || out.length >= 500) return;
+  let entries: DirEntry[];
+  try {
+    entries = await loadChildren(dir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+    if (entry.isDir) {
+      await collectProjectMedia(entry.path, out, depth + 1);
+      continue;
+    }
+    const ext = entry.name.split(".").pop()?.toLowerCase() ?? "";
+    if (MEDIA_EXTENSIONS.has(ext)) out.push(entry);
+  }
+}
+
+async function renderAssetBrowser(): Promise<void> {
+  const seq = ++assetRenderSeq;
+  if (!projectRoot) {
+    els.assetsList.innerHTML =
+      '<p class="empty-state">Open a project to browse its media files.</p>';
+    return;
+  }
+  const found: DirEntry[] = [];
+  await collectProjectMedia(projectRoot, found, 0);
+  if (seq !== assetRenderSeq) return;
+  if (!found.length) {
+    els.assetsList.innerHTML = '<p class="empty-state">No media files in this project.</p>';
+    return;
+  }
+  const openPath = editorTabs.find((tab) => tab.id === activeEditorId)?.path ?? null;
+  els.assetsList.replaceChildren();
+  for (const entry of found) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `asset-row${entry.path === openPath ? " active" : ""}`;
+    const relative = projectRoot && entry.path.startsWith(projectRoot)
+      ? entry.path.slice(projectRoot.length).replace(/^[/\\]/, "")
+      : entry.path;
+    const name = document.createElement("span");
+    name.textContent = entry.name;
+    const where = document.createElement("small");
+    where.textContent = relative;
+    button.append(name, where);
+    button.addEventListener("click", () => {
+      selectedPath = entry.path;
+      void openFile(entry.path);
+    });
+    els.assetsList.append(button);
+  }
+}
+
 function setChatCollapsed(collapsed: boolean): void {
   chatCollapsed = collapsed;
   els.chatPanel.classList.toggle("collapsed", collapsed);
   els.chatSplitter.classList.toggle("chat-collapsed", collapsed);
   els.chatRail.classList.toggle("hidden", !collapsed);
-  const label = collapsed ? "Show chat" : "Hide chat";
+  const label = collapsed ? "Show Director" : "Hide Director";
   els.toggleChatBtn.title = `${label} (Ctrl+Alt+H)`;
   els.toggleChatBtn.setAttribute("aria-label", label);
   els.toggleChatBtn.setAttribute("aria-pressed", collapsed ? "true" : "false");
@@ -458,6 +714,7 @@ function openDocsTab(): void {
   const existing = editorTabs.find((tab) => tab.kind === "docs");
   if (existing) {
     activeEditorId = existing.id;
+    placeFileSurface(existing, true);
     renderEditor();
     return;
   }
@@ -479,6 +736,7 @@ function openDocsTab(): void {
   };
   editorTabs.push(tab);
   activeEditorId = tab.id;
+  placeFileSurface(tab, true);
   renderEditor();
   setStatus("Documentation");
 }
@@ -546,19 +804,18 @@ function openWorkflowTab(): void {
   editorTabs.unshift(tab);
   activeEditorId = tab.id;
   renderEditor();
-  setStatus("Production", workflowStatusLine() || "View → Production Desk");
+  setStatus("Studio", workflowStatusLine() || "View → Studio");
 }
 
 async function loadProjectWorkflow(root: string): Promise<void> {
-  openWorkflowTab();
-  if (workflowLoadedRoot === root) return;
-  workflowLoadedRoot = root;
-  await loadWorkflowDesk(root);
+  if (workflowLoadedRoot !== root) {
+    workflowLoadedRoot = root;
+    await loadWorkflowDesk(root);
+  }
   const selection = workflowSelection();
   if (selection.path) selectedPath = selection.path;
-  if (isWorkflowTab(activeEditor())) {
-    setStatus("Production", workflowStatusLine());
-  }
+  showShell("studio");
+  setStatus("Studio", workflowStatusLine());
 }
 
 function isAvTab(tab: EditorTab | undefined): tab is EditorTab {
@@ -878,22 +1135,16 @@ function syncSettingsTabDirty(): void {
 function renderEditorTabs(): void {
   els.editorTabs.innerHTML = "";
   for (const tab of editorTabs) {
-    const dirty =
-      tab.kind === "settings" ? settingsAreDirty() : tab.dirty;
+    if (tab.kind === "workflow" || tab.kind === "voice" || tab.kind === "settings") continue;
+    const dirty = tab.dirty;
     const button = document.createElement("button");
     button.type = "button";
     button.className = `tab${tab.id === activeEditorId ? " active" : ""}${dirty ? " dirty" : ""}`;
     button.role = "tab";
     button.title =
-      tab.kind === "settings"
-        ? "App settings"
-        : tab.kind === "voice"
-          ? "Character voice studio"
-          : tab.kind === "docs"
-            ? "Workbench documentation"
-            : tab.kind === "workflow"
-              ? "Production desk"
-              : (tab.path ?? "Untitled (not saved to project yet)");
+      tab.kind === "docs"
+        ? "Workbench documentation"
+        : (tab.path ?? "Untitled (not saved to project yet)");
     button.dataset.tabId = tab.id;
     button.innerHTML = `<span class="tab-label"></span>`;
     button.querySelector(".tab-label")!.textContent = tab.name;
@@ -913,6 +1164,7 @@ function renderEditorTabs(): void {
     button.addEventListener("click", () => {
       syncTabFromEditor();
       activeEditorId = tab.id;
+      rememberFileTab(tab);
       renderEditor();
     });
     button.addEventListener("contextmenu", (event) => {
@@ -980,7 +1232,7 @@ function renderEditor(): void {
     }
     els.workflowView.classList.remove("hidden");
     renderWorkflowDesk();
-    setStatus("Production", workflowStatusLine() || "View → Production Desk");
+    setStatus("Studio", workflowStatusLine() || "View → Studio");
     return;
   }
 
@@ -1078,6 +1330,7 @@ function renderEditor(): void {
 
 function renderChatTabs(): void {
   els.chatTabs.innerHTML = "";
+  els.chatTabs.classList.toggle("hidden", chatTabs.length < 2);
   for (const tab of chatTabs) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1109,6 +1362,7 @@ function renderChatTabs(): void {
 
 function renderChat(): void {
   renderChatTabs();
+  renderDirectorContext();
   renderChatAttachments();
   const tab = activeChat();
   els.chatMessages.innerHTML = "";
@@ -1378,13 +1632,16 @@ async function renderExplorer(): Promise<void> {
     pendingRename = null;
     els.projectName.textContent = "No project";
     els.projectName.title = "";
+    updateShellChrome();
     els.fileTree.innerHTML =
       '<p class="empty-state">Open a project folder from <strong>File → Open Project…</strong></p>';
+    if (shellSurface === "assets") void renderAssetBrowser();
     return;
   }
 
   els.projectName.textContent = basename(projectRoot);
   els.projectName.title = projectRoot;
+  updateShellChrome();
 
   const next = document.createElement("div");
   await renderTreeNode(next, projectRoot, 0);
@@ -1392,6 +1649,7 @@ async function renderExplorer(): Promise<void> {
 
   els.fileTree.replaceChildren(...next.childNodes);
   restoreExplorerViewport(scrollTop, scrollLeft);
+  if (shellSurface === "assets") void renderAssetBrowser();
 }
 
 async function onTreeActivate(
@@ -2311,6 +2569,7 @@ function openUntitledFile(): void {
   };
   editorTabs.push(tab);
   activeEditorId = tab.id;
+  placeFileSurface(tab, true);
   renderEditor();
   focusEditor();
   setStatus("Untitled buffer — save to add it to the project");
@@ -2322,7 +2581,9 @@ async function openFile(path: string): Promise<void> {
     syncTabFromEditor();
     pauseAllMedia();
     activeEditorId = existing.id;
+    placeFileSurface(existing);
     renderEditor();
+    if (shellSurface === "assets") void renderAssetBrowser();
     if (existing.kind === "text") focusEditor();
     return;
   }
@@ -2383,7 +2644,9 @@ async function openFile(path: string): Promise<void> {
   };
   editorTabs.push(tab);
   activeEditorId = tab.id;
+  placeFileSurface(tab);
   renderEditor();
+  if (shellSurface === "assets") void renderAssetBrowser();
 }
 
 async function openFileDialog(): Promise<void> {
@@ -2893,7 +3156,7 @@ function setChatWorkingChrome(busy: boolean): void {
     ? "Stopping the Director…"
     : busy
       ? "Director is working — Stop or Esc to cancel"
-      : "Ask the Director — drag files here or right-click Add to Chat…";
+      : "Ask the Director…";
   els.chatSendBtn.disabled = busy;
   els.chatSendBtn.classList.toggle("is-working", busy && !directorStopping);
   els.chatSendBtn.textContent = busy ? "Working…" : "Send";
@@ -3026,6 +3289,7 @@ async function sendChatMessage(
   await paintSoon();
 
   const editor = activeEditor();
+  const scope = directorTurnSelection();
   try {
     const result = await invoke<{
       reply: string;
@@ -3051,8 +3315,14 @@ async function sendChatMessage(
           capabilityDefaults: settings.capabilityDefaults ?? {},
           adultContentEnabled: Boolean(settings.adultContentEnabled),
           adultCapabilityDefaults: settings.adultCapabilityDefaults ?? {},
-          workflowStage: isWorkflowTab(editor) ? workflowSelection().stage : null,
-          workflowSceneId: isWorkflowTab(editor) ? workflowSelection().sceneId : null,
+          workflowStage: scope.stage,
+          workflowSceneId: scope.sceneId,
+          workflowSceneStableId: scope.sceneStableId,
+          workflowShotStableId: scope.shotStableId,
+          workflowAssetId: scope.assetId,
+          workflowLookSlotId: scope.lookSlotId,
+          workflowRequirementId: scope.requirementId,
+          workflowWorkArea: scope.workArea,
         },
       },
     });
@@ -3069,6 +3339,13 @@ async function sendChatMessage(
     // Planner yielded so the desk could paint — resume the same host loop.
     // Do not add a pause bubble or a fake "continue" user turn.
     if (!halted && result.plannerPaused && autoContinueDepth < MAX_AUTO_CONTINUE) {
+      if (projectRoot) {
+        try {
+          await refreshWorkflowDesk();
+        } catch {
+          /* keep the turn going if the desk cannot refresh yet */
+        }
+      }
       autoContinueDepth += 1;
       upsertDirectorProgressMessage(
         "Director still working — resuming the same turn…",
@@ -3680,13 +3957,13 @@ function handleMenuAction(action: string): void {
       toggleMarkdownPreview();
       break;
     case "open-settings":
-      openSettingsTab();
+      showShell("settings");
       break;
     case "open-voice":
-      openVoiceTab();
+      showShell("voices");
       break;
     case "open-workflow":
-      openWorkflowTab();
+      showShell("studio");
       break;
     case "toggle-chat":
       toggleChatPanel();
@@ -3706,6 +3983,50 @@ function handleMenuAction(action: string): void {
 }
 
 function bindUi(): void {
+  for (const button of els.navRail.querySelectorAll<HTMLButtonElement>(".nav-item")) {
+    button.addEventListener("click", () => {
+      const surface = button.dataset.surface;
+      if (surface === "home" || surface === "studio" || surface === "files" || surface === "assets" || surface === "voices") {
+        showShell(surface);
+      }
+    });
+  }
+  els.navRail.addEventListener("keydown", (event) => {
+    const items = [...els.navRail.querySelectorAll<HTMLButtonElement>(".nav-item")];
+    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (index < 0) return;
+    const next =
+      event.key === "ArrowDown" || event.key === "ArrowRight"
+        ? items[(index + 1) % items.length]
+        : event.key === "ArrowUp" || event.key === "ArrowLeft"
+          ? items[(index - 1 + items.length) % items.length]
+          : event.key === "Home"
+            ? items[0]
+            : event.key === "End"
+              ? items[items.length - 1]
+              : null;
+    if (!next) return;
+    event.preventDefault();
+    next.focus();
+  });
+  els.jobsBtn.addEventListener("click", () => {
+    openJobsDrawer();
+    if (shellSurface !== "studio") showShell("studio");
+  });
+  els.shellWorkArea.addEventListener("change", () => {
+    const value = els.shellWorkArea.value;
+    if (value === "plan" || value === "produce" || value === "finish") {
+      setStudioWorkArea(value);
+      if (shellSurface !== "studio") showShell("studio");
+    }
+  });
+  els.settingsBtn.addEventListener("click", () => showShell("settings"));
+  document.querySelector("#home-open-project")?.addEventListener("click", () => {
+    void openProject();
+  });
+  document.querySelector("#home-studio")?.addEventListener("click", () => showShell("studio"));
+  document.querySelector("#home-files")?.addEventListener("click", () => showShell("files"));
+
   els.mediaPlayPause.addEventListener("click", () => togglePlayPause());
 
   for (const button of document.querySelectorAll<HTMLButtonElement>(".rate-btn")) {
@@ -4198,7 +4519,7 @@ async function boot(): Promise<void> {
     onAddToChat: (path) => addPathToChat(path),
     onOpenVoice: (characterDirectory) => {
       selectedPath = characterDirectory;
-      openVoiceTab();
+      showShell("voices");
     },
     onComposeChat: (text, attachment) => {
       if (!activeChat()) createChatTab("Director");
@@ -4210,6 +4531,8 @@ async function boot(): Promise<void> {
     },
     onSelectionChange: (selection) => {
       if (selection.path) selectedPath = selection.path;
+      updateShellChrome();
+      renderDirectorContext();
     },
     chatModel: () => getSettings().selectedChatModel,
     onStatus: setStatus,
@@ -4234,11 +4557,18 @@ async function boot(): Promise<void> {
   createChatTab("Director");
   bindSplitters();
   bindUi();
-  await bindMenuAndProgress();
   updateExplorerActionState();
   renderChat();
+  renderHome();
+  paintSurface();
   renderEditor();
   await renderExplorer();
+  try {
+    await bindMenuAndProgress();
+  } catch (error) {
+    setStatus(`Host events unavailable: ${error}`);
+    return;
+  }
   setStatus("Ready — open a project to begin");
 }
 

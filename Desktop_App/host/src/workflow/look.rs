@@ -1690,6 +1690,14 @@ mod tests {
             raw_provider_id: Some("s1_look_01".into()),
             error: None,
             attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost: None,
+            currency: None,
+            retry_of: None,
         });
         let rel = next_look_rel_for_state(root, &state, 1, AssetRole::InteriorReference, "png");
         assert_eq!(rel, "Preproduction/Scene1/references/interior_2.png");
@@ -1719,6 +1727,14 @@ mod tests {
             raw_provider_id: Some("s1_look_05".into()),
             error: None,
             attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost: None,
+            currency: None,
+            retry_of: None,
         });
         import::save_project(root, state).unwrap();
         let abs = root.join(rel);
@@ -1764,6 +1780,14 @@ mod tests {
             raw_provider_id: Some("s1_look_01".into()),
             error: None,
             attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost: None,
+            currency: None,
+            retry_of: None,
         });
         import::save_project(root, state).unwrap();
         let actual = root.join("Preproduction/Scene1/references/interior_1.jpg");
@@ -2144,6 +2168,14 @@ mod tests {
             raw_provider_id: Some("s1_look_01".into()),
             error: None,
             attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost: None,
+            currency: None,
+            retry_of: None,
         });
         let scene = state.scene_mut(1, "The last train");
         let mut board = LookBoard::default();

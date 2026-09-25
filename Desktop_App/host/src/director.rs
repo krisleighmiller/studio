@@ -47,6 +47,20 @@ pub struct DirectorContext {
     /// Production desk selected scene id.
     #[serde(default)]
     pub workflow_scene_id: Option<u32>,
+    /// Stable scene id. Display numbers are labels.
+    #[serde(default)]
+    pub workflow_scene_stable_id: Option<String>,
+    #[serde(default)]
+    pub workflow_shot_stable_id: Option<String>,
+    #[serde(default)]
+    pub workflow_asset_id: Option<String>,
+    #[serde(default)]
+    pub workflow_look_slot_id: Option<String>,
+    #[serde(default)]
+    pub workflow_requirement_id: Option<String>,
+    /// UI lens: `plan`, `produce`, or `finish`.
+    #[serde(default)]
+    pub workflow_work_area: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -333,6 +347,26 @@ fn format_capability_defaults(context: &DirectorContext) -> Vec<String> {
     lines
 }
 
+fn append_workflow_scope(lines: &mut Vec<String>, context: &DirectorContext) {
+    let scope = crate::workflow::scope::DirectorScope {
+        work_area: context.workflow_work_area.clone(),
+        scene_stable_id: context.workflow_scene_stable_id.clone(),
+        shot_stable_id: context.workflow_shot_stable_id.clone(),
+        asset_id: context.workflow_asset_id.clone(),
+        look_slot_id: context.workflow_look_slot_id.clone(),
+        requirement_id: context.workflow_requirement_id.clone(),
+    };
+    if scope.is_empty() {
+        return;
+    }
+    let state = context
+        .project_root
+        .as_deref()
+        .filter(|root| !root.is_empty())
+        .and_then(|root| crate::workflow::import::load_state(std::path::Path::new(root)).ok());
+    lines.push(crate::workflow::scope::describe(state.as_ref(), &scope));
+}
+
 fn context_system_message(context: &DirectorContext) -> String {
     let project_root = context.project_root.as_deref().filter(|s| !s.is_empty());
     let mut lines = vec![
@@ -373,6 +407,7 @@ fn context_system_message(context: &DirectorContext) -> String {
         ),
         "- Scene intent is not production notes. Scene look is not character identity. Existing prod.md / Scene_Prompts coverage does not complete those stages. Route “draft the scene intent” to scene_intent and “draft the scene look” to scene_look, never scene_plan.".to_string(),
     ];
+    append_workflow_scope(&mut lines, context);
     lines.extend(format_capability_defaults(context));
     if !context.attached_paths.is_empty() {
         lines.push(format!(

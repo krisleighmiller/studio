@@ -1070,6 +1070,13 @@ pub struct AssetRecord {
     pub notes: Option<String>,
 }
 
+/// Where a job applies. `kind` is `project`, `scene`, `shot`, `asset`, or `deliverable`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobScope {
+    pub kind: String,
+    pub id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobRecord {
     pub id: String,
@@ -1092,6 +1099,24 @@ pub struct JobRecord {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<JobAttempt>,
+    /// RFC3339 UTC. Absent on older state; never treat absence as zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<JobScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// Job id this attempt retries. The previous job stays in the ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1103,6 +1128,10 @@ pub struct JobAttempt {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_asset_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 /// A frozen path for one asset. Approving a replacement does not rewrite this path.
@@ -1132,17 +1161,30 @@ impl JobRecord {
             output_path: None,
             raw_provider_id: None,
             error: None,
+            created_at: Some(utc_now()),
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost: None,
+            currency: None,
+            retry_of: None,
             attempts: vec![JobAttempt {
                 id: attempt_id,
                 status: JobStatus::Pending,
                 error: None,
                 output_asset_ids: Vec::new(),
+                started_at: None,
+                completed_at: None,
             }],
         }
     }
 
     pub fn finish(&mut self, path: Option<&str>, asset_id: Option<&str>) {
         self.status = JobStatus::Completed;
+        if self.completed_at.is_none() {
+            self.completed_at = Some(utc_now());
+        }
         if let Some(path) = path {
             self.output_path = Some(path.to_string());
         }
@@ -1153,6 +1195,9 @@ impl JobRecord {
         }
         if let Some(attempt) = self.attempts.last_mut() {
             attempt.status = JobStatus::Completed;
+            if attempt.completed_at.is_none() {
+                attempt.completed_at = self.completed_at.clone();
+            }
             if let Some(asset_id) = asset_id {
                 if !attempt.output_asset_ids.iter().any(|id| id == asset_id) {
                     attempt.output_asset_ids.push(asset_id.to_string());
@@ -1160,6 +1205,105 @@ impl JobRecord {
             }
         }
     }
+
+    /// Elapsed time from a real start timestamp to a real completion timestamp.
+    /// Missing timestamps are unknown, not zero.
+    pub fn elapsed_label(&self) -> String {
+        let start = self
+            .started_at
+            .as_deref()
+            .or(self.created_at.as_deref())
+            .and_then(parse_utc);
+        let end = self.completed_at.as_deref().and_then(parse_utc);
+        match (start, end) {
+            (Some(start), Some(end)) if end >= start => format_elapsed_seconds(end - start),
+            _ => "unknown".into(),
+        }
+    }
+}
+
+/// UTC timestamp `YYYY-MM-DDTHH:MM:SSZ`.
+pub fn utc_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format_unix_utc(secs)
+}
+
+pub fn format_unix_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let tod = secs % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
+pub fn parse_utc(value: &str) -> Option<u64> {
+    let value = value.trim().trim_end_matches('Z');
+    let (date, time) = value.split_once('T')?;
+    let mut date = date.split('-');
+    let year: i32 = date.next()?.parse().ok()?;
+    let month: u32 = date.next()?.parse().ok()?;
+    let day: u32 = date.next()?.parse().ok()?;
+    if date.next().is_some() {
+        return None;
+    }
+    let mut time = time.split(':');
+    let hour: u64 = time.next()?.parse().ok()?;
+    let minute: u64 = time.next()?.parse().ok()?;
+    let second: u64 = time.next()?.parse().ok()?;
+    if time.next().is_some() || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
+}
+
+fn format_elapsed_seconds(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m {}s", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
+    }
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let year = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    (year as i32, month as u32, day as u32)
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<u64> {
+    if !(1..=12).contains(&month) || day == 0 || day > 31 {
+        return None;
+    }
+    let year = year as i64;
+    let month = month as i64;
+    let day = day as i64;
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = (year - era * 400) as u64;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp as u64 + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe as i64 - 719_468;
+    u64::try_from(days).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1663,20 +1807,41 @@ mod tests {
                 notes: None,
             });
         }
-        state.jobs.push(JobRecord {
-            id: "job_4".into(),
-            kind: "scene_look".into(),
-            provider: None,
-            model: None,
-            input_asset_ids: Vec::new(),
-            output_asset_ids: Vec::new(),
-            status: JobStatus::Completed,
-            output_path: None,
-            raw_provider_id: None,
-            error: None,
-            attempts: Vec::new(),
-        });
+        let mut job = JobRecord::open("job_4", "scene_look");
+        job.status = JobStatus::Completed;
+        state.jobs.push(job);
         assert_eq!(state.next_asset_id(), "asset_4");
         assert_eq!(state.next_job_id(), "job_5");
+    }
+
+    #[test]
+    fn older_jobs_load_without_timing_or_cost() {
+        let job: JobRecord = serde_json::from_str(
+            r#"{"id":"job_1","kind":"render","status":"completed","attempts":[{"id":"job_1_attempt_1","status":"completed"}]}"#,
+        )
+        .unwrap();
+        assert!(job.created_at.is_none());
+        assert!(job.started_at.is_none());
+        assert!(job.completed_at.is_none());
+        assert!(job.cost.is_none());
+        assert!(job.currency.is_none());
+        assert!(job.scope.is_none());
+        assert_eq!(job.elapsed_label(), "unknown");
+        assert!(job.attempts[0].completed_at.is_none());
+    }
+
+    #[test]
+    fn elapsed_uses_real_timestamps_and_does_not_invent_zero() {
+        assert_eq!(format_unix_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(parse_utc("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_utc("1970-01-01T00:01:30Z"), Some(90));
+        let mut job = JobRecord::open("job_1", "render");
+        job.created_at = Some("1970-01-01T00:00:00Z".into());
+        job.completed_at = None;
+        assert_eq!(job.elapsed_label(), "unknown");
+        job.completed_at = Some("1970-01-01T00:01:30Z".into());
+        assert_eq!(job.elapsed_label(), "1m 30s");
+        job.started_at = Some("1970-01-01T00:01:00Z".into());
+        assert_eq!(job.elapsed_label(), "30s");
     }
 }

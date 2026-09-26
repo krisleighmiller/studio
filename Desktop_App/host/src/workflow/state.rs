@@ -7,7 +7,9 @@ use crate::output_paths::slugify;
 use crate::scene_plan::handoff::{CutId, Pace, RenderLane, SceneType, SpeechMode};
 use crate::scene_plan::strategy::SceneStrategy;
 use crate::script::{DialogueLine, ScriptBeat};
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 
 pub const WORKFLOW_VERSION: u32 = 2;
 pub const STATE_REL: &str = "Preproduction/workflow_state.json";
@@ -550,11 +552,37 @@ pub struct StageMap {
     pub take_review: StageStatus,
     #[serde(default)]
     pub assemble: StageStatus,
+    /// Readiness for stage ids the recipe names that are not one of the known fields.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, StageStatus>,
 }
 
 impl StageMap {
     pub fn set(&mut self, stage: WorkflowStage, status: StageStatus) {
         *self.get_mut(stage) = status;
+    }
+
+    pub fn status_of(&self, id: &str) -> StageStatus {
+        if let Some(stage) = WorkflowStage::parse(id) {
+            return self.get(stage);
+        }
+        self.extensions
+            .get(id)
+            .copied()
+            .unwrap_or(StageStatus::Missing)
+    }
+
+    /// Known stages stay on their typed fields. Other ids persist in `extensions`.
+    pub fn set_extension(&mut self, id: &str, status: StageStatus) {
+        if let Some(stage) = WorkflowStage::parse(id) {
+            self.set(stage, status);
+            return;
+        }
+        if status == StageStatus::Missing {
+            self.extensions.remove(id);
+        } else {
+            self.extensions.insert(id.to_string(), status);
+        }
     }
 
     pub fn get(&self, stage: WorkflowStage) -> StageStatus {
@@ -1330,39 +1358,55 @@ pub struct SettingsSnapshot {
     pub aspect_ratio: Option<String>,
 }
 
-/// Built-in recipe identity. Stage order, dependencies, and required roles
-/// live on the recipe graph, not in branches of this enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ProductionRecipe {
-    #[default]
-    NarrativeDialogue,
-    Montage,
+/// Registry id for a recipe. Built-in ids come from the host table.
+/// A project can also name a recipe that arrived as a validated document.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProductionRecipe(String);
+
+impl Default for ProductionRecipe {
+    fn default() -> Self {
+        Self("narrative_dialogue".to_string())
+    }
 }
 
 impl ProductionRecipe {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NarrativeDialogue => "narrative_dialogue",
-            Self::Montage => "montage",
-        }
+    pub fn narrative() -> Self {
+        Self("narrative_dialogue".to_string())
     }
 
+    pub fn montage() -> Self {
+        Self("montage".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Accept an id only when the built-in recipe table has that record.
     pub fn parse(value: &str) -> Option<Self> {
-        match value
-            .trim()
-            .to_ascii_lowercase()
-            .replace(['-', ' '], "_")
-            .as_str()
-        {
-            "narrative_dialogue" | "narrative" => Some(Self::NarrativeDialogue),
-            "montage" | "music_video" => Some(Self::Montage),
-            _ => None,
-        }
+        crate::workflow::recipe::canonical_id(value).map(Self)
     }
 
-    pub fn label(self) -> &'static str {
-        crate::workflow::recipe::graph(self).label
+    pub fn label(&self) -> String {
+        crate::workflow::recipe::graph(self.clone()).label.clone()
+    }
+}
+
+impl Serialize for ProductionRecipe {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProductionRecipe {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if let Some(parsed) = Self::parse(&value) {
+            return Ok(parsed);
+        }
+        crate::workflow::recipe::custom_recipe_id(&value)
+            .map(Self)
+            .ok_or_else(|| D::Error::custom(format!("unknown recipe `{value}`")))
     }
 }
 
@@ -1513,6 +1557,9 @@ pub struct DeliverableRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProductionProfile {
     pub recipe: ProductionRecipe,
+    /// Validated recipe data for an id the built-in table does not contain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_document: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deliverables: Vec<DeliverableRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1550,7 +1597,8 @@ pub struct ProductionProfile {
 impl Default for ProductionProfile {
     fn default() -> Self {
         Self {
-            recipe: ProductionRecipe::NarrativeDialogue,
+            recipe: ProductionRecipe::narrative(),
+            recipe_document: None,
             deliverables: Vec::new(),
             audience: None,
             platforms: Vec::new(),
@@ -1664,19 +1712,44 @@ fn migrate_workflow_json(value: &mut serde_json::Value) -> Result<Vec<String>, S
         ));
     }
     let mut warnings = Vec::new();
-    if let Some(recipe) = value
+    let recipe_id = value
         .pointer("/profile/recipe")
         .and_then(|item| item.as_str())
-    {
-        if ProductionRecipe::parse(recipe).is_none() {
-            warnings.push(format!(
-                "Unknown recipe `{recipe}` loaded as narrative dialogue."
-            ));
-            if let Some(profile) = value.get_mut("profile").and_then(|item| item.as_object_mut()) {
-                profile.insert(
-                    "recipe".into(),
-                    serde_json::Value::String("narrative_dialogue".into()),
-                );
+        .map(str::to_string);
+    if let Some(recipe) = recipe_id {
+        if ProductionRecipe::parse(&recipe).is_none() {
+            let normalized = crate::workflow::recipe::recipe_key(&recipe);
+            let document = value.pointer("/profile/recipe_document").cloned();
+            let accepted = document
+                .as_ref()
+                .and_then(|item| crate::workflow::recipe::parse_recipe_document(item).ok())
+                .is_some_and(|item| item.id == normalized);
+            if accepted {
+                if let Some(profile) = value.get_mut("profile").and_then(|item| item.as_object_mut()) {
+                    profile.insert(
+                        "recipe".into(),
+                        serde_json::Value::String(normalized),
+                    );
+                }
+            } else {
+                let reason = document
+                    .as_ref()
+                    .map(|item| {
+                        crate::workflow::recipe::parse_recipe_document(item)
+                            .err()
+                            .unwrap_or_else(|| "recipe document id does not match the profile".into())
+                    })
+                    .unwrap_or_else(|| "no recipe document was included".into());
+                warnings.push(format!(
+                    "Unknown recipe `{recipe}` loaded as narrative dialogue. {reason}."
+                ));
+                if let Some(profile) = value.get_mut("profile").and_then(|item| item.as_object_mut()) {
+                    profile.insert(
+                        "recipe".into(),
+                        serde_json::Value::String("narrative_dialogue".into()),
+                    );
+                    profile.remove("recipe_document");
+                }
             }
         }
     }

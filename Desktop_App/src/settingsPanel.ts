@@ -5,6 +5,7 @@ import {
   PROTOCOL_KINDS,
   apiAllowsEmptyKey,
   apiById,
+  apiCredentialReady,
   chatCapableApis,
   defaultSettings,
   dropdownLlmModels,
@@ -87,7 +88,7 @@ function modelsForSlot(
     if (slot.mediaType === "Video" && !caps.video) continue;
     if (slot.mediaType === "Image" && !caps.image) continue;
     if (slot.mediaType === "Audio" && !caps.audio) continue;
-    if (!api.apiKey && !apiAllowsEmptyKey(api) && api.catalog.length === 0) {
+    if (!apiCredentialReady(api) && api.catalog.length === 0) {
       continue;
     }
     for (const model of api.catalog) {
@@ -708,7 +709,7 @@ export function populateChatModelSelect(select: HTMLSelectElement): void {
 
   let optionCount = 0;
   for (const api of chatCapableApis(settings)) {
-    if (!api.apiKey && !apiAllowsEmptyKey(api)) continue;
+    if (!apiCredentialReady(api)) continue;
     const models = dropdownLlmModels(api);
     if (models.length === 0) continue;
 

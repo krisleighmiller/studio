@@ -1357,10 +1357,13 @@ mod tests {
         assert!(card.contains("Preproduction/Scene1/start_frames/cut_1_v1.png"));
         assert!(card.contains("Characters/Tom Vale/model_sheet/tom_closeup_front.png"));
         assert!(card.contains("Preproduction/Scene1/references/wardrobe_1.png"));
-        assert!(card.contains("Avoid: modern clothes, text"));
-        let action = card.split("```json").nth(1).unwrap_or(&card);
-        assert!(action.contains("reference_images"));
-        assert!(!action.contains("source_frame"));
+        assert!(card.contains("### Files read or uploaded"));
+        assert!(card.contains("### Artifacts modified"));
+        assert!(!card.contains("```json"));
+        assert!(!card.contains("Avoid: modern clothes, text"));
+        let reads = card.split("### Artifacts modified").next().unwrap_or(&card);
+        assert!(reads.contains("tom_closeup_front.png"));
+        assert!(!reads.contains("source_frame"));
         let job = state.jobs.last().unwrap();
         assert_eq!(job.kind, "cut_start_frame");
         assert_eq!(job.status, JobStatus::Pending);
@@ -1438,7 +1441,10 @@ mod tests {
         );
         let (card, _) =
             prepare_edit(root, &mut state, 1, 1, &frame.id, "Make Tom's coat wetter").unwrap();
-        assert!(card.contains("\"source_frame\""));
+        assert!(card.contains("### Files read or uploaded"));
+        assert!(card.contains("### Artifacts modified"));
+        assert!(!card.contains("```json"));
+        assert!(!card.contains("\"source_frame\""));
         assert!(card.contains(&requested));
         assert!(card.contains("cut_1_v2.png"));
         assert_eq!(state.jobs.last().unwrap().kind, "cut_start_frame_edit");

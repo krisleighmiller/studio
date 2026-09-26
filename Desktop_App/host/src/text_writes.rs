@@ -3,12 +3,19 @@
 //! The model may supply content and a filename. The host decides which
 //! directories and extensions that filename is allowed to use. Paths outside
 //! those directories are rejected. Overwrites of protected project state are
-//! rejected. An overwrite inside the allowlist is a host-owned destination, so
-//! it can be written, and the caller reports a short change summary.
+//! rejected. A new file directly in the specialist directory can be written.
+//! An overwrite, or a path nested deeper than that directory, is staged until
+//! the user approves the change summary.
 
+use crate::director_actions::{
+    format_approval_request, validate_action, ActionKind, DirectorAction,
+};
 use crate::project_path::{self, PathIntent};
+use serde_json::{json, Map};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 pub const MAX_FILES: usize = 8;
 pub const MAX_BYTES_PER_FILE: usize = 200_000;
@@ -19,6 +26,23 @@ pub struct AuthorizedWrite {
     pub path: PathBuf,
     pub relative: String,
     pub replacing: bool,
+    /// Nested under the specialist directory, so it is not a host default path.
+    pub unusual: bool,
+}
+
+struct StagedBatch {
+    specialist: String,
+    files: Vec<StagedFile>,
+}
+
+struct StagedFile {
+    relative: String,
+    body: String,
+}
+
+fn staged_store() -> &'static Mutex<HashMap<String, StagedBatch>> {
+    static STORE: OnceLock<Mutex<HashMap<String, StagedBatch>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub fn authorize_text_write(
@@ -67,9 +91,106 @@ pub fn authorize_text_write(
         .unwrap_or(false);
     Ok(AuthorizedWrite {
         path: confined.into_path_buf(),
-        relative: relative_text,
+        relative: relative_text.clone(),
         replacing,
+        unusual: is_unusual(&relative_text),
     })
+}
+
+pub fn approval_required(write: &AuthorizedWrite) -> bool {
+    write.replacing || write.unusual
+}
+
+pub fn approval_summary(write: &AuthorizedWrite, previous: Option<&str>, next: &str) -> String {
+    let mut parts = Vec::new();
+    if write.unusual {
+        parts.push(format!(
+            "unusual path `{}` (a host default is one file directly in the specialist directory)",
+            write.relative
+        ));
+    }
+    if write.replacing {
+        parts.push(change_summary(previous, next));
+    } else if !write.unusual {
+        parts.push(change_summary(None, next));
+    }
+    format!("`{}`: {}", write.relative, parts.join("; "))
+}
+
+/// Write a new default file. Overwrites and unusual paths stay on disk only
+/// after approval.
+pub fn commit_text_write(write: &AuthorizedWrite, body: &str, approved: bool) -> Result<(), String> {
+    if approval_required(write) && !approved {
+        let previous = fs::read_to_string(&write.path).ok();
+        return Err(format!(
+            "approval required: {}",
+            approval_summary(write, previous.as_deref(), body)
+        ));
+    }
+    if let Some(parent) = write.path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create directory {}: {error}", parent.display()))?;
+    }
+    fs::write(&write.path, body)
+        .map_err(|error| format!("Could not write {}: {error}", write.path.display()))
+}
+
+pub fn stage_text_writes(specialist: &str, files: Vec<(String, String)>) -> String {
+    let id = crate::pending::random_id();
+    let batch = StagedBatch {
+        specialist: specialist.to_string(),
+        files: files
+            .into_iter()
+            .map(|(relative, body)| StagedFile { relative, body })
+            .collect(),
+    };
+    staged_store()
+        .lock()
+        .expect("staged text writes")
+        .insert(id.clone(), batch);
+    id
+}
+
+pub fn text_write_approval_card(staged_id: &str, summaries: &[String]) -> Result<String, String> {
+    let mut inputs = Map::new();
+    inputs.insert("staged_id".into(), json!(staged_id));
+    let action = DirectorAction {
+        action: ActionKind::RunSpecialist,
+        specialist: Some("text_write".into()),
+        inputs,
+        message: None,
+        op: None,
+        path: None,
+    };
+    let validated = validate_action(action, None).map_err(|error| error.to_string())?;
+    let mut card = format_approval_request(&validated.action, &validated);
+    card.push_str("\n### Text changes\n");
+    for summary in summaries {
+        card.push_str(&format!("- {summary}\n"));
+    }
+    Ok(card)
+}
+
+pub fn commit_staged_text_write(staged_id: &str, project_root: Option<&str>) -> Result<Vec<String>, String> {
+    let batch = staged_store()
+        .lock()
+        .expect("staged text writes")
+        .remove(staged_id)
+        .ok_or_else(|| "That text change is no longer waiting for approval.".to_string())?;
+    let mut written = Vec::new();
+    for file in batch.files {
+        let authorized = authorize_text_write(
+            &batch.specialist,
+            &file.relative,
+            project_root,
+            file.body.len(),
+            0,
+            0,
+        )?;
+        commit_text_write(&authorized, &file.body, true)?;
+        written.push(authorized.relative);
+    }
+    Ok(written)
 }
 
 pub fn change_summary(previous: Option<&str>, next: &str) -> String {
@@ -84,6 +205,10 @@ pub fn change_summary(previous: Option<&str>, next: &str) -> String {
         previous.chars().count(),
         next.chars().count()
     )
+}
+
+fn is_unusual(relative: &str) -> bool {
+    relative.split('/').filter(|part| !part.is_empty()).count() != 2
 }
 
 fn extension_allowed(specialist: &str, relative: &Path) -> bool {
@@ -206,7 +331,66 @@ mod tests {
         let write = authorize_text_write("script", "Scripts/draft.md", Some(&root), 3, 0, 0)
             .unwrap();
         assert!(write.replacing);
-        assert_eq!(change_summary(Some("old"), "new"), "overwrite (3 → 3 characters)");
+        assert!(approval_required(&write));
+        let refused = commit_text_write(&write, "new\n", false);
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+        assert!(refused.unwrap_err().contains("overwrite"));
+    }
+
+    #[test]
+    fn an_unusual_path_is_not_written_until_approved() {
+        let (_dir, root) = project();
+        let write = authorize_text_write(
+            "script",
+            "Scripts/notes/outline.txt",
+            Some(&root),
+            4,
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(write.unusual);
+        let path = Path::new(&root).join("Scripts/notes/outline.txt");
+        assert!(commit_text_write(&write, "note\n", false).is_err());
+        assert!(!path.exists());
+        commit_text_write(&write, "note\n", true).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "note\n");
+    }
+
+    #[test]
+    fn a_new_file_in_the_specialist_directory_writes_without_approval() {
+        let (_dir, root) = project();
+        let write =
+            authorize_text_write("production_helper", "Research/digest.md", Some(&root), 8, 0, 0)
+                .unwrap();
+        assert!(!approval_required(&write));
+        commit_text_write(&write, "digest\n", false).unwrap();
+        assert_eq!(
+            fs::read_to_string(Path::new(&root).join("Research/digest.md")).unwrap(),
+            "digest\n"
+        );
+    }
+
+    #[test]
+    fn an_approved_overwrite_uses_the_staged_body() {
+        let (_dir, root) = project();
+        let path = Path::new(&root).join("Research/digest.md");
+        fs::write(&path, "old").unwrap();
+        let write =
+            authorize_text_write("production_helper", "Research/digest.md", Some(&root), 4, 0, 0)
+                .unwrap();
+        let summary = approval_summary(&write, Some("old"), "new\n");
+        let id = stage_text_writes(
+            "production_helper",
+            vec![("Research/digest.md".into(), "new\n".into())],
+        );
+        let card = text_write_approval_card(&id, &[summary]).unwrap();
+        assert!(card.contains("overwrite"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+        let written = commit_staged_text_write(&id, Some(&root)).unwrap();
+        assert_eq!(written, vec!["Research/digest.md".to_string()]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
     }
 
     #[test]

@@ -36,12 +36,18 @@ import {
   describeDirectorContext,
   type DirectorContextEntry,
 } from "./studio/selectors/directorContext";
+import { continuityChoice } from "./studio/selectors/continuityChoice";
 import { requirementBlocks } from "./studio/selectors/project";
 import { buildStudioView } from "./studio/viewModel";
 import { renderProjectSummary } from "./studio/components/projectSummary";
 import { renderWorkspaceStatus } from "./studio/components/workspaceStatus";
-import { mixLabel, mouthLabel, roleLabel, speechLabel } from "./studio/labels";
-import { bindSurfaceHost, clearIntentDraft, effectiveVisualSourceStrategy, renderAssembleStage, renderCharactersStage, renderIntentStage, renderProductionNotesStage, renderProjectProfile, renderReadiness, renderReferenceImagesStage, renderRenderStage, renderSketchStage, renderTakeReviewStage, resetSurfaceSession, setProfileOpen, stopRoughCut, visualSourceReady } from "./studio/surfaces/productionSurfaces";
+import { mouthLabel, roleLabel, speechLabel } from "./studio/labels";
+import { paintUnknownRecipeStage } from "./studio/recipeStage";
+import { clearIntentDraft, renderSceneIntentView, type SceneIntentIntent } from "./studio/sceneIntentView";
+import { buildIntentModel } from "./studio/surfaces/surfaceModels";
+import { bindSurfaceHost, effectiveVisualSourceStrategy, noteCharacterSaved, renderAssembleStage, renderCharactersStage, renderProductionNotesStage, renderProjectProfile, renderReadiness, renderReferenceImagesStage, renderRenderStage, renderSketchStage, renderTakeReviewStage, resetSurfaceSession, setProfileOpen, stopRoughCut, visualSourceReady, type AssembleIntent, type CharacterIntent, type NotesIntent, type ProfileIntent, type ReferenceIntent, type SketchIntent, type TakeReviewIntent } from "./studio/surfaces/productionSurfaces";
+import { block, missingPanel } from "./studio/surfaces/shared";
+import { renderScriptStage } from "./studio/surfaces/scriptStage";
 
 export type WorkflowSelection = {
   sceneId: number | null;
@@ -97,7 +103,7 @@ let selectedRequirementId: string | null = null;
 let selectedStage: StageId = "production_notes";
 let selectedSurface: SurfaceId = "production_notes";
 let detailsOpen = false;
-let jobsOpen = true;
+let jobsOpen = false;
 let jobsFilter: JobFilter | "all" = "all";
 let busy: string | null = null;
 let actionNote: string | null = null;
@@ -328,6 +334,27 @@ async function runAction(
 export function openJobsDrawer(): void {
   jobsOpen = true;
   renderWorkflowDesk();
+}
+
+export function toggleJobsDrawer(): void {
+  jobsOpen = !jobsOpen;
+  renderWorkflowDesk();
+}
+
+export function jobsDrawerOpen(): boolean {
+  return jobsOpen;
+}
+
+export function jobsSummary(): { total: number; active: number; failed: number } {
+  const jobs = state?.jobs ?? [];
+  let active = 0;
+  let failed = 0;
+  for (const job of jobs) {
+    const status = (job.status ?? "").toLowerCase();
+    if (status === "failed" || status === "error") failed += 1;
+    else if (status === "pending" || status === "running" || status === "awaiting" || status === "in_progress") active += 1;
+  }
+  return { total: jobs.length, active, failed };
 }
 
 function syncSurfaceHost(): void {
@@ -756,7 +783,6 @@ function renderMain(): HTMLElement {
     ),
   );
   const studio = currentStudioView();
-  if (studio) main.append(renderWorkspaceStatus(studio.workspace));
   const blockers = scene ? sceneBlockers(scene.id) : [];
   const currentStage = activeStages().find((stage) => stage.id === selectedSurface);
   const banner = surfaceBanner({
@@ -770,12 +796,41 @@ function renderMain(): HTMLElement {
     main.append(block("empty-state", banner.text));
     return main;
   }
-  if (banner?.tone === "blocked") {
-    const notice = document.createElement("div");
-    notice.className = "workflow-banner warn";
-    notice.textContent = banner.text;
+  if (scene && selectedSurface !== "scene_look") {
+    const header = document.createElement("header");
+    header.className = "studio-scene-header";
+    const title = document.createElement("h1");
+    title.textContent = scene.title;
+    header.append(title);
+    if (studio) {
+      const status = renderWorkspaceStatus(studio.workspace);
+      status.classList.add("studio-scene-sub");
+      header.append(status);
+    }
+    main.append(header);
+  } else if (studio) {
+    const status = renderWorkspaceStatus(studio.workspace);
+    status.classList.add("studio-scene-sub");
+    main.append(status);
+  }
+  // Scene Look owns its compact blocker summary inside the view (header -> blockers -> hero),
+  // so the shell must not prepend a second copy above the artifact.
+  if (banner?.tone === "blocked" && selectedSurface !== "scene_look") {
+    const details = document.createElement("details");
+    details.className = "studio-blocker-summary";
+    const summary = document.createElement("summary");
+    summary.textContent =
+      currentStage?.disabledReason ??
+      (blockers.length
+        ? `⚠ ${blockers.length} requirement${blockers.length === 1 ? "" : "s"} blocking production · Review requirements`
+        : banner.text);
+    details.append(summary);
     if (!currentStage?.disabledReason) {
       for (const item of blockers) {
+        const row = document.createElement("div");
+        row.className = "studio-blocker-row";
+        const name = document.createElement("span");
+        name.textContent = item.name;
         const attach = actionButton(
           selectedRequirementId === item.id ? `${item.name} attached` : `Attach ${item.name}`,
           () => {
@@ -784,22 +839,17 @@ function renderMain(): HTMLElement {
           },
         );
         attach.disabled = Boolean(busy);
-        notice.append(document.createTextNode(" "), attach);
+        row.append(name, attach);
+        details.append(row);
       }
     }
-    main.append(notice);
+    main.append(details);
   }
   if (selectedSurface === "profile") {
-    main.append(renderProjectProfile());
+    main.append(renderProjectProfile((intent) => handleProfileIntent(intent)));
     return main;
   }
   const sceneStatus = sceneReport(selectedSceneId);
-  if (scene && sceneStatus) {
-    const summary = document.createElement("p");
-    summary.className = "studio-scene-line";
-    summary.textContent = `${scene.title} · ${mixLabel(sceneStatus.mix)} · ${sceneStatus.approved_start_frames} start frames`;
-    main.append(summary);
-  }
   if (sceneStatus?.effectively_performance_heavy && selectedSurface === "production_notes") {
     main.append(
       block(
@@ -809,7 +859,7 @@ function renderMain(): HTMLElement {
     );
   }
   if (selectedSurface === "scene_look" && scene) main.append(renderSceneLookWorkspace(scene));
-  else if (selectedSurface === "characters") main.append(renderCharactersStage());
+  else if (selectedSurface === "characters") main.append(renderCharactersStage((intent) => handleCharacterIntent(intent)));
   else main.append(renderStageContent(scene, sceneStatus));
   if (!scene) return main;
   const details = actionButton(detailsOpen ? "Hide details" : "Details", () => {
@@ -833,54 +883,549 @@ function renderStageContent(scene: SceneRecord | undefined, sceneStatus: SceneRe
       wrap.append(renderScriptStage(scene));
       break;
     case "characters":
-      wrap.append(renderCharactersStage());
+      wrap.append(renderCharactersStage((intent) => handleCharacterIntent(intent)));
       break;
     case "scene_intent":
-      wrap.append(renderIntentStage(scene));
+      wrap.append(renderSceneIntentWorkspace(scene));
       break;
     case "cut_sketches":
-      wrap.append(renderSketchStage(scene, sceneStatus));
+      wrap.append(renderSketchStage(
+        scene,
+        sceneStatus,
+        (intent) => handleSketchIntent(scene, intent),
+        (intent) => handleReferenceIntent(scene, intent),
+      ));
       break;
     case "reference_images":
-      wrap.append(renderReferenceImagesStage(scene, sceneStatus));
+      wrap.append(renderReferenceImagesStage(scene, sceneStatus, (intent) => handleReferenceIntent(scene, intent)));
       break;
     case "production_notes":
       wrap.append(renderReadiness(scene, sceneStatus));
       if (!scene.cuts.length) {
         wrap.append(missingPanel("No production notes for this scene.", "Run scene plan or import a project that has Scene_Prompts."));
       } else {
-        wrap.append(renderProductionNotesStage(scene));
+        wrap.append(renderProductionNotesStage(scene, (intent) => handleNotesIntent(scene, intent)));
       }
       break;
     case "render":
-      wrap.append(renderRenderStage(scene));
+      wrap.append(renderRenderStage(scene, (intent) => handleNotesIntent(scene, intent)));
       break;
     case "take_review":
-      wrap.append(renderTakeReviewStage(scene));
+      wrap.append(renderTakeReviewStage(scene, (intent) => handleTakeReviewIntent(scene, intent)));
       break;
     case "assemble":
-      wrap.append(renderAssembleStage(scene));
+      wrap.append(renderAssembleStage(scene, (intent) => handleAssembleIntent(scene, intent)));
       break;
     case "scene_look":
       break;
-    default:
-      wrap.append(renderRecipeStage(selectedStage));
+    default: {
+      const stage = activeStages().find((item) => item.id === selectedStage);
+      wrap.append(
+        paintUnknownRecipeStage({
+          id: selectedStage,
+          label: stage?.label ?? selectedStage,
+          disabledReason: stage?.disabledReason ?? null,
+        }),
+      );
       break;
+    }
   }
   return wrap;
 }
 
-function renderRecipeStage(stageId: string): HTMLElement {
-  const stage = activeStages().find((item) => item.id === stageId);
-  const wrap = document.createElement("div");
-  wrap.className = "workflow-recipe-stage";
-  const title = document.createElement("h2");
-  title.textContent = stage?.label ?? stageId;
-  const copy = document.createElement("p");
-  copy.className = stage?.disabledReason ? "workflow-banner warn" : "empty-state";
-  copy.textContent = stage?.disabledReason ?? `${title.textContent} is part of this recipe. This build tracks it and does not have a separate editor for it yet.`;
-  wrap.append(title, copy);
-  return wrap;
+function handleProfileIntent(intent: ProfileIntent): void {
+  switch (intent.type) {
+    case "save":
+      void runAction("Saving production profile", "workflow_save_profile", { profile: intent.profile });
+      break;
+    case "set-requirement":
+      void runAction(`Updating ${intent.name}`, "workflow_set_requirement_status", {
+        requirementId: intent.requirementId,
+        status: intent.status,
+      });
+      break;
+    case "add-requirement":
+      void runAction(`Adding ${intent.name}`, "workflow_add_requirement", {
+        name: intent.name,
+        kind: intent.kind,
+        sceneId: intent.sceneId,
+      });
+      break;
+    default:
+      break;
+  }
+}
+
+function handleCharacterIntent(intent: CharacterIntent): void {
+  const args: Record<string, unknown> = {
+    name: intent.name,
+    profile: intent.profile,
+  };
+  if (intent.characterId) args.characterId = intent.characterId;
+  void runAction(
+    intent.characterId ? "Saving character profile…" : "Creating character…",
+    "workflow_save_character",
+    args,
+  ).then((saved) => {
+    if (!saved) return;
+    noteCharacterSaved(intent.characterId);
+    renderWorkflowDesk();
+  });
+}
+
+function handleAssembleIntent(scene: SceneRecord, intent: AssembleIntent): void {
+  switch (intent.type) {
+    case "prepare":
+      void runAction("Preparing assembly…", "workflow_prepare_assemble", { sceneId: scene.id });
+      break;
+    case "set-version-stage":
+      void runAction(`Updating ${intent.label}`, "workflow_set_cut_version_stage", {
+        sceneId: scene.id,
+        versionId: intent.versionId,
+        stage: intent.stage,
+      });
+      break;
+    case "mark-version":
+      void runAction("Marking cut version…", "workflow_mark_cut_version", { sceneId: scene.id });
+      break;
+    case "lock-picture":
+      void runAction("Locking picture…", "workflow_lock_picture", {
+        sceneId: scene.id,
+        versionId: intent.versionId,
+      });
+      break;
+    case "set-editorial":
+      void runAction("Recording editorial path…", "workflow_set_editorial_path", {
+        sceneId: scene.id,
+        path: intent.path,
+        note: intent.note,
+      });
+      break;
+    case "set-post-status":
+      void runAction(`Updating ${intent.label}`, "workflow_set_post_status", {
+        sceneId: scene.id,
+        field: intent.field,
+        status: intent.status,
+      });
+      break;
+    case "check-deliverable":
+      void runAction("Checking deliverable…", "workflow_check_deliverable", {
+        sceneId: scene.id,
+        deliverableId: intent.deliverableId,
+      });
+      break;
+    default:
+      break;
+  }
+}
+
+function handleTakeReviewIntent(scene: SceneRecord, intent: TakeReviewIntent): void {
+  switch (intent.type) {
+    case "refresh":
+      void runAction("Refreshing takes…", "workflow_import", { persist: true });
+      break;
+    case "alternate":
+      void runAction("Adding alternate angle…", "workflow_add_alternate_shot", { sceneId: scene.id });
+      break;
+    case "set-status":
+      void confirmNotesTakeStatus(scene, {
+        type: "set-take-status",
+        cut: intent.cut,
+        takeId: intent.takeId,
+        status: intent.status,
+      });
+      break;
+    default:
+      break;
+  }
+}
+
+function handleNotesIntent(scene: SceneRecord, intent: NotesIntent): void {
+  switch (intent.type) {
+    case "sync-all": {
+      const chat = requireChat();
+      if (!chat) return;
+      void runAction("Building production video prompts…", "workflow_sync_production_notes", {
+        sceneId: scene.id,
+        ...chat,
+      });
+      break;
+    }
+    case "refresh-takes":
+      void runAction("Refreshing rendered takes…", "workflow_import", { persist: true });
+      break;
+    case "alternate":
+      void runAction("Adding alternate angle…", "workflow_add_alternate_shot", { sceneId: scene.id });
+      break;
+    case "clear-package":
+      void runAction("Marking shot package reviewed…", "workflow_clear_package_review", {
+        sceneId: scene.id,
+        cut: intent.cut,
+      });
+      break;
+    case "save-prompt":
+      void runAction("Saving production prompt…", "workflow_save_production_prompt", {
+        sceneId: scene.id,
+        cut: intent.cut,
+        prompt: intent.prompt,
+        negativePrompt: intent.negativePrompt,
+      });
+      break;
+    case "sync-cut": {
+      const chat = requireChat();
+      if (!chat) return;
+      void runAction("Building production video prompt…", "workflow_sync_production_notes", {
+        sceneId: scene.id,
+        cut: intent.cut,
+        ...chat,
+      });
+      break;
+    }
+    case "render":
+      void runAction("Preparing render…", "workflow_prepare_render", {
+        sceneId: scene.id,
+        cut: intent.cut,
+      });
+      break;
+    case "set-take-status":
+      void confirmNotesTakeStatus(scene, intent);
+      break;
+    case "delete-take":
+      void confirmNotesDeleteTake(scene, intent);
+      break;
+    default:
+      break;
+  }
+}
+
+async function confirmNotesTakeStatus(
+  scene: SceneRecord,
+  intent: Extract<NotesIntent, { type: "set-take-status" }>,
+): Promise<void> {
+  if (intent.status === "selected") {
+    const cut = scene.cuts.find((candidate) => candidate.id.cut === intent.cut);
+    const dependents = (cut ? continuityDependents(cut) : []).filter((label) => {
+      const match = /Scene (\d+) Cut (\d+)/.exec(label);
+      if (!match) return true;
+      const dependent = state?.scenes
+        ?.find((item) => item.id === Number(match[1]))
+        ?.cuts.find((item) => item.id.cut === Number(match[2]));
+      return Boolean(dependent?.visual_source?.asset_id);
+    });
+    if (dependents.length) {
+      const confirmed = await ask(
+        `Selecting this take unbinds continuity frames on:\n${dependents.join("\n")}\n\nThose shots stay render-blocked until you bind a reviewed frame. This does not approve a replacement.`,
+        { title: `Select Scene ${scene.id} Cut ${intent.cut}`, kind: "warning" },
+      );
+      if (!confirmed) return;
+    }
+  }
+  await runAction("Updating take review…", "workflow_set_take_status", {
+    sceneId: scene.id,
+    cut: intent.cut,
+    takeId: intent.takeId,
+    status: intent.status,
+  });
+}
+
+async function confirmNotesDeleteTake(
+  scene: SceneRecord,
+  intent: Extract<NotesIntent, { type: "delete-take" }>,
+): Promise<void> {
+  const confirmed = await ask(
+    `Delete ${intent.path}?\n\nThis permanently removes this video take. If it is selected, dependent continuity frames will be unbound.`,
+    { title: `Delete Scene ${scene.id} Cut ${intent.cut} take`, kind: "warning" },
+  );
+  if (!confirmed) return;
+  await runAction("Deleting video take…", "workflow_delete_take", {
+    sceneId: scene.id,
+    cut: intent.cut,
+    takeId: intent.takeId,
+  });
+}
+
+function handleReferenceIntent(scene: SceneRecord, intent: ReferenceIntent): void {
+  switch (intent.type) {
+    case "set-source": {
+      const args: Record<string, unknown> = {
+        sceneId: scene.id,
+        cut: intent.cut,
+        strategy: intent.strategy,
+      };
+      if (intent.strategy === "previous_selected_take_exit_frame" && intent.predecessorCut != null) {
+        args.predecessorCut = intent.predecessorCut;
+      }
+      if (intent.strategy === "shared_reference" && intent.assetId) {
+        args.assetId = intent.assetId;
+      }
+      void runAction("Saving visual-source strategy…", "workflow_set_visual_source", args);
+      break;
+    }
+    case "bind-frame":
+      void confirmBindFrame(scene, intent);
+      break;
+    case "draft-prompt": {
+      const chat = requireChat();
+      if (!chat) return;
+      void runAction("Drafting start-frame prompt…", "workflow_draft_start_frame_prompt", {
+        sceneId: scene.id,
+        cut: intent.cut,
+        ...chat,
+      });
+      break;
+    }
+    case "save-prompt":
+      void runAction("Saving start-frame prompt…", "workflow_save_start_frame_prompt", {
+        sceneId: scene.id,
+        cut: intent.cut,
+        prompt: intent.prompt,
+        negativePrompt: intent.negativePrompt,
+      });
+      break;
+    case "generate":
+      void runAction("Preparing start-frame generate…", "workflow_generate_start_frame", {
+        sceneId: scene.id,
+        cut: intent.cut,
+      });
+      break;
+    case "attach-still":
+      void attachStartFrame(scene.id, intent.cut);
+      break;
+    case "approve":
+      void runAction("Approving cut start frame…", "workflow_approve_start_frame", {
+        sceneId: scene.id,
+        cut: intent.cut,
+        assetId: intent.assetId,
+      });
+      break;
+    case "reject":
+      void runAction("Rejecting cut start frame…", "workflow_reject_start_frame", {
+        sceneId: scene.id,
+        cut: intent.cut,
+        assetId: intent.assetId,
+      });
+      break;
+    case "edit":
+      if (!intent.brief.trim()) {
+        actionNote = `Enter an edit brief under Cut ${intent.cut} first.`;
+        renderWorkflowDesk();
+        return;
+      }
+      void runAction("Preparing start-frame edit…", "workflow_edit_start_frame", {
+        sceneId: scene.id,
+        cut: intent.cut,
+        assetId: intent.assetId,
+        brief: intent.brief.trim(),
+      });
+      break;
+    case "delete":
+      void confirmDeleteStartFrame(scene, intent);
+      break;
+    default:
+      break;
+  }
+}
+
+async function confirmBindFrame(
+  scene: SceneRecord,
+  intent: Extract<ReferenceIntent, { type: "bind-frame" }>,
+): Promise<void> {
+  const seconds = intent.frameTimeSeconds;
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    await ask("Enter a frame time in seconds. The default is near the end of the selected take.", {
+      title: "Choose a continuity frame",
+      kind: "warning",
+    });
+    return;
+  }
+  const cut = scene.cuts.find((candidate) => candidate.id.cut === intent.cut);
+  const predecessor = scene.cuts.find((candidate) => candidate.id.cut === intent.predecessorCut);
+  const dependents = predecessor ? continuityDependents(predecessor) : [];
+  const choice = continuityChoice({
+    strategy: "previous_selected_take_exit_frame",
+    predecessorTakeSelected: true,
+    durationSeconds: seconds,
+    editedTimeSeconds: seconds,
+    boundAssetId: cut?.visual_source?.asset_id,
+    dependentLabels: dependents,
+    busy: null,
+  });
+  if (choice.confirmBeforeReplace) {
+    const stale = dependents.length
+      ? `These shots will need review:\n${dependents.join("\n")}`
+      : "This cut's current continuity frame will be replaced.";
+    const confirmed = await ask(
+      `Bind the frame at ${seconds}s?\n\n${stale}\n\nThe successor stays render-blocked until this bind finishes.`,
+      { title: `Bind Scene ${scene.id} Cut ${intent.cut}`, kind: "warning" },
+    );
+    if (!confirmed) return;
+  }
+  await runAction("Binding continuity frame…", "workflow_bind_continuity_frame", {
+    sceneId: scene.id,
+    cut: intent.cut,
+    frameTimeSeconds: seconds,
+  });
+}
+
+async function attachStartFrame(sceneId: number, cutNumber: number): Promise<void> {
+  const selected = await openDialog({
+    title: `Attach start frame · Scene ${sceneId} Cut ${cutNumber}`,
+    multiple: false,
+    filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+  });
+  const path = Array.isArray(selected) ? selected[0] : selected;
+  if (!path) return;
+  await runAction("Attaching cut start frame…", "workflow_attach_start_frame", {
+    sceneId,
+    cut: cutNumber,
+    sourcePath: path,
+  });
+}
+
+async function confirmDeleteStartFrame(
+  scene: SceneRecord,
+  intent: Extract<ReferenceIntent, { type: "delete" }>,
+): Promise<void> {
+  const confirmed = await ask(
+    `Delete ${intent.path}?\n\nThis removes this exact cut-image version and its registry entry. Provider job history is retained.`,
+    { title: "Delete cut image", kind: "warning" },
+  );
+  if (!confirmed) return;
+  await runAction("Deleting cut image…", "workflow_delete_start_frame", {
+    sceneId: scene.id,
+    cut: intent.cut,
+    assetId: intent.assetId,
+  });
+}
+
+function handleSketchIntent(scene: SceneRecord, intent: SketchIntent): void {
+  switch (intent.type) {
+    case "set-strategy":
+      void runAction("Setting strategy…", "workflow_set_strategy", {
+        sceneId: scene.id,
+        strategy: intent.strategy,
+        override: intent.override,
+      });
+      break;
+    case "alternate":
+      void runAction("Adding alternate angle…", "workflow_add_alternate_shot", { sceneId: scene.id });
+      break;
+    case "backfill":
+      void runAction("Backfilling cut sketches…", "workflow_backfill_sketches", {
+        sceneId: scene.id,
+        replace: true,
+      });
+      break;
+    case "draft": {
+      const chat = requireChat();
+      if (!chat) return;
+      void runAction("Drafting cut sketches…", "workflow_draft_sketches", {
+        sceneId: scene.id,
+        strategy: intent.strategy,
+        ...chat,
+      });
+      break;
+    }
+    case "approve-animatic":
+      void runAction("Approving rough cut…", "workflow_approve_animatic", { sceneId: scene.id });
+      break;
+    case "set-duration":
+      void runAction("Saving animatic timing…", "workflow_set_animatic_duration", {
+        sceneId: scene.id,
+        shotId: intent.shotId,
+        durationSeconds: intent.durationSeconds,
+      });
+      break;
+    case "reorder-animatic":
+      void runAction("Reordering animatic…", "workflow_reorder_animatic", {
+        sceneId: scene.id,
+        shotIds: intent.shotIds,
+      });
+      break;
+    case "attach-scratch":
+      void attachScratchAudio(scene.id, intent.shotId);
+      break;
+    case "clear-scratch":
+      void runAction("Removing scratch audio…", "workflow_clear_scratch_audio", {
+        sceneId: scene.id,
+        shotId: intent.shotId,
+      });
+      break;
+    case "reorder-cuts":
+      void runAction("Reordering cuts…", "workflow_reorder_cuts", {
+        sceneId: scene.id,
+        shotIds: intent.shotIds,
+      });
+      break;
+    case "save-sketch": {
+      const cut = scene.cuts.find((item) => item.id.cut === intent.cut);
+      if (cut) rememberScene(scene, cut);
+      void runAction("Saving cut sketch…", "workflow_save_sketch", {
+        sceneId: scene.id,
+        cut: intent.cut,
+        sketch: intent.sketch,
+      });
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+async function attachScratchAudio(sceneId: number, shotId: string): Promise<void> {
+  const selected = await openDialog({
+    title: "Attach scratch audio",
+    multiple: false,
+    filters: [{ name: "Audio", extensions: ["wav", "mp3", "m4a", "aac", "ogg", "flac"] }],
+  });
+  const path = Array.isArray(selected) ? selected[0] : selected;
+  if (!path) return;
+  await runAction("Attaching scratch audio…", "workflow_attach_scratch_audio", {
+    sceneId,
+    shotId,
+    sourcePath: path,
+  });
+}
+
+function renderSceneIntentWorkspace(scene: SceneRecord): HTMLElement {
+  return renderSceneIntentView(
+    scene,
+    buildIntentModel({
+      scene,
+      busy,
+      error: actionNote,
+      chatReady: Boolean(hooks?.chatModel()?.modelId),
+      blocked: sceneBlockers(scene.id).map((requirement) => requirement.name),
+    }),
+    (intent) => handleSceneIntent(scene, intent),
+  );
+}
+
+function handleSceneIntent(scene: SceneRecord, intent: SceneIntentIntent): void {
+  switch (intent.type) {
+    case "draft": {
+      const chat = requireChat();
+      if (!chat) return;
+      void runAction("Drafting scene intent…", "workflow_draft_intent", {
+        sceneId: scene.id,
+        ...chat,
+      });
+      break;
+    }
+    case "save":
+      void runAction("Saving scene intent…", "workflow_save_intent", {
+        sceneId: scene.id,
+        intent: intent.intent,
+      });
+      break;
+    case "approve":
+      void runAction("Approving scene intent…", "workflow_approve_intent", {
+        sceneId: scene.id,
+      });
+      break;
+    default:
+      break;
+  }
 }
 
 function renderSceneLookWorkspace(scene: SceneRecord): HTMLElement {
@@ -1116,36 +1661,6 @@ function queueLookThumbs(root: HTMLElement): void {
   });
 }
 
-function renderScriptStage(scene: SceneRecord): HTMLElement {
-  const card = document.createElement("article");
-  card.className = "workflow-script";
-  const bits: [string, string][] = [];
-  if (scene.location) bits.push(["Location", scene.location]);
-  for (const line of scene.action ?? []) bits.push(["Action", line]);
-  for (const line of scene.sound ?? []) bits.push(["Sound", line]);
-  for (const line of scene.dialogue ?? []) bits.push([line.speaker, line.text]);
-  for (const line of scene.transitions ?? []) bits.push(["Transition", line]);
-  if (bits.length === 0 && scene.source_excerpt) {
-    const pre = document.createElement("pre");
-    pre.className = "workflow-excerpt";
-    pre.textContent = scene.source_excerpt;
-    card.append(pre);
-    return card;
-  }
-  if (bits.length === 0) {
-    card.append(block("empty-state", "No script beats found for this scene."));
-    return card;
-  }
-  for (const [label, text] of bits) {
-    const row = document.createElement("p");
-    row.innerHTML = `<strong></strong> <span></span>`;
-    row.querySelector("strong")!.textContent = `${label}:`;
-    row.querySelector("span")!.textContent = text;
-    card.append(row);
-  }
-  return card;
-}
-
 function renderInspector(): HTMLElement {
   const aside = document.createElement("aside");
   aside.className = "workflow-inspector";
@@ -1306,24 +1821,6 @@ function handleFinishIntent(intent: FinishIntent): void {
     sceneId: scene.id,
     deliverableId: intent.deliverableId,
   });
-}
-
-function missingPanel(title: string, detail: string): HTMLElement {
-  const article = document.createElement("article");
-  article.className = "workflow-missing";
-  const h = document.createElement("h3");
-  h.textContent = title;
-  const p = document.createElement("p");
-  p.textContent = detail;
-  article.append(h, p);
-  return article;
-}
-
-function block(className: string, text: string): HTMLElement {
-  const el = document.createElement("p");
-  el.className = className;
-  el.textContent = text;
-  return el;
 }
 
 function actionButton(label: string, onClick: () => void): HTMLButtonElement {

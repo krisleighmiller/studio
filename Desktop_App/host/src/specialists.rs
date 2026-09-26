@@ -14,7 +14,10 @@ use crate::media;
 use crate::prompts;
 use crate::scene_plan::{RenderLane, RenderRequest};
 use crate::settings::{self, ApiEntry};
-use crate::text_writes::{authorize_text_write, change_summary};
+use crate::text_writes::{
+    approval_required, approval_summary, authorize_text_write, commit_staged_text_write,
+    commit_text_write, stage_text_writes, text_write_approval_card,
+};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -599,6 +602,7 @@ pub fn run_specialist(
             })?;
             run_scene_planning(app, context, validated, project_root, llm, specialist)
         }
+        "text_write" => run_text_write(validated, project_root),
         "script" | "character_creation" => {
             let llm = llm.ok_or_else(|| {
                 format!(
@@ -1091,31 +1095,46 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
     }
 
     let mut written = Vec::new();
-    let mut notes = Vec::new();
+    let mut staged = Vec::new();
     for (authorized, body) in planned {
-        if let Some(parent) = authorized.path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Could not create directory {}: {e}", parent.display()))?;
-        }
         let previous = if authorized.replacing {
             fs::read_to_string(&authorized.path).ok()
         } else {
             None
         };
-        if authorized.replacing {
-            notes.push(format!(
-                "`{}`: {}",
-                authorized.relative,
-                change_summary(previous.as_deref(), &body)
-            ));
+        if approval_required(&authorized) {
+            let summary = approval_summary(&authorized, previous.as_deref(), &body);
+            staged.push((authorized.relative, body, summary));
+            continue;
         }
         app.emit(
             "director-progress",
             format!("{label} writing {}…", authorized.path.display()),
         );
-        fs::write(&authorized.path, &body)
-            .map_err(|e| format!("Could not write {}: {e}", authorized.path.display()))?;
+        commit_text_write(&authorized, &body, false)
+            .map_err(|error| format!("Could not write {}: {error}", authorized.path.display()))?;
         written.push(authorized.path.display().to_string());
+    }
+    if !staged.is_empty() {
+        let summaries: Vec<String> = staged.iter().map(|(_, _, summary)| summary.clone()).collect();
+        let id = stage_text_writes(
+            specialist,
+            staged
+                .into_iter()
+                .map(|(relative, body, _)| (relative, body))
+                .collect(),
+        );
+        let card = text_write_approval_card(&id, &summaries)?;
+        let mut message = format!("{label} prepared {} file change(s) for approval.", summaries.len());
+        if !written.is_empty() {
+            message.push_str("\n\nSaved new files:\n");
+            for path in &written {
+                message.push_str(&format!("- `{path}`\n"));
+            }
+        }
+        message.push_str("\n\n");
+        message.push_str(&card);
+        return Ok(SpecialistResult::done(message));
     }
 
     let mut message = emit
@@ -1127,17 +1146,28 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
             message.push_str(&format!("- `{path}`\n"));
         }
     }
-    if !notes.is_empty() {
-        message.push_str("\nChanges:\n");
-        for note in &notes {
-            message.push_str(&format!("- {note}\n"));
-        }
-    }
     if let Some(ask) = emit.ask {
         message.push_str("\n");
         message.push_str(&ask);
     }
 
+    Ok(SpecialistResult::done(message))
+}
+
+fn run_text_write(
+    validated: &ValidatedAction,
+    project_root: Option<&str>,
+) -> Result<SpecialistResult, String> {
+    let staged_id = input_str(&validated.action.inputs, &["staged_id"])
+        .ok_or_else(|| "text_write needs the host staged_id".to_string())?;
+    let written = commit_staged_text_write(staged_id, project_root)?;
+    let mut message = format!("Approved {} text file(s).", written.len());
+    if !written.is_empty() {
+        message.push_str("\n\nSaved:\n");
+        for path in &written {
+            message.push_str(&format!("- `{path}`\n"));
+        }
+    }
     Ok(SpecialistResult::done(message))
 }
 
@@ -1341,39 +1371,36 @@ fn run_production_helper(
         let body = format!("{reply}\n");
         match authorize_text_write("production_helper", out, project_root, body.len(), 0, 0) {
             Ok(authorized) => {
-                if let Some(parent) = authorized.path.parent() {
-                    fs::create_dir_all(parent).map_err(|e| {
-                        format!(
-                            "Could not create digest directory {}: {e}",
-                            parent.display()
-                        )
-                    })?;
-                }
                 let previous = if authorized.replacing {
                     fs::read_to_string(&authorized.path).ok()
                 } else {
                     None
                 };
-                fs::write(&authorized.path, &body).map_err(|e| {
-                    format!("Could not write digest to {}: {e}", authorized.path.display())
-                })?;
-                message.push_str(&format!(
-                    "\n\n---\nSaved digest to `{}`.",
-                    authorized.path.display()
-                ));
-                if authorized.replacing {
+                if approval_required(&authorized) {
+                    let summary = approval_summary(&authorized, previous.as_deref(), &body);
+                    let id = stage_text_writes(
+                        "production_helper",
+                        vec![(authorized.relative, body)],
+                    );
+                    let card = text_write_approval_card(&id, &[summary])?;
+                    message.push_str("\n\nDigest overwrite is waiting for approval.\n\n");
+                    message.push_str(&card);
+                } else {
+                    commit_text_write(&authorized, &body, false).map_err(|error| {
+                        format!("Could not write digest to {}: {error}", authorized.path.display())
+                    })?;
                     message.push_str(&format!(
-                        " {}",
-                        change_summary(previous.as_deref(), &body)
-                    ));
-                }
-                app.emit(
-                    "director-progress",
-                    format!(
-                        "Production Helper saved digest → {}",
+                        "\n\n---\nSaved digest to `{}`.",
                         authorized.path.display()
-                    ),
-                );
+                    ));
+                    app.emit(
+                        "director-progress",
+                        format!(
+                            "Production Helper saved digest → {}",
+                            authorized.path.display()
+                        ),
+                    );
+                }
             }
             Err(error) => {
                 message.push_str(&format!("\n\nDigest was not saved: {error}"));
@@ -3843,7 +3870,7 @@ pub fn specialist_spends(specialist: &str) -> bool {
 
 /// Host-owned approval: any billable provider call, plus assemble (local but plan-gated).
 pub fn specialist_requires_approval(specialist: &str) -> bool {
-    specialist_spends(specialist) || specialist == "assemble"
+    specialist_spends(specialist) || specialist == "assemble" || specialist == "text_write"
 }
 
 /// Extra approval detail for text-sync talking shots.

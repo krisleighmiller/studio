@@ -10,6 +10,15 @@ export type JobRowModel = {
   bucket: JobFilter | "unknown";
   statusLabel: string;
   elapsed: string;
+  created: string;
+  started: string;
+  completed: string;
+  scope: string;
+  progress: string;
+  estimate: string;
+  actual: string;
+  currency: string;
+  retry: string;
   detail: string;
   outputPath: string | null;
   outputKind: JobOutputKind | null;
@@ -100,13 +109,31 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
   const outputKind = outputPath ? outputKindOf(job.kind, outputPath) : null;
   const elapsed = elapsedLabel(job);
   const detail = job.error?.trim() || located.label || job.progress?.trim() || "Scope unknown";
-  const cost = `estimate ${money(job.estimated_cost, job.currency)} · actual ${money(job.cost, job.currency)}`;
+  const created = knownText(job.created_at);
+  const started = knownText(job.started_at);
+  const completed = knownText(job.completed_at);
+  const scope = job.scope?.kind && job.scope.id ? `${job.scope.kind} ${job.scope.id}` : "unknown";
+  const progress = knownText(job.progress);
+  const estimate = money(job.estimated_cost);
+  const actual = money(job.cost);
+  const currency = knownText(job.currency);
+  const retry = knownText(job.retry_of);
+  const cost = `estimate ${estimate} · actual ${actual} · currency ${currency}`;
   return {
     id: job.id,
     title: KIND_LABELS[job.kind] ?? labelize(job.kind || "Job"),
     bucket,
     statusLabel: statusLabel(job.status, bucket),
     elapsed,
+    created,
+    started,
+    completed,
+    scope,
+    progress,
+    estimate,
+    actual,
+    currency,
+    retry,
     detail,
     outputPath,
     outputKind,
@@ -300,10 +327,14 @@ function takeForOutput(
   return null;
 }
 
-function money(value: number | null | undefined, currency: string | null | undefined): string {
+function knownText(value: string | null | undefined): string {
+  const text = value?.trim();
+  return text ? text : "unknown";
+}
+
+function money(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "unknown";
-  const unit = currency?.trim();
-  return unit ? `${value} ${unit}` : `${value} (currency unknown)`;
+  return String(value);
 }
 
 function labelize(value: string): string {

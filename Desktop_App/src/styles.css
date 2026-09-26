@@ -4,13 +4,20 @@
   --bg-panel: #f7f4ef;
   --bg-elevated: #fffdf9;
   --bg-muted: #e4dfd6;
-  --border: #cfc8bb;
+  --canvas: #f3f1ec;
+  --sidebar: #ebe8e1;
+  --surface: #fffdfa;
+  --surface-subtle: #f8f6f1;
+  --border: #ddd8ce;
   --border-strong: #b7ae9e;
-  --text: #2a2620;
-  --text-muted: #6d665b;
-  --accent: #2f5d50;
-  --accent-soft: #d7e4df;
-  --danger: #8a3b2d;
+  --text: #24211d;
+  --text-muted: #777067;
+  --accent: #356b5d;
+  --accent-soft: #e5efeb;
+  --warning: #a46920;
+  --warning-soft: #faf1df;
+  --danger: #9d4336;
+  --danger-soft: #fae9e5;
   --tab-active: #fffdf9;
   --focus: #3f7a69;
   --splitter: #c4bdae;
@@ -18,6 +25,12 @@
   --font-mono: "Ubuntu Mono", "Cascadia Code", "Consolas", monospace;
   --explorer-width: 260px;
   --chat-width: 320px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
 }
 
 * {
@@ -34,9 +47,9 @@ body {
   margin: 0;
   overflow: hidden;
   color: var(--text);
-  background: var(--bg);
+  background: var(--canvas);
   font-family: var(--font-ui);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.4;
 }
 
@@ -164,28 +177,34 @@ button {
 
 .studio-surface-nav {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0 0 12px;
+  flex-wrap: nowrap;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  overflow-x: auto;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-1);
 }
 
 .studio-surface-nav button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-elevated);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
   color: var(--text);
   font-size: 12px;
   cursor: pointer;
 }
 
 .studio-surface-nav button.active {
-  border-color: var(--accent);
-  background: var(--accent-soft);
+  border-bottom-color: var(--accent);
+  background: transparent;
   color: var(--accent);
+  font-weight: 700;
 }
 
 .studio-surface-dot {
@@ -201,14 +220,28 @@ button {
 }
 
 .studio-surface-nav button[data-status="draft"] .studio-surface-dot {
-  background: #b8862a;
+  background: var(--warning);
 }
 
 .studio-surface-nav button[data-status="missing"] .studio-surface-dot {
+  background: var(--text-muted);
+}
+
+.studio-surface-nav button[data-status="blocked"] .studio-surface-dot {
+  background: var(--warning);
+}
+
+.studio-surface-nav button[data-status="failed"] .studio-surface-dot {
   background: var(--danger);
 }
 
 .studio-surface-status {
+  display: none;
+}
+
+.studio-surface-nav button:hover .studio-surface-status,
+.studio-surface-nav button.active .studio-surface-status {
+  display: inline;
   color: var(--text-muted);
   font-size: 10px;
   letter-spacing: 0.04em;
@@ -219,6 +252,45 @@ button {
   margin: 0 0 10px;
   color: var(--text-muted);
   font-size: 13px;
+}
+
+.studio-scene-header {
+  margin: 0 0 var(--space-2);
+}
+
+.studio-scene-header h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.studio-scene-sub {
+  margin-top: var(--space-1);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.studio-blocker-summary {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--warning);
+  background: var(--warning-soft);
+  font-size: 13px;
+}
+
+.studio-blocker-summary summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.studio-blocker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
 }
 
 .top-actions {
@@ -1269,7 +1341,12 @@ button {
 .tab:focus-visible,
 .primary-button:focus-visible,
 .ghost-button:focus-visible,
-.stop-button:focus-visible {
+.stop-button:focus-visible,
+.studio-surface-nav button:focus-visible,
+.workflow-scene:focus-visible,
+.studio-finish-actions button:focus-visible,
+.studio-jobs button:focus-visible,
+.nav-rail button:focus-visible {
   border-color: var(--focus);
   box-shadow: 0 0 0 2px rgba(63, 122, 105, 0.2);
   outline: none;
@@ -1993,15 +2070,20 @@ button {
 .workflow-body {
   display: grid;
   grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) minmax(148px, 34%);
+  grid-template-rows: minmax(0, 1fr) auto;
   grid-template-areas:
     "scenes main"
-    "jobs main";
+    "jobs jobs";
   min-height: 0;
 }
 
 .workflow-body.jobs-collapsed {
   grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.workflow-body .studio-jobs:not(.jobs-open) .workflow-jobs-body,
+.workflow-body .studio-jobs:not(.jobs-open) .studio-job-filters {
+  display: none;
 }
 
 .workflow-scenes {
@@ -2016,19 +2098,62 @@ button {
   grid-area: main;
 }
 
+.inspector-tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--sidebar);
+}
+
+.inspector-tab {
+  padding: 6px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.inspector-tab.active {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+.chat-panel.inspector-director .studio-finish-mount,
+.chat-panel.inspector-finish .director-section {
+  display: none;
+}
+
+.chat-panel.inspector-director .director-section,
+.chat-panel.inspector-finish .studio-finish-mount {
+  display: flex;
+}
+
 .studio-finish-mount {
   display: none;
-  flex: 0 1 40%;
+  flex: 1 1 auto;
   flex-direction: column;
-  max-height: 42%;
   min-height: 0;
-  overflow: hidden;
-  border-bottom: 1px solid var(--border);
+  overflow: auto;
   background: var(--bg-panel);
+}
+
+.chat-panel {
+  width: var(--chat-width);
+  max-width: 340px;
+  min-width: 300px;
 }
 
 .surface-studio .studio-finish-mount {
   display: flex;
+}
+
+.chat-panel.inspector-director .studio-finish-mount {
+  display: none;
 }
 
 .studio-finish-mount .studio-finish {
@@ -2116,25 +2241,73 @@ button {
 }
 
 .workflow-scene.warning {
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+
+.workflow-scene.failed {
   box-shadow: inset 3px 0 0 var(--danger);
 }
 
 .scene-look-workspace {
   display: grid;
-  gap: 12px;
+  gap: var(--space-4);
   min-width: 0;
+}
+
+.scene-look-workspace > .scene-look-hero {
+  order: 0;
 }
 
 .scene-look-header h1 {
   margin: 0;
-  font-size: 22px;
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.scene-look-header {
+  margin-bottom: var(--space-1);
 }
 
 .scene-look-counts,
 .scene-look-purpose,
 .scene-look-caption {
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
   color: var(--text-muted);
+  font-size: 12px;
+}
+
+.scene-look-blockers {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--warning-soft);
+  border-left: 3px solid var(--warning);
+  font-size: 12px;
+}
+
+.scene-look-blockers summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.scene-look-disclosure {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+}
+
+.scene-look-disclosure summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.scene-look-hero .scene-look-stage img {
+  height: min(56vh, 560px);
+}
+
+.scene-look-advanced {
+  opacity: 0.92;
 }
 
 .scene-look-slots {
@@ -2276,7 +2449,17 @@ button {
 
 .workflow-banner.reject {
   border-color: var(--danger);
-  background: #f6e4df;
+  background: var(--danger-soft);
+}
+
+.workflow-banner.warn {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.jobs-failed {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .workflow-desk.busy {
@@ -2825,8 +3008,29 @@ button {
   min-height: 0;
   overflow: hidden;
   border-top: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  background: var(--bg-muted);
+  background: var(--sidebar);
+}
+
+.studio-jobs.jobs-closed {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-3);
+  min-height: 28px;
+}
+
+.studio-jobs.jobs-closed .studio-jobs-toggle {
+  width: auto;
+}
+
+.studio-jobs-closed-warn {
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.studio-jobs.jobs-open {
+  max-height: 220px;
 }
 
 .studio-jobs-toggle {
@@ -2936,12 +3140,17 @@ button {
   font-weight: 650;
 }
 
-.studio-job-meta {
+.studio-job-meta,
+.studio-job-facts {
   overflow: hidden;
   color: var(--text-muted);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.studio-job-facts {
+  white-space: normal;
 }
 
 .studio-finish {
@@ -3043,11 +3252,7 @@ button {
     grid-template-rows: minmax(0, 1fr) auto;
     grid-template-areas:
       "scenes main"
-      "jobs main";
-  }
-
-  .surface-studio .studio-finish-mount {
-    max-height: 36%;
+      "jobs jobs";
   }
 
   .workflow-inspector {
@@ -3070,11 +3275,11 @@ button {
   .workflow-body.jobs-collapsed,
   .workflow-body.scene-look-body {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto minmax(240px, 1fr);
+    grid-template-rows: auto minmax(240px, 1fr) auto;
     grid-template-areas:
       "scenes"
-      "jobs"
-      "main";
+      "main"
+      "jobs";
   }
 
   .workflow-scenes,
@@ -3083,10 +3288,6 @@ button {
     max-height: 220px;
     border-right: 0;
     border-left: 0;
-  }
-
-  .surface-studio .studio-finish-mount {
-    max-height: 32%;
   }
 
   .scene-look {

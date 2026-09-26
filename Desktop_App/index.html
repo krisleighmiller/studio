@@ -277,8 +277,12 @@
         ></div>
 
         <aside id="chat-panel" class="panel chat-panel director-panel" aria-label="Director and Finish">
-          <section id="studio-finish-mount" class="studio-finish-mount"></section>
-          <section class="director-section" aria-label="Director">
+          <div class="inspector-tabs" role="tablist" aria-label="Inspector">
+            <button type="button" id="inspector-tab-director" class="inspector-tab active" role="tab" aria-selected="true" aria-controls="director-section">Director</button>
+            <button type="button" id="inspector-tab-finish" class="inspector-tab" role="tab" aria-selected="false" aria-controls="studio-finish-mount">Finish</button>
+          </div>
+          <section id="studio-finish-mount" class="studio-finish-mount" role="tabpanel" aria-label="Finish"></section>
+          <section class="director-section" id="director-section" role="tabpanel" aria-label="Director">
           <header class="panel-header chat-header">
             <span class="director-title">Director</span>
             <div id="chat-tabs" class="tab-bar" role="tablist" aria-label="Director tabs"></div>

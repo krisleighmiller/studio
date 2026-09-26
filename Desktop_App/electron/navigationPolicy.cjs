@@ -49,9 +49,57 @@ function windowOpenAction() {
   return "deny";
 }
 
+function externalOpenDecision(target, confirmed) {
+  const url = externalUrl(target);
+  if (!url) return { open: false, reason: "blocked" };
+  if (!confirmed) return { open: false, reason: "cancelled" };
+  return { open: true, url };
+}
+
+function devServerUrl(env = process.env) {
+  const fallback = "http://127.0.0.1:1420";
+  const extra = env.VITE_DEV_SERVER_URL;
+  if (!extra) return fallback;
+  try {
+    const url = new URL(extra);
+    if (url.protocol === "http:" && url.hostname === "127.0.0.1") return url.origin;
+  } catch {
+    // Ignore a malformed override and stay on the loopback dev server.
+  }
+  return fallback;
+}
+
+function launchTarget({ dev, packaged, env = process.env, distIndex }) {
+  if (dev && !packaged) {
+    return { kind: "url", url: devServerUrl(env) };
+  }
+  return { kind: "file", file: path.resolve(distIndex) };
+}
+
+function contentSecurityPolicy(isDev) {
+  return [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: workbench-media:",
+    "media-src 'self' blob: workbench-media:",
+    isDev
+      ? "connect-src 'self' http://127.0.0.1:1420 ws://127.0.0.1:1420"
+      : "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-src 'none'",
+  ].join("; ");
+}
+
 module.exports = {
   devOrigins,
   isAppUrl,
   externalUrl,
   windowOpenAction,
+  externalOpenDecision,
+  devServerUrl,
+  launchTarget,
+  contentSecurityPolicy,
 };

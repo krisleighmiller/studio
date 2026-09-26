@@ -25,9 +25,10 @@ if (!(DOMPurify as unknown as Record<string, boolean>)[MARKDOWN_GUARD]) {
 
 export function renderMarkdown(source: string): string {
   const html = marked.parse(source, { async: false }) as string;
-  return DOMPurify.sanitize(html, {
+  const clean = DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
   });
+  return clean.replace(/\s(?:src|srcset)=(["'])(?:https?:)?\/\/[^"']*\1/gi, "");
 }
 
 export function isMarkdownPath(path: string): boolean {

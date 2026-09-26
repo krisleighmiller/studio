@@ -126,12 +126,28 @@ export type StageMap = {
   render: StageStatus;
   take_review: StageStatus;
   assemble: StageStatus;
+  extensions?: Record<string, StageStatus>;
 };
+
+const KNOWN_STAGE_FIELDS = [
+  "script",
+  "characters",
+  "scene_intent",
+  "scene_look",
+  "cut_sketches",
+  "reference_images",
+  "production_notes",
+  "render",
+  "take_review",
+  "assemble",
+] as const;
 
 export function stageStatus(map: StageMap | null | undefined, id: string): StageStatus {
   if (!map) return "missing";
-  const value = (map as Record<string, StageStatus | undefined>)[id];
-  return value ?? "missing";
+  if ((KNOWN_STAGE_FIELDS as readonly string[]).includes(id)) {
+    return map[id as (typeof KNOWN_STAGE_FIELDS)[number]] ?? "missing";
+  }
+  return map.extensions?.[id] ?? "missing";
 }
 
 export type DialogueLine = {
@@ -376,7 +392,14 @@ export type JobRecord = {
   retry_of?: string | null;
 };
 
-export type ProductionRecipe = "narrative_dialogue" | "montage";
+/** Host registry id. A new recipe is valid once the host table accepts it. */
+export type RecipeId = string;
+
+export const NARRATIVE_RECIPE = "narrative_dialogue" satisfies RecipeId;
+export const MONTAGE_RECIPE = "montage" satisfies RecipeId;
+
+/** @deprecated Use RecipeId. Kept so older imports still name the registry id. */
+export type ProductionRecipe = RecipeId;
 
 export type StageNavItem = {
   id: string;
@@ -451,6 +474,18 @@ export type ProductionProfile = {
   budget?: string | null;
   schedule?: string | null;
   rights_notes?: string | null;
+  /** Present when the profile names a recipe the built-in table does not contain. */
+  recipe_document?: {
+    id: string;
+    label: string;
+    stages: Array<{
+      id: string;
+      label: string;
+      work_area: string;
+      depends_on?: string[];
+      required_roles?: string[];
+    }>;
+  } | null;
 };
 
 export type RequirementRecord = {
@@ -535,19 +570,6 @@ export const VISUAL_SOURCE_STRATEGIES: {
   { id: "shared_reference", label: "Approved shared scene reference" },
   { id: "no_start_frame", label: "No start frame" },
   { id: "deferred_manual", label: "Deferred manual source" },
-];
-
-export const WORKFLOW_STAGES: { id: StageId; label: string }[] = [
-  { id: "script", label: "Script" },
-  { id: "characters", label: "Characters" },
-  { id: "scene_intent", label: "Scene Intent" },
-  { id: "scene_look", label: "Scene Look" },
-  { id: "cut_sketches", label: "Cut Sketches" },
-  { id: "reference_images", label: "Reference Images" },
-  { id: "production_notes", label: "Production Notes" },
-  { id: "render", label: "Render" },
-  { id: "take_review", label: "Take Review" },
-  { id: "assemble", label: "Assemble" },
 ];
 
 export const REQUIREMENT_KINDS: { id: RequirementKind; label: string }[] = [

@@ -20,17 +20,35 @@ export function renderJobsView(
   onIntent: (intent: JobsIntent) => void,
 ): HTMLElement {
   const section = document.createElement("section");
-  section.className = "studio-jobs";
+  section.className = `studio-jobs${open ? " jobs-open" : " jobs-closed"}`;
   section.setAttribute("aria-label", "Jobs");
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "studio-jobs-toggle";
   const total = model.total;
-  toggle.textContent = `Jobs (${total})`;
+  const active = model.counts.active ?? 0;
+  const failed = model.counts.failed ?? 0;
+  toggle.textContent = open
+    ? `Jobs (${total})`
+    : total === 0
+      ? `Jobs`
+      : failed > 0
+        ? `Jobs • ${active} active • ${failed} failed`
+        : active > 0
+          ? `Jobs • ${active} active`
+          : `Jobs • ${total}`;
   toggle.setAttribute("aria-expanded", open ? "true" : "false");
   toggle.addEventListener("click", () => onIntent({ type: "toggle" }));
   section.append(toggle);
-  if (!open) return section;
+  if (!open) {
+    if (failed > 0) {
+      const warn = document.createElement("span");
+      warn.className = "studio-jobs-closed-warn";
+      warn.textContent = `${failed} failed — open for details`;
+      section.append(warn);
+    }
+    return section;
+  }
 
   const filters = document.createElement("div");
   filters.className = "studio-job-filters";
@@ -75,7 +93,20 @@ function jobRow(row: JobRowModel, onIntent: (intent: JobsIntent) => void): HTMLE
   const meta = document.createElement("span");
   meta.className = "studio-job-meta";
   meta.textContent = row.elapsed === "unknown" ? `${row.detail} · time unknown` : `${row.elapsed} · ${row.detail}`;
-  copy.append(title, meta);
+  const facts = document.createElement("span");
+  facts.className = "studio-job-facts";
+  facts.textContent = [
+    `Created ${row.created}`,
+    `Started ${row.started}`,
+    `Completed ${row.completed}`,
+    `Scope ${row.scope}`,
+    `Progress ${row.progress}`,
+    `Estimate ${row.estimate}`,
+    `Actual ${row.actual}`,
+    `Currency ${row.currency}`,
+    `Retry ${row.retry}`,
+  ].join(" · ");
+  copy.append(title, meta, facts);
   button.append(dot, copy);
   if (row.actionLabel) {
     button.addEventListener("click", () => onIntent({ type: "open", jobId: row.id }));

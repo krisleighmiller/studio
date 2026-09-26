@@ -35,7 +35,7 @@ pub fn apply(state: &mut ProjectState, script_texts: &[String]) {
     let recipe = state
         .profile
         .as_ref()
-        .map(|profile| profile.recipe)
+        .map(|profile| profile.recipe.clone())
         .unwrap_or_default();
     let mut profile = profile_from(state, &header);
     profile.recipe = recipe;
@@ -109,7 +109,8 @@ fn profile_from(state: &ProjectState, header: &ScriptHeader) -> ProductionProfil
         language: header.language.clone(),
     };
     ProductionProfile {
-        recipe: ProductionRecipe::NarrativeDialogue,
+        recipe: ProductionRecipe::narrative(),
+        recipe_document: None,
         deliverables: vec![deliverable],
         audience: header.audience.clone(),
         platforms,
@@ -131,13 +132,7 @@ fn profile_from(state: &ProjectState, header: &ScriptHeader) -> ProductionProfil
 
 fn requirements_from(state: &ProjectState, header: &ScriptHeader) -> Vec<RequirementRecord> {
     let mut requirements = Vec::new();
-    let graph = crate::workflow::recipe::graph(
-        state
-            .profile
-            .as_ref()
-            .map(|profile| profile.recipe)
-            .unwrap_or_default(),
-    );
+    let graph = crate::workflow::recipe::bound(state);
     if graph.requires_role("cast") {
         let mut cast_names = header.characters.clone();
         for character in &state.characters {
@@ -711,6 +706,7 @@ fn split_list(value: Option<&str>) -> Vec<String> {
 fn merge_profile(previous: ProductionProfile, derived: ProductionProfile) -> ProductionProfile {
     ProductionProfile {
         recipe: previous.recipe,
+        recipe_document: previous.recipe_document.or(derived.recipe_document),
         deliverables: merge_deliverables(previous.deliverables, derived.deliverables),
         audience: prefer(previous.audience, derived.audience),
         platforms: if previous.platforms.is_empty() {
@@ -898,7 +894,7 @@ mod tests {
 "#;
         apply(&mut state, &[script.to_string()]);
         let profile = state.profile.clone().expect("profile");
-        assert_eq!(profile.recipe, ProductionRecipe::NarrativeDialogue);
+        assert_eq!(profile.recipe, ProductionRecipe::narrative());
         assert_eq!(profile.medium.as_deref(), Some("Clay"));
         assert_eq!(profile.deliverables[0].name, "The Lantern at Willowby Halt");
         assert_eq!(

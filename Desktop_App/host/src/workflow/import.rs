@@ -1236,11 +1236,14 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
         .as_ref()
         .map(|prev| (prev.profile.clone(), prev.requirements.clone()))
         .unwrap_or_else(|| (None, Vec::new()));
-    if let Some(recipe) = old_profile.as_ref().map(|profile| profile.recipe) {
-        state
+    if let Some(previous_profile) = old_profile.as_ref() {
+        let profile = state
             .profile
-            .get_or_insert_with(crate::workflow::state::ProductionProfile::default)
-            .recipe = recipe;
+            .get_or_insert_with(crate::workflow::state::ProductionProfile::default);
+        profile.recipe = previous_profile.recipe.clone();
+        if profile.recipe_document.is_none() {
+            profile.recipe_document = previous_profile.recipe_document.clone();
+        }
     }
     if let Some(prev) = previous {
         merge_preserved(prev, &mut state);

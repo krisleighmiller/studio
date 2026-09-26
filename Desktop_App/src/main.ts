@@ -38,8 +38,9 @@ import { bindVoiceHost, openVoicePanelContext, renderVoicePanel } from "./voiceP
 import {
   bindWorkflowDesk,
   clearWorkflowDesk,
+  jobsSummary,
   loadWorkflowDesk,
-  openJobsDrawer,
+  toggleJobsDrawer,
   setStudioWorkArea,
   refreshWorkflowDesk,
   renderWorkflowDesk,
@@ -215,6 +216,10 @@ const els = {
   chatSplitter: document.querySelector<HTMLElement>('[data-splitter="chat"]')!,
   toggleChatBtn: document.querySelector<HTMLButtonElement>("#toggle-chat-btn")!,
   chatRail: document.querySelector<HTMLButtonElement>("#chat-rail")!,
+  inspectorTabDirector: document.querySelector<HTMLButtonElement>("#inspector-tab-director")!,
+  inspectorTabFinish: document.querySelector<HTMLButtonElement>("#inspector-tab-finish")!,
+  finishMount: document.querySelector<HTMLElement>("#studio-finish-mount")!,
+  directorSection: document.querySelector<HTMLElement>("#director-section")!,
   contextMenu: document.querySelector<HTMLElement>("#context-menu")!,
 };
 
@@ -648,6 +653,35 @@ async function renderAssetBrowser(): Promise<void> {
     });
     els.assetsList.append(button);
   }
+}
+
+type InspectorTab = "director" | "finish";
+
+function inspectorTab(): InspectorTab {
+  try {
+    const saved = localStorage.getItem("studio-inspector-tab");
+    if (saved === "finish") return "finish";
+  } catch {
+    /* ignore */
+  }
+  return "director";
+}
+
+function setInspectorTab(tab: InspectorTab): void {
+  try {
+    localStorage.setItem("studio-inspector-tab", tab);
+  } catch {
+    /* ignore */
+  }
+  const director = tab === "director";
+  els.inspectorTabDirector?.classList.toggle("active", director);
+  els.inspectorTabFinish?.classList.toggle("active", !director);
+  els.inspectorTabDirector?.setAttribute("aria-selected", director ? "true" : "false");
+  els.inspectorTabFinish?.setAttribute("aria-selected", !director ? "true" : "false");
+  els.chatPanel?.classList.toggle("inspector-finish", !director);
+  els.chatPanel?.classList.toggle("inspector-director", director);
+  if (els.directorSection) els.directorSection.hidden = !director;
+  if (els.finishMount) els.finishMount.hidden = director;
 }
 
 function setChatCollapsed(collapsed: boolean): void {
@@ -4106,10 +4140,27 @@ function bindUi(): void {
     event.preventDefault();
     next.focus();
   });
+  const refreshJobsButton = () => {
+    const summary = jobsSummary();
+    const parts = [`Jobs`];
+    if (summary.total) parts.push(`${summary.total}`);
+    if (summary.active) parts.push(`• ${summary.active} active`);
+    if (summary.failed) parts.push(`• ${summary.failed} failed`);
+    els.jobsBtn.textContent = parts.join(" ");
+    els.jobsBtn.classList.toggle("jobs-failed", summary.failed > 0);
+    els.jobsBtn.title = summary.failed
+      ? `${summary.failed} job(s) failed. Open the Jobs drawer for details.`
+      : summary.active
+        ? `${summary.active} job(s) active.`
+        : "Open the Jobs drawer.";
+  };
+  (window as unknown as { __refreshJobsButton?: () => void }).__refreshJobsButton = refreshJobsButton;
   els.jobsBtn.addEventListener("click", () => {
-    openJobsDrawer();
+    toggleJobsDrawer();
+    refreshJobsButton();
     if (shellSurface !== "studio") showShell("studio");
   });
+  setInterval(refreshJobsButton, 2000);
   els.shellWorkArea.addEventListener("change", () => {
     const value = els.shellWorkArea.value;
     if (value === "plan" || value === "produce" || value === "finish") {
@@ -4242,6 +4293,15 @@ function bindUi(): void {
   });
   els.toggleChatBtn.addEventListener("click", () => toggleChatPanel());
   els.chatRail.addEventListener("click", () => setChatCollapsed(false));
+  setInspectorTab(inspectorTab());
+  els.inspectorTabDirector?.addEventListener("click", () => {
+    setInspectorTab("director");
+    setChatCollapsed(false);
+  });
+  els.inspectorTabFinish?.addEventListener("click", () => {
+    setInspectorTab("finish");
+    setChatCollapsed(false);
+  });
   els.chatPanel.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();

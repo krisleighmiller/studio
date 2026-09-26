@@ -240,7 +240,18 @@ pub fn cmd_save_profile(args: &Value) -> Result<Value, String> {
                 .map_err(|error| format!("invalid production profile: {error}"))
         })?;
     if crate::workflow::state::ProductionRecipe::parse(profile.recipe.as_str()).is_none() {
-        return Err(format!("Unknown recipe `{}`.", profile.recipe.as_str()));
+        let document = profile
+            .recipe_document
+            .as_ref()
+            .ok_or_else(|| format!("Unknown recipe `{}`.", profile.recipe.as_str()))?;
+        let loaded = crate::workflow::recipe::parse_recipe_document(document)?;
+        if loaded.id != profile.recipe.as_str() {
+            return Err(format!(
+                "Recipe document `{}` does not match `{}`.",
+                loaded.id,
+                profile.recipe.as_str()
+            ));
+        }
     }
     if profile.deliverables.is_empty() {
         return Err("A production profile needs a deliverable.".into());
@@ -335,11 +346,7 @@ pub fn cmd_backfill_sketches(args: &Value) -> Result<Value, String> {
     let scene_id = arg_u32(args, "sceneId")?;
     let replace = arg_bool(args, "replace", true);
     let mut state = import::load_state(Path::new(&root))?;
-    let recipe = state
-        .profile
-        .as_ref()
-        .map(|profile| profile.recipe)
-        .unwrap_or_default();
+    let keep_mouths = crate::workflow::recipe::recipe_requires_role(&state, "mouth_policy");
     let scene = state
         .scenes
         .iter_mut()
@@ -349,7 +356,9 @@ pub fn cmd_backfill_sketches(args: &Value) -> Result<Value, String> {
         scene.strategy = Some(SceneStrategy::CinematicBalanced);
     }
     let n = sketches::backfill_scene(scene, replace);
-    crate::workflow::recipe::clear_unrequired_mouths(crate::workflow::recipe::graph(recipe), scene);
+    if !keep_mouths {
+        crate::workflow::recipe::strip_mouths(scene);
+    }
     if n == 0 {
         return Err("No production notes to backfill into cut sketches.".into());
     }
@@ -365,11 +374,7 @@ pub fn cmd_update_sketch(args: &Value) -> Result<Value, String> {
     let scene_id = arg_u32(args, "sceneId")?;
     let cut_n = arg_u32(args, "cut")?;
     let mut state = import::load_state(Path::new(&root))?;
-    let recipe = state
-        .profile
-        .as_ref()
-        .map(|profile| profile.recipe)
-        .unwrap_or_default();
+    let keep_mouths = crate::workflow::recipe::recipe_requires_role(&state, "mouth_policy");
     let scene = state
         .scenes
         .iter_mut()
@@ -389,7 +394,7 @@ pub fn cmd_update_sketch(args: &Value) -> Result<Value, String> {
             .find(|c| c.id.cut == cut_n)
             .ok_or_else(|| format!("cut {cut_n} not found on scene {scene_id}"))?;
         sketches::patch_sketch(cut, shot_role, mouth_policy, title, visual_prompt, subject);
-        if !crate::workflow::recipe::graph(recipe).requires_role("mouth_policy") {
+        if !keep_mouths {
             crate::workflow::recipe::clear_mouth(cut);
         }
     }
@@ -405,11 +410,7 @@ pub fn cmd_save_sketch(args: &Value) -> Result<Value, String> {
         .get("sketch")
         .ok_or_else(|| "Missing sketch".to_string())?;
     let mut state = import::load_state(Path::new(&root))?;
-    let recipe = state
-        .profile
-        .as_ref()
-        .map(|profile| profile.recipe)
-        .unwrap_or_default();
+    let keep_mouths = crate::workflow::recipe::recipe_requires_role(&state, "mouth_policy");
     let cut = state
         .scenes
         .iter_mut()
@@ -417,7 +418,7 @@ pub fn cmd_save_sketch(args: &Value) -> Result<Value, String> {
         .and_then(|scene| scene.cuts.iter_mut().find(|cut| cut.id.cut == cut_n))
         .ok_or_else(|| format!("cut {cut_n} not found on scene {scene_id}"))?;
     sketches::replace_sketch(cut, sketch)?;
-    if !crate::workflow::recipe::graph(recipe).requires_role("mouth_policy") {
+    if !keep_mouths {
         crate::workflow::recipe::clear_mouth(cut);
     }
     let imported = import::save_project(Path::new(&root), state)?;
@@ -636,11 +637,7 @@ pub fn cmd_draft_sketches(app: &HostCtx, args: &Value) -> Result<Value, String> 
     let api_id = opt_str(args, "apiId");
     let brief = opt_str(args, "brief").unwrap_or_default();
     let mut state = import::load_state(Path::new(&root))?;
-    let recipe = state
-        .profile
-        .as_ref()
-        .map(|profile| profile.recipe)
-        .unwrap_or_default();
+    let keep_mouths = crate::workflow::recipe::recipe_requires_role(&state, "mouth_policy");
     let strategy_raw = opt_str(args, "strategy");
     let strategy = strategy_raw
         .as_deref()
@@ -692,7 +689,9 @@ pub fn cmd_draft_sketches(app: &HostCtx, args: &Value) -> Result<Value, String> 
             verdict = validate::validate_scene_mix(scene);
         }
     }
-    crate::workflow::recipe::clear_unrequired_mouths(crate::workflow::recipe::graph(recipe), scene);
+    if !keep_mouths {
+        crate::workflow::recipe::strip_mouths(scene);
+    }
     let imported = import::save_project(Path::new(&root), state)?;
     let note = if verdict.is_reject() {
         format!(

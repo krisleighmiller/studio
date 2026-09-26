@@ -635,6 +635,51 @@ mod tests {
     }
 
     #[test]
+    fn clear_scratch_trashes_only_the_animatic_bucket() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let rel = "Preproduction/Scene1/animatic/shot.wav";
+        let file = root.join(rel);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"wav").unwrap();
+        let outside = root.join("Scripts/secret.md");
+        fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        fs::write(&outside, b"keep").unwrap();
+
+        let mut state = ProjectState::new();
+        let scene = state.scene_mut(1, "Scene");
+        scene.animatic = Some(SceneAnimatic {
+            id: "animatic_1".into(),
+            approved: false,
+            shots: vec![AnimaticShot {
+                id: "shot".into(),
+                cut_id: CutId::new(1, 1),
+                duration_seconds: 2.0,
+                scratch_audio_path: Some(rel.into()),
+            }],
+            warnings: Vec::new(),
+        });
+        clear_scratch(root, scene, "shot").unwrap();
+        assert!(!file.exists());
+        assert!(root.join(".workbench-trash").read_dir().unwrap().next().is_some());
+        assert!(scene.animatic.as_ref().unwrap().shots[0]
+            .scratch_audio_path
+            .is_none());
+
+        scene.animatic.as_mut().unwrap().shots[0].scratch_audio_path =
+            Some("Scripts/secret.md".into());
+        let err = clear_scratch(root, scene, "shot").unwrap_err();
+        assert!(
+            err.contains("animatic"),
+            "{err}"
+        );
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
+        assert!(scene.animatic.as_ref().unwrap().shots[0]
+            .scratch_audio_path
+            .is_some());
+    }
+
+    #[test]
     fn coverage_warns_for_missing_roles_and_unplanned_dialogue() {
         let mut state = ProjectState::new();
         let scene = state.scene_mut(1, "The last train");

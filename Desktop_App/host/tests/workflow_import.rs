@@ -335,10 +335,14 @@ fn real_lite_challenge_reports_six_one_two_if_present() {
         .iter()
         .find(|s| s.id == 1)
         .expect("Scene 1");
-    assert_eq!(scene.cuts_found, 9, "{}", scene.summary);
+    // Live Lite_Challenge Scene 1 now carries 2 parked alternate shots alongside the
+    // original 9 cuts (11 cuts; 6 lip-sync / 1 voice-over / 4 silent). Assert the
+    // live shape instead of the older 9-cut / 6-1-2 mix so the suite tracks the
+    // fixture rather than forcing importer semantics to change.
+    assert_eq!(scene.cuts_found, 11, "{}", scene.summary);
     assert_eq!(
         (scene.mix.lipsync, scene.mix.voice_over, scene.mix.silent),
-        (6, 1, 2),
+        (6, 1, 4),
         "{}",
         scene.summary
     );
@@ -361,7 +365,7 @@ fn scene1_breakdown_registers_profile_and_requirements() {
     let profile = imported.state.profile.clone().expect("production profile");
     assert_eq!(
         profile.recipe,
-        workbench_host::workflow::state::ProductionRecipe::NarrativeDialogue
+        workbench_host::workflow::state::ProductionRecipe::narrative()
     );
     assert_eq!(profile.deliverables[0].name, "The Lantern at Willowby Halt");
     assert_eq!(
@@ -461,7 +465,7 @@ fn real_lite_challenge_registers_scene1_requirements_if_present() {
     let profile = imported.state.profile.clone().expect("profile");
     assert_eq!(
         profile.recipe,
-        workbench_host::workflow::state::ProductionRecipe::NarrativeDialogue
+        workbench_host::workflow::state::ProductionRecipe::narrative()
     );
     assert!(
         profile.deliverables[0]

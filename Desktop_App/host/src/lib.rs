@@ -25,6 +25,7 @@ pub mod replicate;
 pub mod runway;
 pub mod scene_plan;
 pub mod script;
+pub mod secret_store;
 pub mod secrets;
 pub mod session;
 pub mod settings;

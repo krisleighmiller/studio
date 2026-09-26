@@ -74,6 +74,7 @@ pub fn add_alternate_shot(state: &mut ProjectState, scene_id: u32) -> Result<Str
     {
         return Err("adding an alternate angle renumbered an existing shot id".into());
     }
+    crate::workflow::animatic::sync(state);
     Ok(stable)
 }
 
@@ -728,7 +729,6 @@ mod tests {
         existing.title = Some("Arrival".into());
         scene.cuts.push(existing);
         let stable = add_alternate_shot(&mut state, 1).unwrap();
-        crate::workflow::animatic::sync(&mut state);
         let scene = state.scene(1).unwrap();
         assert_eq!(scene.cuts[0].stable_id, "shot_8");
         assert_eq!(scene.cuts[0].id.cut, 8);

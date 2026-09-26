@@ -785,9 +785,14 @@ export function chatCapableApis(settings: AppSettings): ApiEntry[] {
   );
 }
 
+export function apiCredentialReady(api: ApiEntry): boolean {
+  if (protocolMeta(api.kind).apiKeyOptional) return true;
+  return Boolean(api.apiKey.trim() || api.hasKey);
+}
+
 export function findApiByKind(settings: AppSettings, kind: ProtocolKind): ApiEntry | null {
   return (
-    settings.apis.find((api) => api.enabled && api.kind === kind && (api.apiKey || protocolMeta(kind).apiKeyOptional)) ??
+    settings.apis.find((api) => api.enabled && api.kind === kind && apiCredentialReady(api)) ??
     settings.apis.find((api) => api.kind === kind) ??
     null
   );
@@ -924,7 +929,9 @@ function normalizeApiEntry(raw: unknown): ApiEntry {
         ? src.baseUrl.trim().replace(/\/+$/, "")
         : meta.defaultBaseUrl,
     apiKey: typeof src.apiKey === "string" ? src.apiKey : "",
+    hasKey: src.hasKey === true,
     secretKey: typeof src.secretKey === "string" ? src.secretKey : "",
+    hasSecret: src.hasSecret === true,
     enabled: src.enabled !== false,
     catalog: Array.isArray(src.catalog)
       ? src.catalog

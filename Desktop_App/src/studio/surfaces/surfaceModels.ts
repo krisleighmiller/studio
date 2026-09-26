@@ -75,9 +75,9 @@ export function buildIntentModel(input: {
     error: input.error,
     blocked: input.blocked,
     actions: [
-      action("draft", "Draft from script", !wait, wait ?? (input.chatReady ? null : "Pick a chat model in the dropdown first.")),
+      action("draft", "Draft from script", !wait && input.chatReady, wait ?? "Pick a chat model in the dropdown first."),
       action("save", "Save draft", !wait, wait),
-      action("approve", "Approve intent", !wait, wait ?? (drafted ? null : "Save a draft before approving.")),
+      action("approve", "Approve intent", !wait && drafted, wait ?? "Save a draft before approving."),
     ],
   });
 }
@@ -88,6 +88,7 @@ export function buildReferenceModel(input: {
   busy: string | null;
   error: string | null;
   blocked: string[];
+  chatReady: boolean;
 }): SurfacePresentation {
   const planned = input.report?.planned_visual_sources ?? 0;
   const ready = input.report?.render_ready_sources ?? 0;
@@ -113,7 +114,23 @@ export function buildReferenceModel(input: {
     busy: input.busy,
     error: input.error,
     blocked: input.blocked,
-    actions: [action("save-source", "Save source strategy", !input.busy, input.busy)],
+    actions: [
+      action("save-source", "Save source strategy", !input.busy, input.busy),
+      action("bind-frame", "Bind selected frame", !input.busy, input.busy),
+      action(
+        "draft-prompt",
+        "Draft image prompt",
+        !input.busy && input.chatReady,
+        input.busy ?? "Pick a chat model in the dropdown first.",
+      ),
+      action("save-prompt", "Save prompt", !input.busy, input.busy),
+      action("generate", "Generate start frame", !input.busy, input.busy),
+      action("attach-still", "Attach still", !input.busy, input.busy),
+      action("approve", "Use", !input.busy, input.busy),
+      action("reject", "Reject", !input.busy, input.busy),
+      action("edit", "Edit", !input.busy, input.busy),
+      action("delete", "Delete", !input.busy, input.busy),
+    ],
   });
 }
 
@@ -172,9 +189,14 @@ export function buildSketchModel(input: {
     blocked: input.blocked,
     actions: [
       action("strategy", "Set strategy", !wait, wait),
-      action("alternate", "Add alternate angle", !wait, wait),
+      action("alternate", "New alternate angle", !wait, wait),
       action("backfill", "Backfill from notes", !wait && (backfill || hasNotes), wait ?? (hasNotes ? null : "No production notes to backfill.")),
-      action("draft", "Draft sketches", !wait, wait ?? (input.chatReady ? null : "Pick a chat model in the dropdown first.")),
+      action(
+        "draft",
+        "Draft sketches",
+        !wait && input.chatReady,
+        wait ?? "Pick a chat model in the dropdown first.",
+      ),
       action(
         "approve-animatic",
         "Approve rough cut",
@@ -206,8 +228,20 @@ export function buildNotesModel(input: {
     error: input.error,
     blocked: input.blocked,
     actions: [
-      action("sync", "Build all production video prompts", !wait, wait ?? (input.chatReady ? null : "Pick a chat model in the dropdown first.")),
+      action(
+        "sync",
+        "Build all production video prompts",
+        !wait && input.chatReady,
+        wait ?? "Pick a chat model in the dropdown first.",
+      ),
+      action(
+        "sync-cut",
+        "Build full video prompt",
+        !wait && input.chatReady,
+        wait ?? "Pick a chat model in the dropdown first.",
+      ),
       action("refresh", "Refresh rendered takes", !wait, wait),
+      action("alternate", "New alternate angle", !wait, wait),
     ],
   });
 }
@@ -231,7 +265,10 @@ export function buildRenderQueueModel(input: {
     busy: input.busy,
     error: input.error,
     blocked: blockedCuts ? [`${blockedCuts} shot package${blockedCuts === 1 ? "" : "s"} need review`, ...input.blocked] : input.blocked,
-    actions: [action("render", "Render new take", !input.busy, input.busy)],
+    actions: [
+      action("render", "Render new take", !input.busy, input.busy),
+      action("alternate", "New alternate angle", !input.busy, input.busy),
+    ],
   });
 }
 
@@ -254,7 +291,10 @@ export function buildTakeReviewModel(input: {
     busy: input.busy,
     error: input.error,
     blocked: input.blocked,
-    actions: [action("refresh", "Refresh takes from project", !input.busy, input.busy)],
+    actions: [
+      action("alternate", "New alternate angle", !input.busy, input.busy),
+      action("refresh", "Refresh takes from project", !input.busy, input.busy),
+    ],
   });
 }
 
@@ -346,6 +386,26 @@ export function buildCharactersModel(input: {
     actions: [
       action("create", input.creating ? "Cancel new character" : "New character", !input.busy, input.busy),
       action("save", "Save profile", !input.busy, input.busy),
+      action("create-character", "Create character", !input.busy, input.busy),
     ],
+  });
+}
+
+export function buildScriptModel(input: { scene: SceneRecord }): SurfacePresentation {
+  const beats =
+    (input.scene.location ? 1 : 0) +
+    (input.scene.action ?? []).length +
+    (input.scene.sound ?? []).length +
+    (input.scene.dialogue ?? []).length +
+    (input.scene.transitions ?? []).length;
+  const hasScript = beats > 0 || Boolean(input.scene.source_excerpt);
+  return chrome({
+    status: hasScript ? "present" : "empty",
+    tone: hasScript ? "ready" : "empty",
+    banner: null,
+    emptyTitle: hasScript ? null : "No script beats found for this scene.",
+    emptyDetail: null,
+    busy: null,
+    error: null,
   });
 }

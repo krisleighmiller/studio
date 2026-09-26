@@ -1967,10 +1967,12 @@ mod tests {
         assert!(out.starts_with("Preproduction/Scene1/references/interior_"));
         assert!(!out.contains("Characters/"));
         assert!(!out.contains("closeup"));
-        let action_json = card.split("```json").nth(1).unwrap_or(&card);
-        assert!(action_json.contains("reference_images"));
-        assert!(!action_json.contains("source_frame"));
-        assert!(!action_json.contains("source_image"));
+        assert!(card.contains("### Files read or uploaded"));
+        assert!(card.contains("### Artifacts modified"));
+        assert!(!card.contains("```json"));
+        let reads = card.split("### Artifacts modified").next().unwrap_or(&card);
+        assert!(reads.contains("tom_closeup_front.png"));
+        assert!(!reads.contains("source_frame"));
     }
 
     #[test]
@@ -2021,15 +2023,18 @@ mod tests {
             Some("wardrobe_lock")
         );
         assert_eq!(job.input_asset_ids.len(), 5);
-        let action_json = card.split("```json").nth(1).unwrap_or(&card);
-        let model_sheet = action_json
+        assert!(card.contains("### Files read or uploaded"));
+        assert!(card.contains("### Artifacts modified"));
+        assert!(!card.contains("```json"));
+        let reads = card.split("### Artifacts modified").next().unwrap_or(&card);
+        let model_sheet = reads
             .find("Characters/Tom Vale/model_sheet/tom_closeup_front.png")
             .unwrap();
-        let wardrobe = action_json
+        let wardrobe = reads
             .find("Preproduction/Scene1/references/wardrobe_1.png")
             .unwrap();
         assert!(model_sheet < wardrobe);
-        assert!(action_json.contains("Match the named characters' clothing"));
+        assert!(!card.contains("Match the named characters' clothing"));
     }
 
     #[test]
@@ -2108,12 +2113,16 @@ mod tests {
         assert!(card.contains("tom_closeup_front.png"));
         assert!(card.contains("pip_standing_front.png"));
         assert!(card.contains("wardrobe_1.png"));
-        let action_json = card.split("```json").nth(1).unwrap_or(&card);
-        assert!(action_json.contains("\"batch\""));
-        assert!(
-            action_json.contains("\"aspect_ratio\": \"3:4\"")
-                || action_json.contains("\"aspect_ratio\":\"3:4\"")
-        );
+        assert!(card.contains("### Files read or uploaded"));
+        assert!(card.contains("### Artifacts modified"));
+        assert!(!card.contains("```json"));
+        assert!(!card.contains("\"aspect_ratio\": \"3:4\""));
+        assert!(!card.contains("\"aspect_ratio\":\"3:4\""));
+        let reads = card.split("### Artifacts modified").next().unwrap_or(&card);
+        assert!(reads.contains("tom_closeup_front.png"));
+        assert!(reads.contains("wardrobe_1.png"));
+        let writes = card.split("### Artifacts modified").nth(1).unwrap_or("");
+        assert!(writes.contains("wardrobe_plates"));
         let ids: Vec<_> = state
             .jobs
             .iter()

@@ -85,7 +85,7 @@ pub struct ProjectReport {
     pub recipes: Vec<crate::workflow::recipe::RecipeChoice>,
 }
 
-fn scene_report(scene: &SceneRecord, graph: &crate::workflow::recipe::RecipeGraph) -> SceneReport {
+fn scene_report(scene: &SceneRecord, graph: &crate::workflow::recipe::LoadedRecipe) -> SceneReport {
     let mix = MixCounts::of(scene);
     let approved_start_frames = scene
         .cuts
@@ -217,22 +217,16 @@ fn scene_report(scene: &SceneRecord, graph: &crate::workflow::recipe::RecipeGrap
         mix_verdict,
         warnings,
         summary: lines.join("\n"),
-        navigation: crate::workflow::recipe::navigation(graph, scene),
+        navigation: graph.navigation(scene),
     }
 }
 
 pub fn project_report(state: &ProjectState) -> ProjectReport {
-    let active = crate::workflow::recipe::graph(
-        state
-            .profile
-            .as_ref()
-            .map(|profile| profile.recipe)
-            .unwrap_or_default(),
-    );
+    let active = crate::workflow::recipe::bound(state);
     let scenes: Vec<SceneReport> = state
         .scenes
         .iter()
-        .map(|scene| scene_report(scene, active))
+        .map(|scene| scene_report(scene, &active))
         .collect();
     let identity_ready = state.characters.iter().filter(|c| c.identity_ready).count();
     let voice_ready = state.characters.iter().filter(|c| c.voice_ready).count();
@@ -271,14 +265,7 @@ pub fn project_report(state: &ProjectState) -> ProjectReport {
         scenes,
         warnings,
         summary: summary.trim().to_string(),
-        recipe: crate::workflow::recipe::graph(
-            state
-                .profile
-                .as_ref()
-                .map(|profile| profile.recipe)
-                .unwrap_or_default(),
-        )
-        .report(),
+        recipe: active.report(),
         recipes: crate::workflow::recipe::choices(),
     }
 }

@@ -222,15 +222,66 @@ pub fn load_settings(app: HostCtx) -> Result<Value, String> {
     let value: Value =
         serde_json::from_str(&raw).map_err(|error| format!("Could not parse settings: {error}"))?;
     let had_legacy = value.get("providers").is_some() && value.get("apis").is_none();
-    let migrated = migrate_legacy_providers(value);
-    // Persist conversion once so keys are not stuck in the old shape.
-    if had_legacy {
-        let _ = fs::write(
-            &path,
-            serde_json::to_string_pretty(&migrated).unwrap_or_default(),
-        );
-    }
+    let mut migrated = migrate_legacy_providers(value);
+    rehydrate_secrets(&app, &path, &mut migrated, had_legacy)?;
     Ok(migrated)
+}
+
+fn rehydrate_secrets(
+    app: &HostCtx,
+    path: &Path,
+    value: &mut Value,
+    force_rewrite: bool,
+) -> Result<(), String> {
+    let Some(apis) = value.get_mut("apis").and_then(|item| item.as_array_mut()) else {
+        return Ok(());
+    };
+    let mut rewrite = force_rewrite;
+    for api in apis {
+        let Some(id) = api.get("id").and_then(|item| item.as_str()).map(str::to_string) else {
+            continue;
+        };
+        for field in ["apiKey", "secretKey"] {
+            let on_disk = api
+                .get(field)
+                .and_then(|item| item.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !on_disk.is_empty() {
+                crate::secret_store::set(app.settings_dir(), &id, field, &on_disk)?;
+                rewrite = true;
+            } else if let Some(stored) = crate::secret_store::get(app.settings_dir(), &id, field)? {
+                if let Some(object) = api.as_object_mut() {
+                    object.insert(field.to_string(), json!(stored));
+                }
+            }
+        }
+    }
+    if rewrite && path.exists() {
+        let mut disk = value.clone();
+        strip_secrets_for_disk(&mut disk);
+        let raw = serde_json::to_string_pretty(&disk)
+            .map_err(|error| format!("Could not serialize settings: {error}"))?;
+        write_settings_file(path, &raw)?;
+    }
+    Ok(())
+}
+
+fn strip_secrets_for_disk(value: &mut Value) {
+    let Some(apis) = value.get_mut("apis").and_then(|item| item.as_array_mut()) else {
+        return;
+    };
+    for api in apis {
+        let Some(object) = api.as_object_mut() else {
+            continue;
+        };
+        for field in ["apiKey", "secretKey"] {
+            object.insert(field.to_string(), json!(""));
+        }
+        object.remove("hasKey");
+        object.remove("hasSecret");
+    }
 }
 
 pub fn redact_settings_for_renderer(value: &mut Value) {
@@ -342,7 +393,7 @@ pub fn fetch_catalog_for_renderer(app: &HostCtx, args: &Value) -> Result<Vec<Cat
 
 pub fn save_settings(app: HostCtx, mut settings: Value) -> Result<(), String> {
     preserve_saved_secrets(&app, &mut settings);
-    let migrated = migrate_legacy_providers(settings);
+    let mut migrated = migrate_legacy_providers(settings);
     if migrated
         .get("apis")
         .and_then(|v| v.as_array())
@@ -371,10 +422,35 @@ pub fn save_settings(app: HostCtx, mut settings: Value) -> Result<(), String> {
             );
         }
     }
+    store_secrets(&app, &mut migrated)?;
     let path = settings_path(&app)?;
     let raw = serde_json::to_string_pretty(&migrated)
         .map_err(|error| format!("Could not serialize settings: {error}"))?;
     write_settings_file(&path, &raw)
+}
+
+fn store_secrets(app: &HostCtx, value: &mut Value) -> Result<(), String> {
+    let Some(apis) = value.get_mut("apis").and_then(|item| item.as_array_mut()) else {
+        return Ok(());
+    };
+    for api in apis {
+        let Some(id) = api.get("id").and_then(|item| item.as_str()).map(str::to_string) else {
+            continue;
+        };
+        for field in ["apiKey", "secretKey"] {
+            let secret = api
+                .get(field)
+                .and_then(|item| item.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !secret.is_empty() {
+                crate::secret_store::set(app.settings_dir(), &id, field, &secret)?;
+            }
+        }
+    }
+    strip_secrets_for_disk(value);
+    Ok(())
 }
 
 fn tighten_settings_permissions(dir: &Path, file: &Path) -> Result<(), String> {
@@ -848,6 +924,72 @@ fn fetch_gemini_catalog(api_key: String, base_url: String) -> Result<Vec<Catalog
     }
     sort_models(&mut models);
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn app() -> (tempfile::TempDir, HostCtx) {
+        let dir = tempfile::tempdir().unwrap();
+        let app = HostCtx::new(dir.path().to_path_buf());
+        (dir, app)
+    }
+
+    fn sample(key: &str) -> Value {
+        json!({
+            "apis": [{
+                "id": "api_test",
+                "name": "Atlas",
+                "kind": "atlas-cloud",
+                "baseUrl": "https://api.atlascloud.ai",
+                "apiKey": key,
+                "secretKey": "",
+                "enabled": true,
+                "catalog": [],
+                "catalogFetchedAt": null,
+                "pinnedLlmModelIds": []
+            }],
+            "capabilityDefaults": {},
+            "selectedChatModel": null
+        })
+    }
+
+    #[test]
+    fn saved_api_keys_stay_out_of_settings_json() {
+        let (dir, app) = app();
+        save_settings(app.clone(), sample("sk-test-secret-value")).unwrap();
+        let raw = fs::read_to_string(dir.path().join("settings.json")).unwrap();
+        assert!(!raw.contains("sk-test-secret-value"), "{raw}");
+        let loaded = load_settings(app.clone()).unwrap();
+        assert_eq!(loaded["apis"][0]["apiKey"], "sk-test-secret-value");
+        let mut rendered = loaded;
+        redact_settings_for_renderer(&mut rendered);
+        assert_eq!(rendered["apis"][0]["apiKey"], "");
+        assert_eq!(rendered["apis"][0]["hasKey"], true);
+        assert!(!rendered.to_string().contains("sk-test-secret-value"));
+    }
+
+    #[test]
+    fn a_plaintext_settings_file_is_migrated_on_load() {
+        let (dir, app) = app();
+        fs::write(dir.path().join("settings.json"), sample("sk-legacy-secret-value").to_string())
+            .unwrap();
+        let loaded = load_settings(app).unwrap();
+        assert_eq!(loaded["apis"][0]["apiKey"], "sk-legacy-secret-value");
+        let raw = fs::read_to_string(dir.path().join("settings.json")).unwrap();
+        assert!(!raw.contains("sk-legacy-secret-value"), "{raw}");
+    }
+
+    #[test]
+    fn a_blank_key_keeps_the_stored_secret() {
+        let (_dir, app) = app();
+        save_settings(app.clone(), sample("sk-test-secret-value")).unwrap();
+        save_settings(app.clone(), sample("")).unwrap();
+        let loaded = load_settings(app).unwrap();
+        assert_eq!(loaded["apis"][0]["apiKey"], "sk-test-secret-value");
+    }
 }
 
 fn sort_models(models: &mut [CatalogModel]) {

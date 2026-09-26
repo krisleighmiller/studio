@@ -8,39 +8,43 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Resolve the workbench-host binary for dev and packaged builds.
+ * A packaged or non-dev launch never honors WORKBENCH_HOST_BIN or a debug build.
  */
-function devHostOverride() {
-  return process.env.WORKBENCH_DEV === "1";
-}
-
-export function resolveHostBinary() {
-  if (devHostOverride() && process.env.WORKBENCH_HOST_BIN) {
-    return process.env.WORKBENCH_HOST_BIN;
-  }
-  const root = path.resolve(__dirname, "..");
+export function hostBinaryCandidates({
+  dev = false,
+  env = process.env,
+  resourcesPath = "",
+  root,
+} = {}) {
+  if (dev && env.WORKBENCH_HOST_BIN) return [env.WORKBENCH_HOST_BIN];
   const candidates = [];
-  if (process.resourcesPath && !devHostOverride()) {
-    candidates.push(path.join(process.resourcesPath, "workbench-host"));
+  if (resourcesPath && !dev) {
+    candidates.push(path.join(resourcesPath, "workbench-host"));
   }
-  // Prefer in-tree builds; also honor CARGO_TARGET_DIR (e.g. CI / sandboxes).
-  // Unpackaged `electron .` must prefer debug so `npm run dev:host` wins over a stale release binary.
   const targetRoots = [path.join(root, "host", "target")];
-  if (devHostOverride() && process.env.CARGO_TARGET_DIR) {
-    targetRoots.push(process.env.CARGO_TARGET_DIR);
-  }
+  if (dev && env.CARGO_TARGET_DIR) targetRoots.push(env.CARGO_TARGET_DIR);
   for (const targetRoot of targetRoots) {
     const debug = path.join(targetRoot, "debug", "workbench-host");
     const release = path.join(targetRoot, "release", "workbench-host");
-    if (devHostOverride()) {
-      candidates.push(debug, release);
-    } else {
-      candidates.push(release);
-    }
+    if (dev) candidates.push(debug, release);
+    else candidates.push(release);
   }
+  return candidates;
+}
+
+export function resolveHostBinary({
+  packaged = false,
+  env = process.env,
+  exists = fs.existsSync,
+  resourcesPath = process.resourcesPath,
+  root = path.resolve(__dirname, ".."),
+} = {}) {
+  const dev = env.WORKBENCH_DEV === "1" && !packaged;
+  const candidates = hostBinaryCandidates({ dev, env, resourcesPath, root });
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
+    if (exists(candidate)) return candidate;
   }
-  const fallback = devHostOverride() ? "debug" : "release";
+  const fallback = dev ? "debug" : "release";
   return path.join(root, "host", "target", fallback, "workbench-host");
 }
 
@@ -50,16 +54,18 @@ export class Sidecar {
   #nextId = 1;
   #eventHandlers = new Set();
   #settingsDir;
+  #packaged = false;
   #bin = null;
   #binMtime = 0;
 
-  constructor({ settingsDir }) {
+  constructor({ settingsDir, packaged = false }) {
     this.#settingsDir = settingsDir;
+    this.#packaged = packaged;
   }
 
   start() {
     if (this.#child) return;
-    const bin = resolveHostBinary();
+    const bin = resolveHostBinary({ packaged: this.#packaged });
     if (!fs.existsSync(bin)) {
       throw new Error(
         `workbench-host binary not found at ${bin}. Run: (cd host && cargo build)`,
@@ -111,7 +117,7 @@ export class Sidecar {
   }
 
   #restartIfBinaryChanged() {
-    if (!this.#bin || !devHostOverride()) return;
+    if (!this.#bin || this.#packaged || process.env.WORKBENCH_DEV !== "1") return;
     let mtime = 0;
     try {
       mtime = fs.statSync(this.#bin).mtimeMs;

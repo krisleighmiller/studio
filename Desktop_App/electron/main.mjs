@@ -16,7 +16,8 @@ import { createRequire } from "node:module";
 import { Sidecar } from "./sidecar.mjs";
 
 const require = createRequire(import.meta.url);
-const { isAppUrl, externalUrl, windowOpenAction } = require("./navigationPolicy.cjs");
+const { isAppUrl, externalUrl, windowOpenAction, externalOpenDecision, contentSecurityPolicy, launchTarget } = require("./navigationPolicy.cjs");
+const { mediaMime, mediaAllowed: mediaPathAllowed } = require("./mediaAccess.cjs");
 const { HOST_COMMANDS } = require("./commandAllowlist.cjs");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -121,43 +122,7 @@ function pathFromMediaUrl(url) {
 }
 
 function mimeForMediaPath(filePath) {
-  switch (path.extname(filePath).toLowerCase()) {
-    case ".mp4":
-      return "video/mp4";
-    case ".webm":
-      return "video/webm";
-    case ".mov":
-      return "video/quicktime";
-    case ".mkv":
-      return "video/x-matroska";
-    case ".m4v":
-      return "video/x-m4v";
-    case ".wav":
-      return "audio/wav";
-    case ".mp3":
-      return "audio/mpeg";
-    case ".ogg":
-      return "audio/ogg";
-    case ".flac":
-      return "audio/flac";
-    case ".m4a":
-      return "audio/mp4";
-    case ".aac":
-      return "audio/aac";
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".webp":
-      return "image/webp";
-    case ".gif":
-      return "image/gif";
-    case ".bmp":
-      return "image/bmp";
-    default:
-      return "application/octet-stream";
-  }
+  return mediaMime(filePath);
 }
 
 /**
@@ -455,10 +420,15 @@ function createWindow() {
   wireAppShortcuts(mainWindow);
   lockNavigation(mainWindow.webContents);
 
-  if (isDev) {
-    void mainWindow.loadURL(devServerUrl());
+  const launch = launchTarget({
+    dev: isDev,
+    packaged: app.isPackaged,
+    distIndex: path.join(__dirname, "..", "dist", "index.html"),
+  });
+  if (launch.kind === "url") {
+    void mainWindow.loadURL(launch.url);
   } else {
-    void mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+    void mainWindow.loadFile(launch.file);
   }
 
   mainWindow.on("closed", () => {
@@ -527,19 +497,6 @@ function migrateSettings() {
   }
 }
 
-function devServerUrl() {
-  const fallback = "http://127.0.0.1:1420";
-  const extra = process.env.VITE_DEV_SERVER_URL;
-  if (!extra) return fallback;
-  try {
-    const url = new URL(extra);
-    if (url.protocol === "http:" && url.hostname === "127.0.0.1") return url.origin;
-  } catch {
-    // Ignore a malformed override and stay on the loopback dev server.
-  }
-  return fallback;
-}
-
 /** @type {string | null} */
 let sessionRoot = null;
 /** @type {Set<string>} */
@@ -554,24 +511,18 @@ function realPathOrAbsolute(target) {
   }
 }
 
-function isInside(root, target) {
-  const rel = path.relative(root, target);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
 function mediaAllowed(filePath) {
-  if (mimeForMediaPath(filePath) === "application/octet-stream") return false;
-  let resolved;
-  try {
-    resolved = fs.realpathSync(filePath);
-  } catch {
-    return false;
-  }
-  if (sessionRoot && isInside(sessionRoot, resolved)) return true;
-  for (const grant of pathGrants) {
-    if (isInside(grant, resolved)) return true;
-  }
-  return false;
+  return mediaPathAllowed(filePath, {
+    sessionRoot,
+    grants: pathGrants,
+    realPath(target) {
+      try {
+        return fs.realpathSync(target);
+      } catch {
+        return null;
+      }
+    },
+  });
 }
 
 async function openSession(projectPath) {
@@ -707,19 +658,20 @@ function registerIpc() {
 
   ipcMain.handle("shell:openExternal", async (event, target) => {
     assertAppSender(event);
-    const url = externalUrl(target);
-    if (!url) return false;
+    const preview = externalUrl(target);
+    if (!preview) return false;
     const result = await dialog.showMessageBox({
       type: "question",
       title: "Open external link",
       message: "Open this link in your browser?",
-      detail: url,
+      detail: preview,
       buttons: ["Cancel", "Open"],
       defaultId: 1,
       cancelId: 0,
     });
-    if (result.response !== 1) return false;
-    await shell.openExternal(url);
+    const decision = externalOpenDecision(target, result.response === 1);
+    if (!decision.open) return false;
+    await shell.openExternal(decision.url);
     return true;
   });
 
@@ -758,20 +710,7 @@ app.whenReady().then(() => {
     }
   });
 
-  const csp = [
-    "default-src 'self'",
-    "script-src 'self'",
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: workbench-media:",
-    "media-src 'self' blob: workbench-media:",
-    isDev
-      ? "connect-src 'self' http://127.0.0.1:1420 ws://127.0.0.1:1420"
-      : "connect-src 'self'",
-    "object-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'",
-    "frame-src 'none'",
-  ].join("; ");
+  const csp = contentSecurityPolicy(isDev);
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
@@ -788,7 +727,7 @@ app.whenReady().then(() => {
   migrateSettings();
   restrictSettingsPermissions();
 
-  sidecar = new Sidecar({ settingsDir: settingsDir() });
+  sidecar = new Sidecar({ settingsDir: settingsDir(), packaged: app.isPackaged });
   sidecar.start();
   sidecar.onEvent((event, payload) => {
     if (event === "director-progress") {

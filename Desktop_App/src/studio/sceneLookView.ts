@@ -68,19 +68,13 @@ export function renderSceneLookView(
   header.append(title, counts);
   wrap.append(header);
 
-  for (const blocker of model.blockers) {
-    wrap.append(note("workflow-banner warn", `Blocked on ${blocker}`));
+  if (model.blockers.length || model.failedJobs.length) {
+    wrap.append(compactBlockerSummary(model, onIntent));
   }
-  for (const job of model.failedJobs) {
-    wrap.append(note("workflow-banner reject", job.message));
-  }
-
-  wrap.append(
-    button("Draft look board", model.busyReason, () => onIntent({ type: "draft-board" })),
-  );
 
   if (model.emptySlots || !model.selectedSlotId) {
     wrap.append(
+      button("Draft look board", model.busyReason, () => onIntent({ type: "draft-board" })),
       note(
         "workflow-missing",
         "No look slots yet. Draft from scene intent, or wait until intent is approved if you want the model to use it.",
@@ -101,6 +95,15 @@ export function renderSceneLookView(
     prompt: promptInput.input.value,
     negative: negativeInput.input.value,
   });
+
+  const layout = document.createElement("div");
+  layout.className = "scene-look scene-look-hero";
+  layout.append(
+    primaryStage(model, slot.id, onIntent),
+    alternateColumn(model, onIntent, () => onIntent({ type: "generate", ...promptValues() })),
+  );
+  wrap.append(layout);
+
   const slotRow = document.createElement("div");
   slotRow.className = "scene-look-slots";
   slotRow.setAttribute("role", "tablist");
@@ -115,39 +118,42 @@ export function renderSceneLookView(
     tab.addEventListener("click", () => onIntent({ type: "select-slot", slotId: item.id }));
     slotRow.append(tab);
   }
-  wrap.append(slotRow);
-
-  const layout = document.createElement("div");
-  layout.className = "scene-look";
-  layout.append(
-    primaryStage(model, slot.id, onIntent),
-    alternateColumn(model, onIntent, () => onIntent({ type: "generate", ...promptValues() })),
+  wrap.append(
+    disclosure(
+      `Look slots (${model.slots.length})`,
+      slotRow,
+      false,
+    ),
+    disclosure(
+      "Prompt & metadata",
+      (() => {
+        const fields = document.createElement("div");
+        fields.className = "scene-look-fields";
+        const approval = document.createElement("p");
+        approval.className = "workflow-look-status";
+        approval.textContent = slot.approvalLabel;
+        const purpose = document.createElement("p");
+        purpose.className = "scene-look-purpose";
+        purpose.textContent = model.narrativePurpose;
+        fields.append(role.label, titleInput.label, promptInput.label, negativeInput.label, approval, purpose);
+        if (model.identityHint) fields.append(note("workflow-look-identity", model.identityHint));
+        return fields;
+      })(),
+      false,
+    ),
   );
-  wrap.append(layout);
 
-  for (const warning of model.warnings) {
-    wrap.append(note("workflow-banner warn", warning));
+  if (model.warnings.length || model.notes.length) {
+    const list = document.createElement("div");
+    for (const warning of model.warnings) list.append(note("workflow-banner warn", warning));
+    for (const boardNote of model.notes) list.append(note("workflow-banner", boardNote));
+    wrap.append(
+      disclosure(`Warnings (${model.warnings.length})`, list, model.warnings.length > 0),
+    );
   }
-  for (const boardNote of model.notes) {
-    wrap.append(note("workflow-banner", boardNote));
-  }
-  const purpose = document.createElement("p");
-  purpose.className = "scene-look-purpose";
-  purpose.textContent = model.narrativePurpose;
-  wrap.append(purpose);
-
-  const fields = document.createElement("div");
-  fields.className = "scene-look-fields";
-  const approval = document.createElement("p");
-  approval.className = "workflow-look-status";
-  approval.textContent = slot.approvalLabel;
-  fields.append(role.label, titleInput.label, promptInput.label, negativeInput.label, approval);
-  wrap.append(fields);
-
-  if (model.identityHint) wrap.append(note("workflow-look-identity", model.identityHint));
 
   const actions = document.createElement("div");
-  actions.className = "workflow-inspector-actions";
+  actions.className = "workflow-inspector-actions scene-look-advanced";
   actions.append(
     button(model.directorAttached ? "Attached to Director" : "Attach to Director", model.busyReason, () =>
       onIntent({ type: "attach-director", slotId: slot.id }),
@@ -155,13 +161,14 @@ export function renderSceneLookView(
     button("Save prompt", model.busyReason, () => onIntent({ type: "save-prompt", ...promptValues() })),
     button("Attach image", model.busyReason, () => onIntent({ type: "attach", slotId: slot.id })),
     button("Generate still", model.busyReason, () => onIntent({ type: "generate", ...promptValues() })),
+    button("Draft look board", model.busyReason, () => onIntent({ type: "draft-board" })),
   );
   if (model.canBuildPlates) {
     actions.append(
       button("Build wardrobe plates", model.busyReason, () => onIntent({ type: "build-plates" })),
     );
   }
-  wrap.append(actions);
+  wrap.append(disclosure("Advanced actions", actions, false));
 
   if (model.showPlates) {
     const plates = document.createElement("section");
@@ -170,9 +177,41 @@ export function renderSceneLookView(
     for (const plate of model.plates) {
       plates.append(plateCard(plate, model.busyReason, onIntent));
     }
-    wrap.append(plates);
+    wrap.append(disclosure(`Plates (${model.plates.length})`, plates, false));
   }
   return wrap;
+}
+
+function compactBlockerSummary(
+  model: SceneLookModel,
+  _onIntent: (intent: SceneLookIntent) => void,
+): HTMLElement {
+  const details = document.createElement("details");
+  details.className = "scene-look-blockers";
+  const summary = document.createElement("summary");
+  const count = model.blockers.length;
+  summary.textContent =
+    count > 0
+      ? `⚠ ${count} requirement${count === 1 ? "" : "s"} blocking production · Review requirements`
+      : `⚠ ${model.failedJobs.length} failed job${model.failedJobs.length === 1 ? "" : "s"}`;
+  details.append(summary);
+  for (const blocker of model.blockers) {
+    details.append(note("workflow-field-hint", `Blocked on ${blocker}`));
+  }
+  for (const job of model.failedJobs) {
+    details.append(note("workflow-banner reject", job.message));
+  }
+  return details;
+}
+
+function disclosure(title: string, content: HTMLElement, open: boolean): HTMLElement {
+  const details = document.createElement("details");
+  details.className = "scene-look-disclosure";
+  if (open) details.open = true;
+  const summary = document.createElement("summary");
+  summary.textContent = title;
+  details.append(summary, content);
+  return details;
 }
 
 function primaryStage(

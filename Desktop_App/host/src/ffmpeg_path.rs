@@ -42,3 +42,24 @@ pub fn concat_list_line(path: &Path) -> Result<String, String> {
     }
     Ok(format!("file '{text}'\n"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn concat_lines_are_host_escaped_and_newline_paths_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("clip.mp4");
+        fs::write(&clip, b"mp4").unwrap();
+        let line = concat_list_line(&clip).unwrap();
+        assert!(line.starts_with("file '"));
+        assert!(line.contains("clip.mp4"));
+        assert!(!line.contains("-safe"));
+        let sneaky = dir.path().join("clip\n.mp4");
+        fs::write(&sneaky, b"mp4").unwrap();
+        assert!(concat_list_line(&sneaky).is_err());
+        assert!(ffmpeg_local_arg(&sneaky).is_err());
+    }
+}

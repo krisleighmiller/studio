@@ -1,4 +1,4 @@
-import { WORKFLOW_STAGES, type CutRecord, type ProjectState, type SceneRecord } from "../../workflowTypes";
+import type { CutRecord, ProjectState, SceneRecord } from "../../workflowTypes";
 import type { DirectorSelection } from "../selection";
 
 export type DirectorContextEntry = {
@@ -39,7 +39,6 @@ export function describeDirectorContext(
   const scene = state?.scenes.find((item) => item.stable_id === selection.sceneStableId);
   const stage =
     stageLabel ||
-    WORKFLOW_STAGES.find((item) => item.id === selection.stage)?.label ||
     (selection.stage ? selection.stage.split("_").join(" ") : null);
   const sceneName = scene ? `Scene ${scene.id}` : null;
   const headline =

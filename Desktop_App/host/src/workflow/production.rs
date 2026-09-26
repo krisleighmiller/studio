@@ -782,7 +782,12 @@ mod tests {
         let (card, _) = prepare_render(root, &mut state, 1, 1).unwrap();
 
         assert!(card.contains("Scenes/Scene1/Cut1/S01C01.mp4"));
-        assert!(card.contains("\"resolution\": \"1080p\""));
+        assert!(card.contains("### Files read or uploaded"));
+        assert!(card.contains("### Artifacts modified"));
+        assert!(!card.contains("```json"));
+        assert!(!card.contains("\"resolution\": \"1080p\""));
+        let writes = card.split("### Artifacts modified").nth(1).unwrap_or("");
+        assert!(writes.contains("S01C01.mp4"));
         assert_eq!(state.jobs[0].kind, "render");
         assert_eq!(state.jobs[0].status, JobStatus::Pending);
     }
@@ -900,9 +905,12 @@ mod tests {
         );
         let (approval, _) = prepare_render(root, &mut state, 1, 1).unwrap();
         assert!(approval.contains("Operation: `text_sync`"));
-        assert!(approval.contains("\"source_frame\""));
+        assert!(approval.contains("### Files read or uploaded"));
+        assert!(approval.contains("### Artifacts modified"));
+        assert!(!approval.contains("```json"));
+        assert!(!approval.contains("\"source_frame\""));
+        assert!(!approval.contains("\"voice_clone\""));
         assert!(approval.contains("Preproduction/Scene1/start_frames/cut_1_v2.png"));
-        assert!(approval.contains("\"voice_clone\""));
         assert!(approval.contains("Characters/Sam/voice/Sam_voice_sample_01.wav"));
         assert!(state.jobs[0]
             .input_asset_ids

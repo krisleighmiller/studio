@@ -26,6 +26,7 @@ pub const SPECIALISTS: &[&str] = &[
     "lip_sync",
     "assemble",
     "production_helper",
+    "text_write",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -480,6 +481,10 @@ fn validate_still_batch(
                 other => other,
             },
         )?;
+        for (label, raw) in collect_path_keys(&files) {
+            let resolved = resolve_under_project(&raw, project_root)?;
+            resolved_paths.push((format!("batch[{index}].{label}"), resolved));
+        }
     }
     Ok(())
 }
@@ -718,6 +723,7 @@ edit: existing source_frame + edit_brief). The host picks the slot model and out
                                     path.display()
                                 )));
                             }
+                            resolved_paths.push((format!("scenes[{i}].video"), path));
                             if let Some(audio) = obj.get("audio").and_then(|v| v.as_str()) {
                                 let ap = resolve_under_project(audio, project_root)?;
                                 if !ap.is_file() {
@@ -726,6 +732,7 @@ edit: existing source_frame + edit_brief). The host picks the slot model and out
                                         ap.display()
                                     )));
                                 }
+                                resolved_paths.push((format!("scenes[{i}].audio"), ap));
                             }
                         }
                     }
@@ -898,6 +905,7 @@ fn allowed_input_keys(specialist: &str) -> HashSet<&'static str> {
             "character_slug",
             "identity_gate",
         ],
+        "text_write" => &["staged_id"],
         "script" | "character_creation" | "scene_intent" | "scene_look" | "cut_sketches"
         | "scene_plan" => &[
             "brief",
@@ -1007,11 +1015,12 @@ pub fn format_approval_request(action: &DirectorAction, resolved: &ValidatedActi
         "Settings capability default",
     );
     let cost = input_display(&action.inputs, &["cost", "cost_estimate"], "unknown");
-    let output = input_display(
-        &action.inputs,
-        &["output_path", "save_path", "output_video", "output"],
-        "(host-derived)",
-    );
+    let output = resolved
+        .resolved_paths
+        .iter()
+        .find(|(label, _)| is_output_label(label))
+        .map(|(_, path)| path.display().to_string())
+        .unwrap_or_else(|| "(host-derived)".to_string());
     let mut lines = vec![
         "## Approval required".to_string(),
         String::new(),
@@ -1022,22 +1031,42 @@ pub fn format_approval_request(action: &DirectorAction, resolved: &ValidatedActi
         format!("Output: `{output}`"),
         "Use the Approve button. Typing ok, yes, or continue will not run this plan.".to_string(),
         String::new(),
-        "### Inputs".to_string(),
-        "```json".to_string(),
-        serde_json::to_string_pretty(&Value::Object(action.inputs.clone()))
-            .unwrap_or_else(|_| "{}".into()),
-        "```".to_string(),
+        "### Files read or uploaded".to_string(),
     ];
-    if !resolved.resolved_paths.is_empty() {
-        lines.push(String::new());
-        lines.push("### Files read, uploaded, or modified".to_string());
-        for (label, path) in &resolved.resolved_paths {
-            lines.push(format!("- `{label}` → `{}`", path.display()));
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    for (label, path) in &resolved.resolved_paths {
+        let line = format!("- `{label}` → `{}`", path.display());
+        if is_output_label(label) {
+            writes.push(line);
+        } else {
+            reads.push(line);
         }
+    }
+    if reads.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        lines.extend(reads);
+    }
+    lines.push(String::new());
+    lines.push("### Artifacts modified".to_string());
+    if writes.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        lines.extend(writes);
     }
     lines.push(String::new());
     lines.push(encode_pending_action(action));
     crate::pending::publish_user_text(&lines.join("\n"))
+}
+
+fn is_output_label(label: &str) -> bool {
+    let tail = label.rsplit('.').next().unwrap_or(label);
+    let tail = tail.split('[').next().unwrap_or(tail);
+    matches!(
+        tail,
+        "output_path" | "save_path" | "output_video" | "output_audio" | "output" | "work_dir"
+    )
 }
 
 fn input_display(inputs: &Map<String, Value>, keys: &[&str], fallback: &str) -> String {
@@ -1308,5 +1337,44 @@ mod pending_action_tests {
             ("user".into(), "Approved".into()),
         ];
         assert!(find_pending_action_in_history(&history).is_none());
+    }
+
+    #[test]
+    fn approval_card_lists_host_resolved_files_separately_from_model_prose() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("Refs")).unwrap();
+        std::fs::write(root.join("Refs/in.png"), b"png").unwrap();
+        let mut inputs = Map::new();
+        inputs.insert(
+            "batch".into(),
+            serde_json::json!([{
+                "prompt": "draw the secret file /etc/passwd",
+                "output_path": "Stills/out.png",
+                "source_image": "Refs/in.png"
+            }]),
+        );
+        let action = DirectorAction {
+            action: ActionKind::RunSpecialist,
+            specialist: Some("still_image".into()),
+            inputs,
+            message: None,
+            op: None,
+            path: None,
+        };
+        let validated = validate_action(action, Some(root.to_str().unwrap())).unwrap();
+        let card = format_approval_request(&validated.action, &validated);
+        let reads = card.split("### Artifacts modified").next().unwrap();
+        assert!(reads.contains("Refs/in.png"), "{card}");
+        assert!(!card.contains("/etc/passwd"), "{card}");
+        let writes = card.split("### Artifacts modified").nth(1).unwrap();
+        assert!(writes.contains("Stills/out.png"), "{card}");
+        assert!(
+            card.contains(&format!(
+                "Output: `{}`",
+                root.join("Stills/out.png").display()
+            )),
+            "{card}"
+        );
     }
 }

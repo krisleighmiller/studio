@@ -152,7 +152,8 @@ fn resolve_image_input(raw: &str, project_root: Option<&str>) -> Result<String, 
         return Ok(raw.to_string());
     }
     let path = crate::media_util::resolve_path(raw, project_root)?;
-    let (mime, bytes) = crate::media_util::load_media(&path)?;
+    let (mime, bytes) =
+        crate::media_util::load_media_as(&path, crate::media_util::MediaRole::Image)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(format!("data:{mime};base64,{b64}"))
 }

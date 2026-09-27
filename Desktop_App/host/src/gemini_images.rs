@@ -58,7 +58,8 @@ fn read_inline_image(raw: &str, project_root: Option<&str>) -> Result<(String, S
         ));
     }
     let path = crate::media_util::resolve_path(raw, project_root)?;
-    let (mime, bytes) = crate::media_util::load_media(&path)?;
+    let (mime, bytes) =
+        crate::media_util::load_media_as(&path, crate::media_util::MediaRole::Image)?;
     Ok((
         mime,
         base64::engine::general_purpose::STANDARD.encode(bytes),

@@ -8,7 +8,7 @@
 //! the user approves the change summary.
 
 use crate::director_actions::{
-    format_approval_request, validate_action, ActionKind, DirectorAction,
+    format_approval_request_with_context, validate_action, ActionKind, DirectorAction,
 };
 use crate::project_path::{self, PathIntent};
 use serde_json::{json, Map};
@@ -38,6 +38,8 @@ struct StagedBatch {
 struct StagedFile {
     relative: String,
     body: String,
+    resolved_path: PathBuf,
+    replacing: bool,
 }
 
 fn staged_store() -> &'static Mutex<HashMap<String, StagedBatch>> {
@@ -119,7 +121,11 @@ pub fn approval_summary(write: &AuthorizedWrite, previous: Option<&str>, next: &
 
 /// Write a new default file. Overwrites and unusual paths stay on disk only
 /// after approval.
-pub fn commit_text_write(write: &AuthorizedWrite, body: &str, approved: bool) -> Result<(), String> {
+pub fn commit_text_write(
+    write: &AuthorizedWrite,
+    body: &str,
+    approved: bool,
+) -> Result<(), String> {
     if approval_required(write) && !approved {
         let previous = fs::read_to_string(&write.path).ok();
         return Err(format!(
@@ -135,13 +141,21 @@ pub fn commit_text_write(write: &AuthorizedWrite, body: &str, approved: bool) ->
         .map_err(|error| format!("Could not write {}: {error}", write.path.display()))
 }
 
-pub fn stage_text_writes(specialist: &str, files: Vec<(String, String)>) -> String {
+pub fn stage_authorized_text_writes(
+    specialist: &str,
+    files: Vec<(AuthorizedWrite, String)>,
+) -> String {
     let id = crate::pending::random_id();
     let batch = StagedBatch {
         specialist: specialist.to_string(),
         files: files
             .into_iter()
-            .map(|(relative, body)| StagedFile { relative, body })
+            .map(|(write, body)| StagedFile {
+                relative: write.relative,
+                body,
+                resolved_path: write.path,
+                replacing: write.replacing,
+            })
             .collect(),
     };
     staged_store()
@@ -151,7 +165,68 @@ pub fn stage_text_writes(specialist: &str, files: Vec<(String, String)>) -> Stri
     id
 }
 
-pub fn text_write_approval_card(staged_id: &str, summaries: &[String]) -> Result<String, String> {
+pub fn append_staged_paths_for_action(
+    validated: &mut crate::director_actions::ValidatedAction,
+) -> Result<(), String> {
+    if validated.action.specialist.as_deref() != Some("text_write") {
+        return Ok(());
+    }
+    let staged_id = validated
+        .action
+        .inputs
+        .get("staged_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "text_write needs the host staged_id".to_string())?
+        .to_string();
+    append_staged_paths(&staged_id, validated)
+}
+
+fn append_staged_paths(
+    staged_id: &str,
+    validated: &mut crate::director_actions::ValidatedAction,
+) -> Result<(), String> {
+    let target_files: Vec<_> = staged_store()
+        .lock()
+        .expect("staged text writes")
+        .get(staged_id)
+        .ok_or_else(|| "That text change is no longer waiting for approval.".to_string())?
+        .files
+        .iter()
+        .map(|file| (file.resolved_path.clone(), file.replacing))
+        .collect();
+    if target_files.is_empty() {
+        return Err("The staged text change has no approved output files.".into());
+    }
+    for (index, (path, replacing)) in target_files.iter().enumerate() {
+        if path.exists() != *replacing {
+            return Err(format!(
+                "Staged target `{}` changed between preparation and approval. Request a new plan.",
+                path.display()
+            ));
+        }
+        if *replacing {
+            let label = if index == 0 {
+                "existing_file".to_string()
+            } else {
+                format!("existing_file[{index}]")
+            };
+            validated.resolved_paths.push((label, path.clone()));
+        }
+        let label = if index == 0 {
+            "output_path".to_string()
+        } else {
+            format!("output_path[{index}]")
+        };
+        validated.resolved_paths.push((label, path.clone()));
+    }
+    Ok(())
+}
+
+pub fn text_write_approval_card(
+    staged_id: &str,
+    summaries: &[String],
+    project_root: Option<&str>,
+) -> Result<String, String> {
     let mut inputs = Map::new();
     inputs.insert("staged_id".into(), json!(staged_id));
     let action = DirectorAction {
@@ -162,16 +237,37 @@ pub fn text_write_approval_card(staged_id: &str, summaries: &[String]) -> Result
         op: None,
         path: None,
     };
-    let validated = validate_action(action, None).map_err(|error| error.to_string())?;
-    let mut card = format_approval_request(&validated.action, &validated);
-    card.push_str("\n### Text changes\n");
+    let mut validated = validate_action(action, None).map_err(|error| error.to_string())?;
+    append_staged_paths(staged_id, &mut validated)?;
+    let project_root = project_root
+        .ok_or_else(|| "Text-write approval requires an active project root.".to_string())?;
+    let context = crate::director::DirectorContext {
+        project_root: Some(project_root.to_string()),
+        ..Default::default()
+    };
+    let mut card = format_approval_request_with_context(
+        &validated.action,
+        &validated,
+        &context,
+        "Local filesystem",
+        "None (host-side text write)",
+        "No provider charge for this write; prior text generation is outside this approval.",
+    );
+    let mut changes = String::from("\n### Text changes\n");
     for summary in summaries {
-        card.push_str(&format!("- {summary}\n"));
+        changes.push_str(&format!("- {summary}\n"));
     }
+    let insert_at = card
+        .find(crate::pending::APPROVE_TOKEN_PREFIX)
+        .unwrap_or(card.len());
+    card.insert_str(insert_at, &changes);
     Ok(card)
 }
 
-pub fn commit_staged_text_write(staged_id: &str, project_root: Option<&str>) -> Result<Vec<String>, String> {
+pub fn commit_staged_text_write(
+    staged_id: &str,
+    project_root: Option<&str>,
+) -> Result<Vec<String>, String> {
     let batch = staged_store()
         .lock()
         .expect("staged text writes")
@@ -187,6 +283,12 @@ pub fn commit_staged_text_write(staged_id: &str, project_root: Option<&str>) -> 
             0,
             0,
         )?;
+        if authorized.replacing != file.replacing {
+            return Err(format!(
+                "Staged target `{}` changed after approval. Request a new plan.",
+                authorized.path.display()
+            ));
+        }
         commit_text_write(&authorized, &file.body, true)?;
         written.push(authorized.relative);
     }
@@ -298,8 +400,8 @@ mod tests {
     fn script_and_character_and_digest_accept_their_directories() {
         let (_dir, root) = project();
         let root_ref = Some(root.as_str());
-        let script = authorize_text_write("script", "Scripts/draft.md", root_ref, 12, 0, 0)
-            .unwrap();
+        let script =
+            authorize_text_write("script", "Scripts/draft.md", root_ref, 12, 0, 0).unwrap();
         assert_eq!(script.relative, "Scripts/draft.md");
         assert!(!script.replacing);
         let txt = authorize_text_write("script", "Scripts/notes/outline.txt", root_ref, 4, 0, 0);
@@ -328,8 +430,8 @@ mod tests {
         let (_dir, root) = project();
         let path = Path::new(&root).join("Scripts/draft.md");
         fs::write(&path, "old").unwrap();
-        let write = authorize_text_write("script", "Scripts/draft.md", Some(&root), 3, 0, 0)
-            .unwrap();
+        let write =
+            authorize_text_write("script", "Scripts/draft.md", Some(&root), 3, 0, 0).unwrap();
         assert!(write.replacing);
         assert!(approval_required(&write));
         let refused = commit_text_write(&write, "new\n", false);
@@ -341,15 +443,9 @@ mod tests {
     #[test]
     fn an_unusual_path_is_not_written_until_approved() {
         let (_dir, root) = project();
-        let write = authorize_text_write(
-            "script",
-            "Scripts/notes/outline.txt",
-            Some(&root),
-            4,
-            0,
-            0,
-        )
-        .unwrap();
+        let write =
+            authorize_text_write("script", "Scripts/notes/outline.txt", Some(&root), 4, 0, 0)
+                .unwrap();
         assert!(write.unusual);
         let path = Path::new(&root).join("Scripts/notes/outline.txt");
         assert!(commit_text_write(&write, "note\n", false).is_err());
@@ -361,9 +457,15 @@ mod tests {
     #[test]
     fn a_new_file_in_the_specialist_directory_writes_without_approval() {
         let (_dir, root) = project();
-        let write =
-            authorize_text_write("production_helper", "Research/digest.md", Some(&root), 8, 0, 0)
-                .unwrap();
+        let write = authorize_text_write(
+            "production_helper",
+            "Research/digest.md",
+            Some(&root),
+            8,
+            0,
+            0,
+        )
+        .unwrap();
         assert!(!approval_required(&write));
         commit_text_write(&write, "digest\n", false).unwrap();
         assert_eq!(
@@ -374,19 +476,47 @@ mod tests {
 
     #[test]
     fn an_approved_overwrite_uses_the_staged_body() {
+        let _pending_guard = crate::pending::test_pending_lock();
         let (_dir, root) = project();
         let path = Path::new(&root).join("Research/digest.md");
         fs::write(&path, "old").unwrap();
-        let write =
-            authorize_text_write("production_helper", "Research/digest.md", Some(&root), 4, 0, 0)
-                .unwrap();
-        let summary = approval_summary(&write, Some("old"), "new\n");
-        let id = stage_text_writes(
+        let write = authorize_text_write(
             "production_helper",
-            vec![("Research/digest.md".into(), "new\n".into())],
-        );
-        let card = text_write_approval_card(&id, &[summary]).unwrap();
+            "Research/digest.md",
+            Some(&root),
+            4,
+            0,
+            0,
+        )
+        .unwrap();
+        let summary = approval_summary(&write, Some("old"), "new\n");
+        let id = stage_authorized_text_writes("production_helper", vec![(write, "new\n".into())]);
+        let card = text_write_approval_card(&id, &[summary], Some(&root)).unwrap();
         assert!(card.contains("overwrite"));
+        assert!(card.contains(crate::pending::APPROVE_TOKEN_PREFIX));
+        let approval_id = card
+            .split(crate::pending::APPROVE_TOKEN_PREFIX)
+            .nth(1)
+            .and_then(|rest| rest.strip_suffix("]]"))
+            .expect("approval id");
+        let pending = crate::pending::take(approval_id).unwrap();
+        assert_eq!(pending.action.specialist.as_deref(), Some("text_write"));
+        assert_eq!(
+            pending
+                .context
+                .as_ref()
+                .and_then(|value| value.get("projectRoot")),
+            Some(&json!(root))
+        );
+        assert!(pending.input_fingerprints.is_some());
+        assert!(card.contains("Provider: Local filesystem"));
+        assert!(card.contains("Model: None (host-side text write)"));
+        assert!(card.contains("No provider charge for this write"));
+        assert!(card.contains("### Files read or uploaded"));
+        assert!(card.contains("### Artifacts modified"));
+        assert!(card.contains(&path.display().to_string()));
+        assert!(card.contains("existing_file"));
+        assert!(card.contains("output_path"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "old");
         let written = commit_staged_text_write(&id, Some(&root)).unwrap();
         assert_eq!(written, vec!["Research/digest.md".to_string()]);
@@ -397,25 +527,14 @@ mod tests {
     fn caps_file_count_and_bytes() {
         let (_dir, root) = project();
         let root = Some(root.as_str());
-        assert!(authorize_text_write(
-            "script",
-            "Scripts/a.md",
-            root,
-            MAX_BYTES_PER_FILE + 1,
-            0,
-            0
-        )
-        .is_err());
+        assert!(
+            authorize_text_write("script", "Scripts/a.md", root, MAX_BYTES_PER_FILE + 1, 0, 0)
+                .is_err()
+        );
         assert!(authorize_text_write("script", "Scripts/a.md", root, 10, MAX_FILES, 0).is_err());
-        assert!(authorize_text_write(
-            "script",
-            "Scripts/a.md",
-            root,
-            10,
-            1,
-            MAX_TOTAL_BYTES
-        )
-        .is_err());
+        assert!(
+            authorize_text_write("script", "Scripts/a.md", root, 10, 1, MAX_TOTAL_BYTES).is_err()
+        );
     }
 
     #[test]

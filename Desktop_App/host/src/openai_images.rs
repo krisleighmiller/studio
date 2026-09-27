@@ -58,7 +58,7 @@ fn map_size(params: &Value) -> String {
 
 fn resolve_local_image(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
     let path = crate::media_util::resolve_path(raw, project_root)?;
-    crate::media_util::ensure_media_file(&path)?;
+    crate::media_util::ensure_media_file_as(&path, crate::media_util::MediaRole::Image)?;
     Ok(path)
 }
 

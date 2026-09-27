@@ -661,7 +661,12 @@ mod tests {
         });
         clear_scratch(root, scene, "shot").unwrap();
         assert!(!file.exists());
-        assert!(root.join(".workbench-trash").read_dir().unwrap().next().is_some());
+        assert!(root
+            .join(".workbench-trash")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_some());
         assert!(scene.animatic.as_ref().unwrap().shots[0]
             .scratch_audio_path
             .is_none());
@@ -669,10 +674,7 @@ mod tests {
         scene.animatic.as_mut().unwrap().shots[0].scratch_audio_path =
             Some("Scripts/secret.md".into());
         let err = clear_scratch(root, scene, "shot").unwrap_err();
-        assert!(
-            err.contains("animatic"),
-            "{err}"
-        );
+        assert!(err.contains("animatic"), "{err}");
         assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
         assert!(scene.animatic.as_ref().unwrap().shots[0]
             .scratch_audio_path

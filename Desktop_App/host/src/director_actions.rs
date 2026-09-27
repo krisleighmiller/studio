@@ -275,6 +275,52 @@ pub fn resolve_under_project(
         .map_err(|error| ActionError::Validate(error.to_string()))
 }
 
+pub(crate) fn append_context_attachments(
+    resolved: &mut ValidatedAction,
+    attachments: &[String],
+    project_root: Option<&str>,
+) -> Result<(), String> {
+    for (index, raw) in attachments.iter().enumerate() {
+        let path = resolve_input_path(raw, project_root).map_err(|error| error.to_string())?;
+        let metadata = std::fs::metadata(&path)
+            .map_err(|error| format!("Could not inspect chat attachment `{raw}`: {error}"))?;
+        if !metadata.is_file() {
+            return Err(format!("Chat attachment `{raw}` must be a file."));
+        }
+        resolved
+            .resolved_paths
+            .push((format!("chat_attachment[{index}]"), path));
+    }
+    Ok(())
+}
+
+fn resolve_input_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, ActionError> {
+    #[cfg(not(test))]
+    {
+        let _ = project_root;
+        return crate::session::peek_authorize(raw, crate::project_path::PathIntent::Read)
+            .map_err(ActionError::Validate);
+    }
+    #[cfg(test)]
+    {
+        crate::project_path::resolve(raw, project_root, crate::project_path::PathIntent::Read)
+            .map(|path| path.into_path_buf())
+            .map_err(|error| ActionError::Validate(error.to_string()))
+    }
+}
+
+fn resolve_action_path(
+    label: &str,
+    raw: &str,
+    project_root: Option<&str>,
+) -> Result<PathBuf, ActionError> {
+    if is_output_label(label) {
+        resolve_under_project(raw, project_root)
+    } else {
+        resolve_input_path(raw, project_root)
+    }
+}
+
 fn collect_path_keys(inputs: &Map<String, Value>) -> Vec<(String, String)> {
     const KEYS: &[&str] = &[
         "handoff_path",
@@ -361,7 +407,7 @@ fn require_existing_files(
     for key in keys {
         match inputs.get(*key) {
             Some(Value::String(raw)) if !raw.trim().is_empty() => {
-                let path = resolve_under_project(raw, project_root)?;
+                let path = resolve_input_path(raw, project_root)?;
                 if !path.is_file() {
                     return Err(ActionError::Validate(format!(
                         "`{key}` must be an existing file (got `{}`). For a new still, omit source_frame/source_image and pass prompt/brief only.",
@@ -375,7 +421,7 @@ fn require_existing_files(
                         if raw.trim().is_empty() {
                             continue;
                         }
-                        let path = resolve_under_project(raw, project_root)?;
+                        let path = resolve_input_path(raw, project_root)?;
                         if !path.is_file() {
                             return Err(ActionError::Validate(format!(
                                 "`{key}[{i}]` must be an existing file (got `{}`)",
@@ -396,7 +442,7 @@ fn require_existing_files(
                         if raw.trim().is_empty() {
                             continue;
                         }
-                        let path = resolve_under_project(raw, project_root)?;
+                        let path = resolve_input_path(raw, project_root)?;
                         if !path.is_file() {
                             return Err(ActionError::Validate(format!(
                                 "`{key}[{i}]` must be an existing file (got `{}`)",
@@ -407,7 +453,7 @@ fn require_existing_files(
                 }
             }
             Some(Value::String(raw)) if !raw.trim().is_empty() => {
-                let path = resolve_under_project(raw, project_root)?;
+                let path = resolve_input_path(raw, project_root)?;
                 if !path.is_file() {
                     return Err(ActionError::Validate(format!(
                         "`{key}` must be an existing file (got `{}`)",
@@ -482,7 +528,7 @@ fn validate_still_batch(
             },
         )?;
         for (label, raw) in collect_path_keys(&files) {
-            let resolved = resolve_under_project(&raw, project_root)?;
+            let resolved = resolve_input_path(&raw, project_root)?;
             resolved_paths.push((format!("batch[{index}].{label}"), resolved));
         }
     }
@@ -529,7 +575,7 @@ pub fn validate_action(
                 .as_deref()
                 .or_else(|| action.inputs.get("path").and_then(|v| v.as_str()))
                 .ok_or_else(|| ActionError::Validate("inspect requires path".into()))?;
-            let resolved = resolve_under_project(path, project_root)?;
+            let resolved = resolve_input_path(path, project_root)?;
             // Reject writes / escapes already handled. For list/read, path should be under root.
             resolved_paths.push(("path".into(), resolved));
             let mut action = action;
@@ -576,7 +622,7 @@ edit: existing source_frame + edit_brief). The host picks the slot model and out
             }
             crate::output_paths::ensure_output_paths(specialist, &mut action.inputs, project_root);
             for (label, raw) in collect_path_keys(&action.inputs) {
-                let resolved = resolve_under_project(&raw, project_root)?;
+                let resolved = resolve_action_path(&label, &raw, project_root)?;
                 resolved_paths.push((label, resolved));
             }
             // Specialist-specific required fields. Output paths are host-derived
@@ -970,9 +1016,26 @@ fn allowed_input_keys(specialist: &str) -> HashSet<&'static str> {
 }
 
 pub fn encode_pending_action(action: &DirectorAction) -> String {
+    encode_pending_action_with_context(action, None)
+}
+
+pub fn encode_pending_action_with_context(
+    action: &DirectorAction,
+    context: Option<serde_json::Value>,
+) -> String {
+    encode_pending_action_with_snapshot(action, context, None)
+}
+
+fn encode_pending_action_with_snapshot(
+    action: &DirectorAction,
+    context: Option<serde_json::Value>,
+    input_fingerprints: Option<serde_json::Value>,
+) -> String {
     let body = serde_json::json!({
         "nonce": crate::pending::pending_nonce(),
         "action": action,
+        "context": context,
+        "inputFingerprints": input_fingerprints,
     });
     format!("{PENDING_ACTION_START}\n{body}\n{PENDING_ACTION_END}")
 }
@@ -1003,18 +1066,103 @@ pub fn find_pending_action_in_history(messages: &[(String, String)]) -> Option<D
 }
 
 pub fn format_approval_request(action: &DirectorAction, resolved: &ValidatedAction) -> String {
+    format_approval_request_inner(action, resolved, None, None, None, None, false)
+}
+
+pub fn format_approval_request_with_route(
+    action: &DirectorAction,
+    resolved: &ValidatedAction,
+    provider: &str,
+    model: &str,
+    cost: &str,
+) -> String {
+    format_approval_request_inner(
+        action,
+        resolved,
+        None,
+        Some(provider),
+        Some(model),
+        Some(cost),
+        false,
+    )
+}
+
+pub fn format_approval_request_with_host_settings(
+    app: &crate::ctx::HostCtx,
+    action: &DirectorAction,
+    resolved: &ValidatedAction,
+    project_root: Option<&str>,
+) -> String {
+    let (provider, model, cost) =
+        match crate::director::approval_route_details_for_app(app, action, project_root) {
+            Ok(details) => details,
+            Err(error) => {
+                return format!(
+                    "## Approval unavailable\n\nCould not resolve the host route: {error}"
+                )
+            }
+        };
+    format_approval_request_with_route(action, resolved, &provider, &model, &cost)
+}
+
+pub fn format_approval_request_with_context(
+    action: &DirectorAction,
+    resolved: &ValidatedAction,
+    context: &crate::director::DirectorContext,
+    provider: &str,
+    model: &str,
+    cost: &str,
+) -> String {
+    let mut resolved = resolved.clone();
+    if let Err(error) = append_context_attachments(
+        &mut resolved,
+        &context.attached_paths,
+        context.project_root.as_deref(),
+    ) {
+        return format!("## Approval unavailable\n\n{error}");
+    }
+    let context = serde_json::to_value(context).ok();
+    format_approval_request_inner(
+        action,
+        &resolved,
+        context,
+        Some(provider),
+        Some(model),
+        Some(cost),
+        true,
+    )
+}
+
+fn format_approval_request_inner(
+    action: &DirectorAction,
+    resolved: &ValidatedAction,
+    context: Option<Value>,
+    provider_override: Option<&str>,
+    model_override: Option<&str>,
+    cost_override: Option<&str>,
+    park_pending: bool,
+) -> String {
+    if serde_json::to_value(action).ok() != serde_json::to_value(&resolved.action).ok() {
+        return "## Approval unavailable\n\nThe displayed action does not match the validated action. Request a new plan.".into();
+    }
     let specialist = action.specialist.as_deref().unwrap_or("(none)");
-    let provider = input_display(
-        &action.inputs,
-        &["provider", "api", "api_kind"],
-        "Settings capability default",
-    );
-    let model = input_display(
-        &action.inputs,
-        &["model", "model_id", "modelId"],
-        "Settings capability default",
-    );
-    let cost = input_display(&action.inputs, &["cost", "cost_estimate"], "unknown");
+    let provider = provider_override.map(str::to_string).unwrap_or_else(|| {
+        input_display(
+            &action.inputs,
+            &["provider", "api", "api_kind"],
+            "unresolved",
+        )
+    });
+    let model = model_override.map(str::to_string).unwrap_or_else(|| {
+        input_display(
+            &action.inputs,
+            &["model", "model_id", "modelId"],
+            "unresolved",
+        )
+    });
+    let cost = cost_override
+        .map(str::to_string)
+        .unwrap_or_else(|| input_display(&action.inputs, &["cost", "cost_estimate"], "unknown"));
     let output = resolved
         .resolved_paths
         .iter()
@@ -1055,8 +1203,23 @@ pub fn format_approval_request(action: &DirectorAction, resolved: &ValidatedActi
     } else {
         lines.extend(writes);
     }
+    if !park_pending {
+        return lines.join("\n");
+    }
+    let input_fingerprints = match snapshot_input_files(resolved) {
+        Ok(fingerprints) => fingerprints,
+        Err(error) => {
+            return format!(
+                "## Approval unavailable\n\nCould not bind this approval to its exact input files: {error}"
+            );
+        }
+    };
     lines.push(String::new());
-    lines.push(encode_pending_action(action));
+    lines.push(encode_pending_action_with_snapshot(
+        action,
+        context,
+        Some(input_fingerprints),
+    ));
     crate::pending::publish_user_text(&lines.join("\n"))
 }
 
@@ -1067,6 +1230,60 @@ fn is_output_label(label: &str) -> bool {
         tail,
         "output_path" | "save_path" | "output_video" | "output_audio" | "output" | "work_dir"
     )
+}
+
+const MAX_APPROVAL_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Bind approval to the exact bytes of every validated input file. Output paths
+/// are excluded because they do not exist yet and are explicitly displayed.
+pub(crate) fn snapshot_input_files(resolved: &ValidatedAction) -> Result<Value, String> {
+    use sha2::Digest;
+    let mut total_bytes = 0u64;
+    let mut fingerprints = Map::new();
+    for (label, path) in &resolved.resolved_paths {
+        if is_output_label(label) {
+            continue;
+        }
+        let metadata = std::fs::metadata(path)
+            .map_err(|error| format!("Could not snapshot approved input `{label}`: {error}"))?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "Approved input `{label}` must be a file, not a directory."
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(metadata.len())
+            .ok_or_else(|| "Approved input size overflowed.".to_string())?;
+        if total_bytes > MAX_APPROVAL_INPUT_BYTES {
+            return Err("Approved inputs exceed the 2 GiB approval-snapshot limit.".into());
+        }
+        let mut file = std::fs::File::open(path)
+            .map_err(|error| format!("Could not read approved input `{label}`: {error}"))?;
+        let mut digest = sha2::Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = std::io::Read::read(&mut file, &mut buffer)
+                .map_err(|error| format!("Could not hash approved input `{label}`: {error}"))?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        let sha256 = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        fingerprints.insert(
+            label.clone(),
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "size": metadata.len(),
+                "sha256": sha256,
+            }),
+        );
+    }
+    Ok(Value::Object(fingerprints))
 }
 
 fn input_display(inputs: &Map<String, Value>, keys: &[&str], fallback: &str) -> String {
@@ -1340,6 +1557,128 @@ mod pending_action_tests {
     }
 
     #[test]
+    fn context_attachments_are_disclosed_and_bound_as_approval_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let attachment = root.join("handoff.md");
+        std::fs::write(&attachment, "scene handoff").unwrap();
+        let action = DirectorAction {
+            action: ActionKind::RunSpecialist,
+            specialist: Some("scene_generation".into()),
+            inputs: Map::new(),
+            message: None,
+            op: None,
+            path: None,
+        };
+        let mut resolved = ValidatedAction {
+            action,
+            resolved_paths: Vec::new(),
+        };
+        append_context_attachments(
+            &mut resolved,
+            &["handoff.md".into()],
+            Some(root.to_str().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(resolved.resolved_paths[0].0, "chat_attachment[0]");
+        assert_eq!(
+            resolved.resolved_paths[0].1,
+            attachment.canonicalize().unwrap()
+        );
+        let snapshot = snapshot_input_files(&resolved).unwrap();
+        assert!(snapshot.get("chat_attachment[0]").is_some());
+    }
+
+    #[test]
+    fn approval_input_snapshot_changes_when_source_bytes_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("source.bin");
+        let output = dir.path().join("output.bin");
+        std::fs::write(&input, b"first source").unwrap();
+        let action = DirectorAction {
+            action: ActionKind::RunSpecialist,
+            specialist: Some("still_image".into()),
+            inputs: Map::new(),
+            message: None,
+            op: None,
+            path: None,
+        };
+        let resolved = ValidatedAction {
+            action,
+            resolved_paths: vec![
+                ("source_image".into(), input.clone()),
+                ("output_path".into(), output),
+            ],
+        };
+        let before = snapshot_input_files(&resolved).unwrap();
+        std::fs::write(&input, b"changed source").unwrap();
+        let after = snapshot_input_files(&resolved).unwrap();
+        assert_ne!(before, after);
+        assert!(before.get("output_path").is_none());
+    }
+
+    #[test]
+    fn route_aware_workflow_approval_discloses_provider_model_and_cost_without_parking() {
+        let action = DirectorAction {
+            action: ActionKind::RunSpecialist,
+            specialist: Some("still_image".into()),
+            inputs: Map::new(),
+            message: None,
+            op: None,
+            path: None,
+        };
+        let resolved = ValidatedAction {
+            action: action.clone(),
+            resolved_paths: Vec::new(),
+        };
+        let card = format_approval_request_with_route(
+            &action,
+            &resolved,
+            "Example provider",
+            "image-model-v2",
+            "Unknown; provider pricing applies",
+        );
+        assert!(card.contains("Provider: Example provider"));
+        assert!(card.contains("Model: image-model-v2"));
+        assert!(card.contains("Cost estimate: Unknown; provider pricing applies"));
+        assert!(!card.contains(crate::pending::APPROVE_TOKEN_PREFIX));
+    }
+
+    #[test]
+    fn mismatched_validated_action_cannot_be_presented_for_approval() {
+        let action = DirectorAction {
+            action: ActionKind::RunSpecialist,
+            specialist: Some("still_image".into()),
+            inputs: serde_json::json!({ "prompt": "what the user saw" })
+                .as_object()
+                .unwrap()
+                .clone(),
+            message: None,
+            op: None,
+            path: None,
+        };
+        let validated = ValidatedAction {
+            action: DirectorAction {
+                inputs: serde_json::json!({ "prompt": "different operation" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ..action.clone()
+            },
+            resolved_paths: Vec::new(),
+        };
+        let card = format_approval_request_with_route(
+            &action,
+            &validated,
+            "Example Provider",
+            "image-model",
+            "Unknown",
+        );
+        assert!(card.contains("does not match the validated action"));
+        assert!(!card.contains(crate::pending::APPROVE_TOKEN_PREFIX));
+    }
+
+    #[test]
     fn approval_card_lists_host_resolved_files_separately_from_model_prose() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1364,6 +1703,7 @@ mod pending_action_tests {
         };
         let validated = validate_action(action, Some(root.to_str().unwrap())).unwrap();
         let card = format_approval_request(&validated.action, &validated);
+        assert!(!card.contains(crate::pending::APPROVE_TOKEN_PREFIX));
         let reads = card.split("### Artifacts modified").next().unwrap();
         assert!(reads.contains("Refs/in.png"), "{card}");
         assert!(!card.contains("/etc/passwd"), "{card}");

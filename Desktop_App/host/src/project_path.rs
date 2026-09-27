@@ -48,9 +48,7 @@ pub fn resolve(
     intent: PathIntent,
 ) -> Result<ProjectPath, PathError> {
     let Some(root) = project_root.map(str::trim).filter(|root| !root.is_empty()) else {
-        return Err(PathError(
-            "open a project before using a file path".into(),
-        ));
+        return Err(PathError("open a project before using a file path".into()));
     };
     let absolute = confine(raw, Path::new(root), intent)?;
     Ok(ProjectPath { absolute })
@@ -190,8 +188,25 @@ pub fn move_to_trash(root: &Path, file: &Path) -> Result<PathBuf, String> {
     if file_canon != root_canon && !file_canon.starts_with(&root_canon) {
         return Err("refusing to trash a file outside the project".into());
     }
-    let trash = root_canon.join(".workbench-trash");
+    let root_string = root_canon.to_string_lossy();
+    let trash = resolve(
+        ".workbench-trash",
+        Some(root_string.as_ref()),
+        PathIntent::Write,
+    )
+    .map_err(|error| error.to_string())?
+    .into_path_buf();
     fs::create_dir_all(&trash).map_err(|error| format!("could not create trash: {error}"))?;
+    let trash = resolve(
+        ".workbench-trash",
+        Some(root_string.as_ref()),
+        PathIntent::Write,
+    )
+    .map_err(|error| error.to_string())?
+    .into_path_buf();
+    if !trash.is_dir() {
+        return Err("project trash path is not a directory".into());
+    }
     let name = file_canon
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -200,7 +215,13 @@ pub fn move_to_trash(root: &Path, file: &Path) -> Result<PathBuf, String> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
-    let dest = trash.join(format!("{millis}-{name}"));
+    let dest = resolve(
+        &trash.join(format!("{millis}-{name}")).to_string_lossy(),
+        Some(root_string.as_ref()),
+        PathIntent::Write,
+    )
+    .map_err(|error| error.to_string())?
+    .into_path_buf();
     if fs::rename(&file_canon, &dest).is_err() {
         fs::copy(&file_canon, &dest)
             .map_err(|error| format!("could not trash `{}`: {error}", file.display()))?;
@@ -215,34 +236,43 @@ pub fn reject_sensitive(path: &Path) -> Result<(), String> {
 }
 
 fn deny_sensitive(path: &Path) -> Result<(), PathError> {
-    let mut names = Vec::new();
-    for component in path.components() {
-        if let Component::Normal(part) = component {
-            names.push(part.to_string_lossy().to_string());
-        }
-    }
-    if names
-        .iter()
-        .any(|part| part == ".ssh" || part == ".gnupg" || part == "video-workbench")
-    {
-        return Err(PathError("refusing a sensitive path".into()));
-    }
-    let Some(name) = names.last() else {
-        return Ok(());
+    let names = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let sensitive_name = |name: &str| {
+        matches!(
+            name,
+            ".ssh"
+                | ".gnupg"
+                | "video-workbench"
+                | "videoworkbench"
+                | "settings.json"
+                | "credentials"
+                | "credential"
+                | "id_rsa"
+                | "id_ed25519"
+                | "id_ecdsa"
+                | "id_dsa"
+                | "private_key"
+                | "privatekey"
+                | "auth.json"
+                | "secrets.json"
+                | "token"
+                | "token.json"
+        ) || name == ".env"
+            || name.starts_with(".env.")
+            || name.starts_with("credentials.")
+            || name.starts_with("credential.")
+            || name.ends_with(".pem")
+            || name.ends_with(".key")
+            || name.ends_with(".p12")
+            || name.ends_with(".pfx")
     };
-    let lower = name.to_ascii_lowercase();
-    if lower == ".env"
-        || lower.starts_with(".env.")
-        || lower == "credentials"
-        || lower == "credentials.json"
-        || lower == "id_rsa"
-        || lower == "id_ed25519"
-        || lower == "id_ecdsa"
-        || lower == "id_dsa"
-        || lower.ends_with(".pem")
-        || lower.ends_with(".key")
-        || lower == "settings.json"
-    {
+    if names.iter().any(|name| sensitive_name(name)) {
         return Err(PathError("refusing a sensitive path".into()));
     }
     Ok(())
@@ -281,7 +311,9 @@ fn deepest_existing_ancestor(path: &Path) -> Result<(PathBuf, Vec<std::ffi::OsSt
                 return Ok((current, tail));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let name = current.file_name().ok_or_else(|| escaped(path, Path::new("")))?;
+                let name = current
+                    .file_name()
+                    .ok_or_else(|| escaped(path, Path::new("")))?;
                 tail.push(name.to_os_string());
                 let Some(parent) = current.parent() else {
                     return Err(PathError("path escapes the project root".into()));
@@ -375,12 +407,7 @@ mod tests {
         let evil = dir.path().join("proj-evil").join("sub").join("x.txt");
         fs::create_dir_all(evil.parent().unwrap()).unwrap();
         assert!(
-            resolve(
-                evil.to_str().unwrap(),
-                Some(&root_s),
-                PathIntent::Write
-            )
-            .is_err(),
+            resolve(evil.to_str().unwrap(), Some(&root_s), PathIntent::Write).is_err(),
             "sibling prefix"
         );
         assert!(resolve("/etc/passwd", Some(&root_s), PathIntent::Read).is_err());
@@ -441,8 +468,12 @@ mod tests {
         let root_s = root_str(&root);
         let path = resolve("Scripts/draft.md", Some(&root_s), PathIntent::Write).unwrap();
         assert_eq!(path.as_path(), root.join("Scripts/draft.md"));
-        let folded = resolve("Scripts/../Scripts/draft.md", Some(&root_s), PathIntent::Write)
-            .unwrap();
+        let folded = resolve(
+            "Scripts/../Scripts/draft.md",
+            Some(&root_s),
+            PathIntent::Write,
+        )
+        .unwrap();
         assert_eq!(folded.as_path(), root.join("Scripts/draft.md"));
     }
 
@@ -466,5 +497,41 @@ mod tests {
         )
         .unwrap();
         assert!(under_scene_bucket(&root, sneaky.as_path(), "references").is_err());
+    }
+
+    #[test]
+    fn sensitive_names_are_denied_in_any_path_component() {
+        let (_dir, root) = root();
+        let root_s = root_str(&root);
+        for raw in [
+            "notes/.env/child.txt",
+            "notes/credentials.yaml",
+            "keys/server.key/child.txt",
+            "notes/secrets.json/child.txt",
+        ] {
+            assert!(
+                resolve(raw, Some(&root_s), PathIntent::Read).is_err(),
+                "accepted sensitive path {raw}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_to_trash_rejects_an_escaping_trash_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let source = root.join("take.png");
+        fs::write(&source, b"image").unwrap();
+        symlink(&outside, root.join(".workbench-trash")).unwrap();
+
+        assert!(move_to_trash(&root, &source).is_err());
+        assert!(source.is_file());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
     }
 }

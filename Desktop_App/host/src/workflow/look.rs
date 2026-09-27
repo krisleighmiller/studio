@@ -21,6 +21,20 @@ const MAX_LOOK_IDENTITY_REFS: usize = 6;
 const LOOK_IDENTITY_INSTRUCTION: &str = "Use the attached character model-sheet images for identity and body proportions. Do not copy their model-sheet clothing when an approved scene wardrobe reference is attached. This is a scene look still, not a model-sheet closeup.";
 const LOOK_WARDROBE_INSTRUCTION: &str = "Match the named characters' clothing to the attached approved scene wardrobe reference. Keep its garment design, colors, layers, and condition consistent.";
 
+fn approval_details(
+    app: Option<&crate::ctx::HostCtx>,
+    action: &DirectorAction,
+    validated: &crate::director_actions::ValidatedAction,
+    root: &str,
+) -> Result<String, String> {
+    match app {
+        Some(app) => {
+            crate::director::format_approval_request_for_app(app, action, validated, Some(root))
+        }
+        None => Ok(format_approval_request(action, validated)),
+    }
+}
+
 pub const CORE_LOOK_ROLES: [AssetRole; 5] = [
     AssetRole::InteriorReference,
     AssetRole::ExteriorReference,
@@ -864,6 +878,26 @@ pub fn prepare_generate(
     scene_id: u32,
     slot_id: &str,
 ) -> Result<(String, String), String> {
+    prepare_generate_inner(root, state, scene_id, slot_id, None)
+}
+
+pub fn prepare_generate_with_host(
+    app: &crate::ctx::HostCtx,
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    slot_id: &str,
+) -> Result<(String, String), String> {
+    prepare_generate_inner(root, state, scene_id, slot_id, Some(app))
+}
+
+fn prepare_generate_inner(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    slot_id: &str,
+    approval_app: Option<&crate::ctx::HostCtx>,
+) -> Result<(String, String), String> {
     let aspect = state.settings.aspect_ratio.clone();
     let (prompt, title, role_label, role) = {
         let scene = state
@@ -981,7 +1015,12 @@ pub fn prepare_generate(
         card.push_str(&format!("\nNo model-sheet file found for {name}."));
     }
     card.push_str("\n\n");
-    card.push_str(&format_approval_request(&action, &validated));
+    card.push_str(&approval_details(
+        approval_app,
+        &action,
+        &validated,
+        &root_s,
+    )?);
     let job_id = state.next_job_id();
     let mut input_asset_ids: Vec<String> = identity_refs
         .iter()
@@ -998,10 +1037,12 @@ pub fn prepare_generate(
         raw_provider_id: Some(slot_id.to_string()),
         ..JobRecord::open(job_id, "scene_look")
     });
-    Ok((
-        card,
-        format!("Look generate ready for `{slot_id}`. Approve the still_image plan in chat."),
-    ))
+    let note = if approval_app.is_some() {
+        format!("Look generate ready for `{slot_id}`. Use the one-time approval button; chat text cannot approve it.")
+    } else {
+        format!("Look generate plan prepared for `{slot_id}`; no provider operation is authorized here.")
+    };
+    Ok((card, note))
 }
 
 const WARDROBE_PLATE_SHOTS: &[(&str, &str)] = &[
@@ -1031,6 +1072,24 @@ pub fn prepare_wardrobe_plate(
     root: &Path,
     state: &mut ProjectState,
     scene_id: u32,
+) -> Result<(String, String), String> {
+    prepare_wardrobe_plate_inner(root, state, scene_id, None)
+}
+
+pub fn prepare_wardrobe_plate_with_host(
+    app: &crate::ctx::HostCtx,
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+) -> Result<(String, String), String> {
+    prepare_wardrobe_plate_inner(root, state, scene_id, Some(app))
+}
+
+fn prepare_wardrobe_plate_inner(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    approval_app: Option<&crate::ctx::HostCtx>,
 ) -> Result<(String, String), String> {
     let wardrobe = approved_wardrobe(root, state, scene_id)?;
     let characters = wardrobe_plate_characters(state, scene_id);
@@ -1062,7 +1121,7 @@ pub fn prepare_wardrobe_plate(
                 missing_sheets.push(format!("{} ({shot}): {}", character.name, identity.path));
                 continue;
             }
-            let rel = next_plate_rel(root, scene_id, &character.id, shot);
+            let rel = next_plate_rel(root, scene_id, &character.id, shot)?;
             let prompt = format!(
                 "Wardrobe plate of {}. {framing} Plain seamless neutral background. One person only. No scenery, no props, no text.\n\
 Keep the same person as the identity image: face, age, hair, and body proportions.\n\
@@ -1096,7 +1155,14 @@ Dress them only in the clothes from the wardrobe reference: the same garments, c
             "Wardrobe plates already exist for {names}. Delete one to rebuild it."
         ));
     }
-    let plate_dir = root.join(format!("Preproduction/Scene{scene_id}/wardrobe_plates"));
+    let root_string = root.to_string_lossy();
+    let plate_dir = crate::project_path::resolve(
+        &format!("Preproduction/Scene{scene_id}/wardrobe_plates"),
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Write,
+    )
+    .map_err(|error| error.to_string())?
+    .into_path_buf();
     fs::create_dir_all(&plate_dir)
         .map_err(|error| format!("could not create wardrobe plate folder: {error}"))?;
     let batch: Vec<Value> = plans
@@ -1138,7 +1204,12 @@ Dress them only in the clothes from the wardrobe reference: the same garments, c
     }
     lines.push(format!("Wardrobe lock: `{}`", wardrobe.path));
     lines.push(String::new());
-    lines.push(format_approval_request(&action, &validated));
+    lines.push(approval_details(
+        approval_app,
+        &action,
+        &validated,
+        &root_s,
+    )?);
     let wardrobe_id = wardrobe.asset_id.clone();
     for plan in &plans {
         let job_id = state.next_job_id();
@@ -1155,10 +1226,14 @@ Dress them only in the clothes from the wardrobe reference: the same garments, c
         .map(|plan| format!("{} {}", plan.character_name, plan.shot.replace('_', " ")))
         .collect::<Vec<_>>()
         .join(", ");
-    Ok((
-        lines.join("\n"),
-        format!("{count} wardrobe plates ready ({names}). Approve the still_image plan in chat."),
-    ))
+    let note = if approval_app.is_some() {
+        format!("{count} wardrobe plates ready ({names}). Use the one-time approval button; chat text cannot approve it.")
+    } else {
+        format!(
+            "{count} wardrobe plates prepared ({names}); no provider operation is authorized here."
+        )
+    };
+    Ok((lines.join("\n"), note))
 }
 
 fn approved_wardrobe(
@@ -1194,7 +1269,13 @@ fn wardrobe_plate_characters(state: &ProjectState, scene_id: u32) -> Vec<&Charac
     )
 }
 
-fn next_plate_rel(root: &Path, scene_id: u32, character_id: &str, shot: &str) -> String {
+fn next_plate_rel(
+    root: &Path,
+    scene_id: u32,
+    character_id: &str,
+    shot: &str,
+) -> Result<String, String> {
+    let root_string = root.to_string_lossy();
     let mut index = 1u32;
     loop {
         let name = if index == 1 {
@@ -1203,8 +1284,14 @@ fn next_plate_rel(root: &Path, scene_id: u32, character_id: &str, shot: &str) ->
             format!("{character_id}_{shot}_{index:02}.png")
         };
         let rel = format!("Preproduction/Scene{scene_id}/wardrobe_plates/{name}");
-        if !root.join(&rel).exists() {
-            return rel;
+        let path = crate::project_path::resolve(
+            &rel,
+            Some(root_string.as_ref()),
+            crate::project_path::PathIntent::Write,
+        )
+        .map_err(|error| error.to_string())?;
+        if !path.as_path().exists() {
+            return Ok(rel);
         }
         index += 1;
     }
@@ -1213,12 +1300,18 @@ fn next_plate_rel(root: &Path, scene_id: u32, character_id: &str, shot: &str) ->
 pub fn on_wardrobe_plate_saved(project_root: Option<&str>, save_path: &str) -> Option<String> {
     let root = project_root.filter(|value| !value.trim().is_empty())?;
     let root_path = Path::new(root);
-    if !root_path.join(crate::workflow::state::STATE_REL).is_file() {
+    if !crate::project_path::resolve(
+        crate::workflow::state::STATE_REL,
+        Some(root),
+        crate::project_path::PathIntent::Read,
+    )
+    .is_ok_and(|path| path.as_path().is_file())
+    {
         return None;
     }
     let mut state = import::load_state(root_path).ok()?;
     let actual = actual_look_path(root_path, save_path)?;
-    let rel = relativize(root_path, &actual.to_string_lossy());
+    let rel = relativize(root_path, &actual.to_string_lossy())?;
     if !is_wardrobe_plate_rel(&rel) {
         return None;
     }
@@ -1282,8 +1375,8 @@ pub fn delete_wardrobe_plate(
         .cloned()
         .ok_or_else(|| format!("wardrobe plate `{asset_id}` not found"))?;
     let root_s = root.to_string_lossy().to_string();
-    let path = resolve_under_project(&asset.path, Some(&root_s))
-        .map_err(|error| error.to_string())?;
+    let path =
+        resolve_under_project(&asset.path, Some(&root_s)).map_err(|error| error.to_string())?;
     crate::project_path::under_scene_bucket(root, &path, "wardrobe_plates")?;
     if path.is_file() {
         crate::project_path::move_to_trash(root, &path)?;
@@ -1297,19 +1390,32 @@ pub fn delete_wardrobe_plate(
 
 fn is_wardrobe_plate_rel(rel: &str) -> bool {
     let normalized = rel.replace('\\', "/");
-    normalized.contains("Preproduction/Scene") && normalized.contains("/wardrobe_plates/")
+    let parts: Vec<_> = normalized.split('/').collect();
+    parts.len() == 4
+        && parts[0] == "Preproduction"
+        && parts[1].strip_prefix("Scene").is_some_and(|number| {
+            !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
+        })
+        && parts[2] == "wardrobe_plates"
+        && is_image_path(Path::new(parts[3]))
 }
 
 /// After still_image writes a file under Preproduction/SceneN/references/, register it.
 pub fn on_still_saved(project_root: Option<&str>, save_path: &str) -> Option<String> {
     let root = project_root.filter(|s| !s.trim().is_empty())?;
     let root_path = Path::new(root);
-    if !root_path.join(crate::workflow::state::STATE_REL).is_file() {
+    if !crate::project_path::resolve(
+        crate::workflow::state::STATE_REL,
+        Some(root),
+        crate::project_path::PathIntent::Read,
+    )
+    .is_ok_and(|path| path.as_path().is_file())
+    {
         return None;
     }
     let mut state = import::load_state(root_path).ok()?;
     let actual_path = actual_look_path(root_path, save_path)?;
-    let rel = relativize(root_path, &actual_path.to_string_lossy());
+    let rel = relativize(root_path, &actual_path.to_string_lossy())?;
     if !is_look_rel(&rel) {
         return None;
     }
@@ -1397,12 +1503,14 @@ fn complete_matching_job(state: &mut ProjectState, rel: &str) {
 }
 
 fn actual_look_path(root: &Path, requested: &str) -> Option<PathBuf> {
-    let requested = PathBuf::from(requested);
-    let requested = if requested.is_absolute() {
-        requested
-    } else {
-        root.join(requested)
-    };
+    let root_string = root.to_string_lossy();
+    let requested = crate::project_path::resolve(
+        requested,
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Read,
+    )
+    .ok()?
+    .into_path_buf();
     if requested.is_file() {
         return Some(requested);
     }
@@ -1412,12 +1520,31 @@ fn actual_look_path(root: &Path, requested: &str) -> Option<PathBuf> {
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.is_file() && path.file_stem() == Some(stem) && is_image_path(path))
+        .find_map(|path| {
+            if path.file_stem() != Some(stem) || !is_image_path(&path) {
+                return None;
+            }
+            let confined = crate::project_path::resolve(
+                &path.to_string_lossy(),
+                Some(root_string.as_ref()),
+                crate::project_path::PathIntent::Read,
+            )
+            .ok()?
+            .into_path_buf();
+            confined.is_file().then_some(confined)
+        })
 }
 
 pub fn is_look_rel(rel: &str) -> bool {
     let n = rel.replace('\\', "/");
-    n.contains("/references/") && n.contains("Preproduction/Scene")
+    let parts: Vec<_> = n.split('/').collect();
+    parts.len() == 4
+        && parts[0] == "Preproduction"
+        && parts[1].strip_prefix("Scene").is_some_and(|number| {
+            !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
+        })
+        && parts[2] == "references"
+        && is_image_path(Path::new(parts[3]))
 }
 
 fn scene_id_from_look_rel(rel: &str) -> Option<u32> {
@@ -1433,12 +1560,17 @@ fn role_from_look_rel(rel: &str) -> Option<AssetRole> {
     AssetRole::parse_look(stem)
 }
 
-fn relativize(root: &Path, path: &str) -> String {
-    let p = PathBuf::from(path);
-    if let Ok(stripped) = p.strip_prefix(root) {
-        return stripped.to_string_lossy().replace('\\', "/");
-    }
-    path.replace('\\', "/")
+fn relativize(root: &Path, path: &str) -> Option<String> {
+    let root_string = root.to_string_lossy();
+    let confined = crate::project_path::resolve(
+        path,
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Read,
+    )
+    .ok()?;
+    crate::project_path::relative_to_root(root, confined.as_path())
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
 }
 
 fn resolve_source(root: &Path, source: &str) -> Result<PathBuf, String> {
@@ -1944,6 +2076,7 @@ mod tests {
 
     #[test]
     fn prepare_generate_attaches_sheets_not_as_source_or_output() {
+        let _session_guard = crate::session::test_session_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let mut state = tom_pip_state();
@@ -1977,6 +2110,7 @@ mod tests {
 
     #[test]
     fn approved_wardrobe_is_attached_after_model_sheets() {
+        let _session_guard = crate::session::test_session_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let mut state = tom_pip_state();
@@ -2070,6 +2204,7 @@ mod tests {
 
     #[test]
     fn prepare_wardrobe_plate_uses_identity_and_approved_wardrobe() {
+        let _session_guard = crate::session::test_session_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let mut state = tom_pip_state();
@@ -2281,5 +2416,46 @@ mod tests {
             Some("Tom Vale and Pip Vale in the carriage")
         );
         assert!(slot.asset_ids.is_empty());
+    }
+
+    #[test]
+    fn saved_look_paths_must_be_confined_and_use_the_exact_project_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let outside = dir
+            .path()
+            .join("Preproduction/Scene1/references/interior_1.png");
+        fs::create_dir_all(root.join("Preproduction/Scene1/references")).unwrap();
+        fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        fs::write(&outside, b"outside").unwrap();
+
+        assert!(actual_look_path(&root, outside.to_str().unwrap()).is_none());
+        assert!(!is_look_rel(
+            "../Preproduction/Scene1/references/interior_1.png"
+        ));
+        assert!(!is_look_rel(
+            "elsewhere/Preproduction/Scene1/references/interior_1.png"
+        ));
+        assert!(is_look_rel(
+            "Preproduction/Scene1/references/interior_1.png"
+        ));
+        assert!(!is_wardrobe_plate_rel(
+            "elsewhere/Preproduction/Scene1/wardrobe_plates/plate.png"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wardrobe_plate_destination_rejects_escaping_directory_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(root.join("Preproduction/Scene1")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("Preproduction/Scene1/wardrobe_plates")).unwrap();
+
+        assert!(next_plate_rel(&root, 1, "tom_vale", "closeup_front").is_err());
     }
 }

@@ -314,11 +314,7 @@ pub fn bind_selected_exit_frame(
             predecessor.source_scene, predecessor.cut, take_id
         )),
     });
-    crate::workflow::identity::record_version(
-        state,
-        &asset_id,
-        AssetStatus::Approved,
-    );
+    crate::workflow::identity::record_version(state, &asset_id, AssetStatus::Approved);
     let cut = state
         .scenes
         .iter_mut()
@@ -356,11 +352,7 @@ pub fn bind_selected_exit_frame(
 
 /// Shots whose bound continuity frame comes from this cut. Replacing the
 /// predecessor selection clears those bindings; it does not approve a new frame.
-pub fn continuity_dependents(
-    state: &ProjectState,
-    scene_id: u32,
-    cut_number: u32,
-) -> Vec<String> {
+pub fn continuity_dependents(state: &ProjectState, scene_id: u32, cut_number: u32) -> Vec<String> {
     let cut_id = CutId::new(scene_id, cut_number);
     let stable = state
         .scene(scene_id)
@@ -670,7 +662,8 @@ mod tests {
             notes: None,
         });
 
-        let invalidated = set_take_status(&mut state, 1, 1, "take_b", TakeStatus::Selected).unwrap();
+        let invalidated =
+            set_take_status(&mut state, 1, 1, "take_b", TakeStatus::Selected).unwrap();
         assert_eq!(invalidated, 1);
         let bound = state.scenes[0].cuts[1].visual_source.as_ref().unwrap();
         assert!(bound.asset_id.is_none());

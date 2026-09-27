@@ -63,30 +63,6 @@ pub fn parse_id(prediction_id: &str) -> Option<String> {
         })
 }
 
-fn mime_for_path(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        "mov" => "video/quicktime",
-        "wav" => "audio/wav",
-        "mp3" => "audio/mpeg",
-        "m4a" => "audio/mp4",
-        "aac" => "audio/aac",
-        "ogg" => "audio/ogg",
-        _ => "application/octet-stream",
-    }
-}
-
 fn asset_type_for_mime(mime: &str) -> Result<&'static str, String> {
     if mime.starts_with("video/") {
         Ok("VIDEO")
@@ -134,8 +110,13 @@ fn request_json(
 }
 
 /// Upload a local file via Sync assets; returns a public HTTPS url.
-fn upload_local_file(api: &ApiEntry, path: &Path, app: Option<&HostCtx>) -> Result<String, String> {
-    let (_mime, bytes) = crate::media_util::load_media(path)?;
+fn upload_local_file(
+    api: &ApiEntry,
+    path: &Path,
+    app: Option<&HostCtx>,
+    role: crate::media_util::MediaRole,
+) -> Result<String, String> {
+    let (content_type, bytes) = crate::media_util::load_media_as(path, role)?;
     let size = bytes.len() as u64;
     if size == 0 {
         return Err(format!("File is empty: {}", path.display()));
@@ -145,14 +126,13 @@ fn upload_local_file(api: &ApiEntry, path: &Path, app: Option<&HostCtx>) -> Resu
         .and_then(|n| n.to_str())
         .unwrap_or("upload.bin")
         .to_string();
-    let content_type = mime_for_path(path);
     if content_type == "application/octet-stream" {
         return Err(format!(
             "Unsupported Sync Labs media extension for {}: use mp4/webm/wav/mp3/png/jpg/…",
             path.display()
         ));
     }
-    let asset_type = asset_type_for_mime(content_type)?;
+    let asset_type = asset_type_for_mime(&content_type)?;
 
     emit_progress(
         app,
@@ -164,7 +144,7 @@ fn upload_local_file(api: &ApiEntry, path: &Path, app: Option<&HostCtx>) -> Resu
         api,
         Some(&json!({
             "fileName": file_name,
-            "contentType": content_type,
+            "contentType": content_type.clone(),
             "size": size,
         })),
     )?;
@@ -215,6 +195,7 @@ fn resolve_media_url(
     raw: &str,
     project_root: Option<&str>,
     app: Option<&HostCtx>,
+    role: crate::media_util::MediaRole,
 ) -> Result<String, String> {
     let raw = raw.trim();
     if raw.starts_with("http://") || raw.starts_with("https://") {
@@ -226,7 +207,7 @@ fn resolve_media_url(
         );
     }
     let path = resolve_path(raw, project_root)?;
-    upload_local_file(api, &path, app)
+    upload_local_file(api, &path, app, role)
 }
 
 fn build_input(
@@ -295,8 +276,19 @@ fn build_input(
         "Sync Labs lip sync needs params.audio / audio_path / audio_url.".to_string()
     })?;
 
-    let visual_url = resolve_media_url(api, &visual.1, project_root, app)?;
-    let audio_url = resolve_media_url(api, &audio, project_root, app)?;
+    let visual_role = if visual.0 == "video" {
+        crate::media_util::MediaRole::Video
+    } else {
+        crate::media_util::MediaRole::Image
+    };
+    let visual_url = resolve_media_url(api, &visual.1, project_root, app, visual_role)?;
+    let audio_url = resolve_media_url(
+        api,
+        &audio,
+        project_root,
+        app,
+        crate::media_util::MediaRole::Audio,
+    )?;
     Ok(vec![
         json!({ "type": visual.0, "url": visual_url }),
         json!({ "type": "audio", "url": audio_url }),

@@ -29,7 +29,7 @@ pub use state::{
 
 use crate::ctx::HostCtx;
 use crate::director_actions::{
-    format_approval_request, validate_action, ActionKind, DirectorAction,
+    format_approval_request_with_route, validate_action, ActionKind, DirectorAction,
 };
 use crate::scene_plan::handoff::CutId;
 use crate::scene_plan::strategy::SceneStrategy;
@@ -855,7 +855,7 @@ pub fn cmd_delete_look(args: &Value) -> Result<Value, String> {
     result_with_note(imported, format!("Deleted look still `{path}`."))
 }
 
-pub fn cmd_generate_look(args: &Value) -> Result<Value, String> {
+pub fn cmd_generate_look(app: &HostCtx, args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;
     let slot_id = opt_str(args, "slotId").ok_or_else(|| "Missing slotId".to_string())?;
@@ -874,16 +874,18 @@ pub fn cmd_generate_look(args: &Value) -> Result<Value, String> {
             .ok_or_else(|| format!("scene {scene_id} not found"))?;
         look::patch_slot(scene, &slot_id, role, title, prompt, negative)?;
     }
-    let (card, note) = look::prepare_generate(Path::new(&root), &mut state, scene_id, &slot_id)?;
+    let (card, note) =
+        look::prepare_generate_with_host(app, Path::new(&root), &mut state, scene_id, &slot_id)?;
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_pending(imported, note, card)
 }
 
-pub fn cmd_generate_wardrobe_plate(args: &Value) -> Result<Value, String> {
+pub fn cmd_generate_wardrobe_plate(app: &HostCtx, args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;
     let mut state = import::load_state(Path::new(&root))?;
-    let (card, note) = look::prepare_wardrobe_plate(Path::new(&root), &mut state, scene_id)?;
+    let (card, note) =
+        look::prepare_wardrobe_plate_with_host(app, Path::new(&root), &mut state, scene_id)?;
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_pending(imported, note, card)
 }
@@ -1082,13 +1084,18 @@ pub fn cmd_sync_production_notes(app: &HostCtx, args: &Value) -> Result<Value, S
     )
 }
 
-pub fn cmd_prepare_render(args: &Value) -> Result<Value, String> {
+pub fn cmd_prepare_render(app: &HostCtx, args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;
     let cut_number = arg_u32(args, "cut")?;
     let mut state = import::load_state(Path::new(&root))?;
-    let (card, note) =
-        production::prepare_render(Path::new(&root), &mut state, scene_id, cut_number)?;
+    let (card, note) = production::prepare_render_with_host(
+        app,
+        Path::new(&root),
+        &mut state,
+        scene_id,
+        cut_number,
+    )?;
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_pending(imported, note, card)
 }
@@ -1214,6 +1221,17 @@ pub fn cmd_delete_take(args: &Value) -> Result<Value, String> {
 }
 
 pub fn cmd_prepare_assemble(args: &Value) -> Result<Value, String> {
+    cmd_prepare_assemble_inner(None, args)
+}
+
+pub fn cmd_prepare_assemble_with_host(app: &HostCtx, args: &Value) -> Result<Value, String> {
+    cmd_prepare_assemble_inner(Some(app), args)
+}
+
+fn cmd_prepare_assemble_inner(
+    approval_app: Option<&HostCtx>,
+    args: &Value,
+) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;
     let mut state = import::load_state(Path::new(&root))?;
@@ -1282,7 +1300,19 @@ pub fn cmd_prepare_assemble(args: &Value) -> Result<Value, String> {
         validate_action(action.clone(), Some(&root)).map_err(|error| error.to_string())?;
     let mut card =
         format!("Assemble Scene {scene_id}\nCuts: {cut_count}\nMaster: `{output_path}`\n\n");
-    card.push_str(&format_approval_request(&action, &validated));
+    let approval = match approval_app {
+        Some(app) => {
+            crate::director::format_approval_request_for_app(app, &action, &validated, Some(&root))?
+        }
+        None => format_approval_request_with_route(
+            &action,
+            &validated,
+            "Local (FFmpeg)",
+            "None (host-side media assembly)",
+            "No provider charge; local FFmpeg processing.",
+        ),
+    };
+    card.push_str(&approval);
     crate::workflow::identity::assign(&mut state);
     let scene_stable = state
         .scene(scene_id)
@@ -1317,15 +1347,12 @@ pub fn cmd_add_alternate_shot(args: &Value) -> Result<Value, String> {
     let cut = imported
         .state
         .scene(scene_id)
-        .and_then(|scene| {
-            scene
-                .cuts
-                .iter()
-                .find(|cut| cut.stable_id == stable_id)
-        })
+        .and_then(|scene| scene.cuts.iter().find(|cut| cut.stable_id == stable_id))
         .ok_or_else(|| format!("alternate shot `{stable_id}` was not saved"))?;
     if cut.production_note_path.is_some() || cut.visual_source.is_some() {
-        return Err("alternate shot must stay incomplete until a source and note are chosen".into());
+        return Err(
+            "alternate shot must stay incomplete until a source and note are chosen".into(),
+        );
     }
     if cut.sketch.is_none() {
         return Err("alternate shot is missing an editable sketch".into());
@@ -1441,25 +1468,31 @@ pub fn cmd_check_deliverable(args: &Value) -> Result<Value, String> {
     )
 }
 
-pub fn cmd_generate_start_frame(args: &Value) -> Result<Value, String> {
+pub fn cmd_generate_start_frame(app: &HostCtx, args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;
     let cut_number = arg_u32(args, "cut")?;
     let mut state = import::load_state(Path::new(&root))?;
-    let (card, note) =
-        start_frames::prepare_generate(Path::new(&root), &mut state, scene_id, cut_number)?;
+    let (card, note) = start_frames::prepare_generate_with_host(
+        app,
+        Path::new(&root),
+        &mut state,
+        scene_id,
+        cut_number,
+    )?;
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_pending(imported, note, card)
 }
 
-pub fn cmd_edit_start_frame(args: &Value) -> Result<Value, String> {
+pub fn cmd_edit_start_frame(app: &HostCtx, args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;
     let cut_number = arg_u32(args, "cut")?;
     let asset_id = opt_str(args, "assetId").ok_or_else(|| "Missing assetId".to_string())?;
     let brief = opt_str(args, "brief").ok_or_else(|| "Missing edit brief".to_string())?;
     let mut state = import::load_state(Path::new(&root))?;
-    let (card, note) = start_frames::prepare_edit(
+    let (card, note) = start_frames::prepare_edit_with_host(
+        app,
         Path::new(&root),
         &mut state,
         scene_id,

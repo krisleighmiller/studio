@@ -371,7 +371,8 @@ pub fn elevenlabs_create_designed_voice(
 }
 
 fn allow_preview_url(raw: &str) -> Result<(), String> {
-    let url = reqwest::Url::parse(raw).map_err(|_| "Preview URL is not a valid URL.".to_string())?;
+    let url =
+        reqwest::Url::parse(raw).map_err(|_| "Preview URL is not a valid URL.".to_string())?;
     if url.scheme() != "https" {
         return Err("Preview downloads must use https.".into());
     }
@@ -392,10 +393,9 @@ pub fn elevenlabs_download_preview_url(url: String) -> Result<AudioPayload, Stri
     }
     allow_preview_url(url)?;
     let client = client()?;
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|error| crate::http_util::format_reqwest_error("Preview download failed", error))?;
+    let response = client.get(url).send().map_err(|error| {
+        crate::http_util::format_reqwest_error("Preview download failed", error)
+    })?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().unwrap_or_default();

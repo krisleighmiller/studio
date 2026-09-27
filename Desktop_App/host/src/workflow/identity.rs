@@ -33,13 +33,7 @@ pub fn add_alternate_shot(state: &mut ProjectState, scene_id: u32) -> Result<Str
     };
     let kept: Vec<String> = state
         .scene(scene_id)
-        .map(|scene| {
-            scene
-                .cuts
-                .iter()
-                .map(|cut| cut.stable_id.clone())
-                .collect()
-        })
+        .map(|scene| scene.cuts.iter().map(|cut| cut.stable_id.clone()).collect())
         .unwrap_or_default();
     let scene = state
         .scenes
@@ -732,10 +726,17 @@ mod tests {
         let scene = state.scene(1).unwrap();
         assert_eq!(scene.cuts[0].stable_id, "shot_8");
         assert_eq!(scene.cuts[0].id.cut, 8);
-        let added = scene.cuts.iter().find(|cut| cut.stable_id == stable).unwrap();
+        let added = scene
+            .cuts
+            .iter()
+            .find(|cut| cut.stable_id == stable)
+            .unwrap();
         assert_ne!(added.stable_id, "shot_8");
         assert_eq!(added.id.cut, 9);
-        assert!(added.sketch.as_ref().is_some_and(|sketch| !sketch.is_empty()));
+        assert!(added
+            .sketch
+            .as_ref()
+            .is_some_and(|sketch| !sketch.is_empty()));
         assert!(added.visual_source.is_none());
         assert!(added.production_note_path.is_none());
         assert!(scene

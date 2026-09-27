@@ -412,11 +412,7 @@ pub fn extract_frame_at(
             .arg(format!("{seconds:.3}"));
     } else {
         // Specialist contract: last-frame fallback via -sseof -0.1 (never bare -frames:v 1).
-        command
-            .arg("-sseof")
-            .arg("-0.1")
-            .arg("-i")
-            .arg(&video_arg);
+        command.arg("-sseof").arg("-0.1").arg("-i").arg(&video_arg);
     }
     let status = command
         .args(["-frames:v", "1", "-q:v", "2", &out_arg])

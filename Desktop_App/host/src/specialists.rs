@@ -16,7 +16,7 @@ use crate::scene_plan::{RenderLane, RenderRequest};
 use crate::settings::{self, ApiEntry};
 use crate::text_writes::{
     approval_required, approval_summary, authorize_text_write, commit_staged_text_write,
-    commit_text_write, stage_text_writes, text_write_approval_card,
+    commit_text_write, stage_authorized_text_writes, text_write_approval_card,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -119,6 +119,15 @@ pub(crate) fn capability_model(context: &DirectorContext, slot: &str) -> Option<
         .and_then(|v| v.as_ref())
         .filter(|m| !m.model_id.trim().is_empty())
         .cloned()
+}
+
+fn select_capability<'a>(
+    context: &DirectorContext,
+    slots: &'a [&'static str],
+) -> Option<(ModelRef, &'static str)> {
+    slots
+        .iter()
+        .find_map(|slot| capability_model(context, slot).map(|model| (model, *slot)))
 }
 
 fn run_media_generate(
@@ -339,16 +348,20 @@ fn extract_upload_url(raw: &str) -> Option<String> {
         .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
 }
 
-fn upload_local(app: &HostCtx, project_root: Option<&str>, path: &str) -> Result<String, String> {
+fn upload_local(
+    app: &HostCtx,
+    project_root: Option<&str>,
+    path: &str,
+    role: crate::media_util::MediaRole,
+) -> Result<String, String> {
     let api = settings::find_api_by_kind(app, "atlas-cloud").or_else(|_| {
         settings::list_apis(app)?
             .into_iter()
             .next()
             .ok_or_else(|| "No APIs configured".to_string())
     })?;
-    // Prefer Atlas upload when available; media adapters also accept local paths for some providers.
     if api.kind == "atlas-cloud" && !api.api_key.trim().is_empty() {
-        let result = atlas::upload_media(api.api_key.trim(), path, project_root)?;
+        let result = atlas::upload_media(api.api_key.trim(), path, project_root, role)?;
         return extract_upload_url(&result).ok_or_else(|| {
             format!(
                 "Atlas upload did not return a download_url for `{path}`. Raw: {}",
@@ -356,8 +369,9 @@ fn upload_local(app: &HostCtx, project_root: Option<&str>, path: &str) -> Result
             )
         });
     }
-    // Fall back: return absolute local path; adapters that need URLs will error clearly.
-    let resolved = resolve_under_project(path, project_root).map_err(|e| e.to_string())?;
+    // Leave an outside one-time grant unspent until the selected adapter reads it.
+    let resolved = crate::media_util::peek_path(path, project_root)?;
+    crate::media_util::ensure_media_file_as(&resolved, role)?;
     Ok(resolved.to_string_lossy().to_string())
 }
 
@@ -876,7 +890,7 @@ pub(crate) fn build_text_specialist_dossier(
     let mut missing = Vec::new();
 
     for raw in paths {
-        let resolved = match resolve_under_project(raw, project_root) {
+        let resolved = match crate::media_util::resolve_path(raw, project_root) {
             Ok(p) => p,
             Err(e) => {
                 missing.push(format!("{raw} ({e})"));
@@ -1104,7 +1118,7 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
         };
         if approval_required(&authorized) {
             let summary = approval_summary(&authorized, previous.as_deref(), &body);
-            staged.push((authorized.relative, body, summary));
+            staged.push((authorized, body, summary));
             continue;
         }
         app.emit(
@@ -1116,16 +1130,22 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
         written.push(authorized.path.display().to_string());
     }
     if !staged.is_empty() {
-        let summaries: Vec<String> = staged.iter().map(|(_, _, summary)| summary.clone()).collect();
-        let id = stage_text_writes(
+        let summaries: Vec<String> = staged
+            .iter()
+            .map(|(_, _, summary)| summary.clone())
+            .collect();
+        let id = stage_authorized_text_writes(
             specialist,
             staged
                 .into_iter()
-                .map(|(relative, body, _)| (relative, body))
+                .map(|(write, body, _)| (write, body))
                 .collect(),
         );
-        let card = text_write_approval_card(&id, &summaries)?;
-        let mut message = format!("{label} prepared {} file change(s) for approval.", summaries.len());
+        let card = text_write_approval_card(&id, &summaries, project_root)?;
+        let mut message = format!(
+            "{label} prepared {} file change(s) for approval.",
+            summaries.len()
+        );
         if !written.is_empty() {
             message.push_str("\n\nSaved new files:\n");
             for path in &written {
@@ -1243,7 +1263,7 @@ fn run_production_helper(
     let mut missing: Vec<String> = Vec::new();
 
     for raw in &paths {
-        let resolved = match resolve_under_project(raw, project_root) {
+        let resolved = match crate::media_util::resolve_path(raw, project_root) {
             Ok(p) => p,
             Err(e) => {
                 missing.push(format!("{raw} ({e})"));
@@ -1378,16 +1398,17 @@ fn run_production_helper(
                 };
                 if approval_required(&authorized) {
                     let summary = approval_summary(&authorized, previous.as_deref(), &body);
-                    let id = stage_text_writes(
-                        "production_helper",
-                        vec![(authorized.relative, body)],
-                    );
-                    let card = text_write_approval_card(&id, &[summary])?;
+                    let id =
+                        stage_authorized_text_writes("production_helper", vec![(authorized, body)]);
+                    let card = text_write_approval_card(&id, &[summary], project_root)?;
                     message.push_str("\n\nDigest overwrite is waiting for approval.\n\n");
                     message.push_str(&card);
                 } else {
                     commit_text_write(&authorized, &body, false).map_err(|error| {
-                        format!("Could not write digest to {}: {error}", authorized.path.display())
+                        format!(
+                            "Could not write digest to {}: {error}",
+                            authorized.path.display()
+                        )
                     })?;
                     message.push_str(&format!(
                         "\n\n---\nSaved digest to `{}`.",
@@ -1412,33 +1433,238 @@ fn run_production_helper(
 }
 
 /// Pick the Settings video slot for a freeform (non-handoff) prompt job.
+fn freeform_video_route(
+    context: &DirectorContext,
+    has_explicit_start_frame: bool,
+    has_refs: bool,
+) -> Result<(ModelRef, &'static str), String> {
+    if has_explicit_start_frame {
+        return select_capability(
+            context,
+            &["video.start_frame", "video.character_reference", "video.location_prop_other_reference"],
+        )
+        .ok_or_else(|| {
+            "Set Settings → Video → Start frame (or Adult start frame when using adult/nsfw routing)."
+                .to_string()
+        });
+    }
+    if has_refs {
+        return select_capability(
+            context,
+            &[
+                "video.character_reference",
+                "video.location_prop_other_reference",
+                "video.start_frame",
+            ],
+        )
+        .ok_or_else(|| {
+            "Set Settings → Video → Character reference / Location-prop reference / Start frame."
+                .to_string()
+        });
+    }
+    select_capability(context, &["video.text_only"]).ok_or_else(|| {
+        "Set Settings → Video → Text only (or Adult text only when using adult/nsfw routing)."
+            .to_string()
+    })
+}
+
 fn freeform_video_model(
     context: &DirectorContext,
     has_explicit_start_frame: bool,
     has_refs: bool,
 ) -> Result<ModelRef, String> {
-    if has_explicit_start_frame {
-        return capability_model(context, "video.start_frame")
-            .or_else(|| capability_model(context, "video.character_reference"))
-            .or_else(|| capability_model(context, "video.location_prop_other_reference"))
-            .ok_or_else(|| {
-                "Set Settings → Video → Start frame (or Adult start frame when using adult/nsfw routing)."
-                    .to_string()
-            });
+    freeform_video_route(context, has_explicit_start_frame, has_refs).map(|(model, _)| model)
+}
+
+pub(crate) fn approval_model_routes(
+    action: &DirectorAction,
+    context: &DirectorContext,
+    project_root: Option<&str>,
+) -> Vec<(String, ModelRef)> {
+    let specialist = action.specialist.as_deref().unwrap_or("");
+    let inputs = &action.inputs;
+    match specialist {
+        "still_image" => resolve_still_image_model(context, inputs)
+            .ok()
+            .map(|(model, _, slot)| vec![(slot.to_string(), model)])
+            .unwrap_or_default(),
+        "scene_generation" => {
+            if input_str(inputs, &["collect_prediction_id"]).is_some() {
+                return Vec::new();
+            }
+            if input_str(inputs, &["source_video"]).is_some() {
+                return select_capability(context, &["video.edit"])
+                    .map(|(model, slot)| vec![(slot.to_string(), model)])
+                    .unwrap_or_default();
+            }
+            let has_handoff_input = input_str(inputs, &["handoff", "handoff_path"]).is_some();
+            let has_freeform_job = input_str(inputs, &["prompt", "brief", "edit_brief"]).is_some()
+                && input_str(inputs, &["output_path", "save_path"]).is_some();
+            if !has_handoff_input && has_freeform_job {
+                let has_start =
+                    input_str(inputs, &["source_frame", "source_image", "start_frame"]).is_some();
+                let has_refs =
+                    !input_path_list(inputs, &["reference_images", "reference_assets"]).is_empty();
+                return freeform_video_route(context, has_start, has_refs)
+                    .ok()
+                    .map(|(model, slot)| vec![(slot.to_string(), model)])
+                    .unwrap_or_default();
+            }
+            let handoff = approval_handoff_text(inputs, context, project_root);
+            let Some(handoff) = handoff else {
+                return Vec::new();
+            };
+            let Ok(request) = RenderRequest::from_document(&handoff) else {
+                return Vec::new();
+            };
+            let explicit_start =
+                input_str(inputs, &["source_frame", "source_image", "start_frame"]);
+            let workflow_source = if explicit_start.is_none() {
+                if let Some(root) = project_root.filter(|root| {
+                    Path::new(root)
+                        .join(crate::workflow::state::STATE_REL)
+                        .is_file()
+                }) {
+                    let Ok(state) = crate::workflow::import::load_state(Path::new(root)) else {
+                        return Vec::new();
+                    };
+                    match crate::workflow::sources::resolve_render_source(&state, request.id) {
+                        Ok(source) => Some(source),
+                        Err(_) => return Vec::new(),
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let start_frame =
+                explicit_start
+                    .map(str::to_string)
+                    .or_else(|| match &workflow_source {
+                        Some(crate::workflow::sources::RenderSourceResolution::Bound(path)) => {
+                            Some(path.clone())
+                        }
+                        Some(crate::workflow::sources::RenderSourceResolution::NoStartFrame) => {
+                            None
+                        }
+                        Some(crate::workflow::sources::RenderSourceResolution::Unplanned)
+                        | None => request.start_frame.clone(),
+                    });
+            let lane = if start_frame.is_some()
+                && matches!(
+                    request.lane,
+                    RenderLane::TextToVideo | RenderLane::ReferenceToVideo
+                ) {
+                RenderLane::ImageToVideo
+            } else {
+                request.lane
+            };
+            let route = match lane {
+                RenderLane::AudioDrivenI2v => {
+                    select_capability(context, &["video.lip_sync_text_narration"])
+                }
+                RenderLane::ImageToVideo => select_capability(context, &["video.start_frame"]),
+                RenderLane::ReferenceToVideo => select_capability(
+                    context,
+                    &[
+                        "video.character_reference",
+                        "video.location_prop_other_reference",
+                    ],
+                ),
+                RenderLane::TextToVideo => select_capability(context, &["video.text_only"]),
+            };
+            route
+                .map(|(model, slot)| vec![(slot.to_string(), model)])
+                .unwrap_or_default()
+        }
+        "lip_sync" => select_capability(
+            context,
+            &[
+                "video.lip_sync_audio_included",
+                "video.lip_sync_text_narration",
+            ],
+        )
+        .map(|(model, slot)| vec![(slot.to_string(), model)])
+        .unwrap_or_default(),
+        "text_sync" => {
+            let mut routes = Vec::new();
+            let reuses_audio = input_str(inputs, &["performance_wav", "reuse_audio"]).is_some();
+            let clone_audio =
+                input_str(inputs, &["voice_clone", "voice_clone_path", "clone_wav"]).is_some();
+            let profile_audio =
+                input_str(inputs, &["voice_profile", "voice_profile_path"]).is_some();
+            if !reuses_audio {
+                let audio_slot = if clone_audio {
+                    "audio.tts_clone"
+                } else if profile_audio {
+                    "audio.tts_profile"
+                } else {
+                    "audio.tts_clone"
+                };
+                if let Some((model, slot)) = select_capability(context, &[audio_slot]) {
+                    routes.push((slot.to_string(), model));
+                }
+            }
+            if let Some((model, slot)) = select_capability(
+                context,
+                &["video.lip_sync_text_narration", "video.start_frame"],
+            ) {
+                routes.push((slot.to_string(), model));
+            }
+            routes
+        }
+        "model_sheet" => {
+            let has_refs =
+                !input_path_list(inputs, &["reference_images", "reference_assets"]).is_empty();
+            let slots: &[&'static str] = if has_refs {
+                &[
+                    "image.character_reference",
+                    "image.edit",
+                    "image.image_to_image",
+                ]
+            } else {
+                &["image.text_to_image"]
+            };
+            select_capability(context, slots)
+                .map(|(model, slot)| vec![(slot.to_string(), model)])
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
     }
-    if has_refs {
-        return capability_model(context, "video.character_reference")
-            .or_else(|| capability_model(context, "video.location_prop_other_reference"))
-            .or_else(|| capability_model(context, "video.start_frame"))
-            .ok_or_else(|| {
-                "Set Settings → Video → Character reference / Location-prop reference / Start frame."
-                    .to_string()
-            });
+}
+
+fn approval_handoff_text(
+    inputs: &Map<String, Value>,
+    context: &DirectorContext,
+    project_root: Option<&str>,
+) -> Option<String> {
+    if let Some(text) = input_str(inputs, &["handoff"]) {
+        return Some(text.to_string());
     }
-    capability_model(context, "video.text_only").ok_or_else(|| {
-        "Set Settings → Video → Text only (or Adult text only when using adult/nsfw routing)."
-            .to_string()
-    })
+    if let Some(path) = input_str(inputs, &["handoff_path"]) {
+        let path = crate::media_util::peek_path(path, project_root).ok()?;
+        let metadata = fs::metadata(&path).ok()?;
+        if metadata.len() > 2_000_000 {
+            return None;
+        }
+        return fs::read_to_string(path).ok();
+    }
+    for raw in &context.attached_paths {
+        let path = crate::media_util::peek_path(raw, project_root).ok()?;
+        let metadata = fs::metadata(&path).ok()?;
+        if metadata.len() > 2_000_000 {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        let lowered = text.to_ascii_lowercase();
+        if lowered.contains("stage:") || lowered.contains("filenames:") {
+            return Some(text);
+        }
+    }
+    None
 }
 
 fn run_freeform_video(
@@ -1473,7 +1699,12 @@ fn run_freeform_video(
             "director-progress",
             format!("Uploading video reference {}…", path),
         );
-        uploaded_urls.push(upload_local(app, project_root, path)?);
+        uploaded_urls.push(upload_local(
+            app,
+            project_root,
+            path,
+            crate::media_util::MediaRole::Image,
+        )?);
     }
 
     let duration = input_str(inputs, &["duration"])
@@ -1582,7 +1813,12 @@ fn run_scene_generation(
         let save_path = resolve_under_project(save, project_root).map_err(|e| e.to_string())?;
         let model = capability_model(context, "video.edit")
             .ok_or_else(|| "Set Settings → Video → Focused edit before video edits.".to_string())?;
-        let uploaded = upload_local(app, project_root, source_video)?;
+        let uploaded = upload_local(
+            app,
+            project_root,
+            source_video,
+            crate::media_util::MediaRole::Video,
+        )?;
         let params = json!({
             "prompt": format!("{brief}\n\nPreserve everything else: composition, camera motion, identity, style, lighting, timing, and unmentioned details."),
             "video": uploaded,
@@ -1785,7 +2021,12 @@ fn run_scene_generation(
             "director-progress",
             format!("Uploading reference {}…", path),
         );
-        uploaded_urls.push(upload_local(app, project_root, path)?);
+        uploaded_urls.push(upload_local(
+            app,
+            project_root,
+            path,
+            crate::media_util::MediaRole::Image,
+        )?);
     }
 
     // Include common aliases; atlas::generate_media remaps to the model schema
@@ -1889,47 +2130,29 @@ fn still_image_sources(inputs: &Map<String, Value>) -> (Option<String>, Vec<Stri
     (source, refs)
 }
 
-fn resolve_still_image_model(
+pub(crate) fn resolve_still_image_model(
     context: &DirectorContext,
     inputs: &Map<String, Value>,
 ) -> Result<(ModelRef, &'static str, &'static str), String> {
     let (source, refs) = still_image_sources(inputs);
     if source.is_some() {
-        let model = capability_model(context, "image.edit")
-            .or_else(|| capability_model(context, "image.image_to_image"))
+        let (model, slot) = select_capability(context, &["image.edit", "image.image_to_image"])
             .ok_or_else(|| {
                 "Set Settings → Image → Focused edit (or Image to image).".to_string()
             })?;
-        let slot = if context
-            .capability_defaults
-            .get("image.edit")
-            .and_then(|v| v.as_ref())
-            .filter(|m| !m.model_id.trim().is_empty())
-            .is_some()
-            || (context.adult_routing_requested
-                && context
-                    .adult_capability_defaults
-                    .get("image.edit")
-                    .and_then(|v| v.as_ref())
-                    .filter(|m| !m.model_id.trim().is_empty())
-                    .is_some())
-        {
-            "image.edit"
-        } else {
-            "image.image_to_image"
-        };
         return Ok((model, "focused edit / multi-image edit", slot));
     }
     if !refs.is_empty() {
-        let model = capability_model(context, "image.character_reference")
-            .or_else(|| capability_model(context, "image.image_to_image"))
-            .or_else(|| capability_model(context, "image.text_to_image"))
-            .ok_or_else(|| "Set an Image generation default in Settings.".to_string())?;
-        return Ok((
-            model,
-            "reference-conditioned still",
-            "image.character_reference",
-        ));
+        let (model, slot) = select_capability(
+            context,
+            &[
+                "image.character_reference",
+                "image.image_to_image",
+                "image.text_to_image",
+            ],
+        )
+        .ok_or_else(|| "Set an Image generation default in Settings.".to_string())?;
+        return Ok((model, "reference-conditioned still", slot));
     }
     let model = capability_model(context, "image.text_to_image").ok_or_else(|| {
         "Set Settings → Image → Text to image before generating stills.".to_string()
@@ -2197,13 +2420,18 @@ fn run_still_image(
 
     let mut uploaded = Vec::new();
     if let Some(ref src) = source {
-        let url = upload_local(app, project_root, src)?;
+        let url = upload_local(app, project_root, src, crate::media_util::MediaRole::Image)?;
         uploaded.push(url.clone());
         params["image"] = json!(url);
         params["image_url"] = json!(url);
     }
     for path in &refs {
-        uploaded.push(upload_local(app, project_root, path)?);
+        uploaded.push(upload_local(
+            app,
+            project_root,
+            path,
+            crate::media_util::MediaRole::Image,
+        )?);
     }
     if !uploaded.is_empty() {
         params["media_files"] = json!(uploaded.clone());
@@ -2750,7 +2978,12 @@ fn run_text_sync(
             "director-progress",
             format!("Uploading clone WAV {}…", clone_path.display()),
         );
-        let clone_url = upload_local(app, project_root, &clone_path.to_string_lossy())?;
+        let clone_url = upload_local(
+            app,
+            project_root,
+            &clone_path.to_string_lossy(),
+            crate::media_util::MediaRole::Audio,
+        )?;
         let tts_text = build_seed_tts_text(&cue_text, &delivery);
         let params = json!({
             "text": tts_text,
@@ -2950,12 +3183,22 @@ fn run_text_sync(
         "director-progress",
         format!("Uploading talking still {}…", still_for_upload.display()),
     );
-    let image_url = upload_local(app, project_root, &still_for_upload.to_string_lossy())?;
+    let image_url = upload_local(
+        app,
+        project_root,
+        &still_for_upload.to_string_lossy(),
+        crate::media_util::MediaRole::Image,
+    )?;
     app.emit(
         "director-progress",
         format!("Uploading padded WAV {}…", padded_audio.display()),
     );
-    let audio_url = upload_local(app, project_root, &padded_audio.to_string_lossy())?;
+    let audio_url = upload_local(
+        app,
+        project_root,
+        &padded_audio.to_string_lossy(),
+        crate::media_util::MediaRole::Audio,
+    )?;
 
     let mut params = json!({
         "prompt": prompt,
@@ -3717,7 +3960,12 @@ fn run_model_sheet(
             "director-progress",
             format!("Uploading model-sheet ref {}…", path),
         );
-        uploaded.push(upload_local(app, project_root, path)?);
+        uploaded.push(upload_local(
+            app,
+            project_root,
+            path,
+            crate::media_util::MediaRole::Image,
+        )?);
     }
 
     let prompt = build_shot_prompt(&identity, &manifest.style, wardrobe, &shot.framing);

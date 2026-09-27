@@ -1107,8 +1107,9 @@ pub fn upload_media(
     api_key: &str,
     file_path: &str,
     project_root: Option<&str>,
+    role: crate::media_util::MediaRole,
 ) -> Result<String, String> {
-    let path = resolve_existing_file(file_path, project_root)?;
+    let path = resolve_existing_file(file_path, project_root, role)?;
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -1276,9 +1277,13 @@ pub fn download_atlas_image(
     download_atlas_media(url, dest, project_root, app)
 }
 
-fn resolve_existing_file(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
+fn resolve_existing_file(
+    raw: &str,
+    project_root: Option<&str>,
+    role: crate::media_util::MediaRole,
+) -> Result<PathBuf, String> {
     let path = crate::media_util::resolve_path(raw, project_root)?;
-    crate::media_util::ensure_media_file(&path)?;
+    crate::media_util::ensure_media_file_as(&path, role)?;
     Ok(path)
 }
 
@@ -1299,11 +1304,16 @@ fn mime_for_path(path: &Path) -> &'static str {
         "webp" => "image/webp",
         "gif" => "image/gif",
         "bmp" => "image/bmp",
-        "mp4" => "video/mp4",
+        "mp4" | "m4v" => "video/mp4",
         "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
         "mov" => "video/quicktime",
         "wav" => "audio/wav",
         "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "ogg" => "audio/ogg",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
         _ => "application/octet-stream",
     }
 }
@@ -1501,7 +1511,12 @@ pub fn run_atlas_tool(
                 return Some(Err("missing file_path".into()));
             };
             emit_progress(app, format!("Uploading media {file_path}…"));
-            Some(upload_media(api_key, file_path, project_root))
+            Some(upload_media(
+                api_key,
+                file_path,
+                project_root,
+                crate::media_util::MediaRole::AnyMedia,
+            ))
         }
         "atlas_get_balance" => Some(get_balance(api_key)),
         "download_atlas_image" | "download_atlas_media" | "download_media" => {

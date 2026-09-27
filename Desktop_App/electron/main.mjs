@@ -541,10 +541,15 @@ async function closeSession() {
   pathGrants.clear();
 }
 
-async function grantDialogPath(target) {
+async function grantDialogPath(target, intent = "read") {
   if (!target || !sidecar) return;
-  const granted = await sidecar.invoke("grant_path", { path: target });
-  pathGrants.add(realPathOrAbsolute(granted?.path || target));
+  if (intent !== "read" && intent !== "write") {
+    throw new Error("Dialog grants must be read or write scoped");
+  }
+  const granted = await sidecar.invoke("grant_path", { path: target, intent });
+  if (intent === "read") {
+    pathGrants.add(realPathOrAbsolute(granted?.path || target));
+  }
 }
 
 function assertAppSender(event) {
@@ -617,7 +622,7 @@ function registerIpc() {
     });
     if (result.canceled || result.filePaths.length === 0) return null;
     for (const chosen of result.filePaths) {
-      await grantDialogPath(chosen);
+      await grantDialogPath(chosen, "read");
     }
     if (opts.multiple) return result.filePaths;
     return result.filePaths[0] ?? null;
@@ -634,7 +639,7 @@ function registerIpc() {
       })),
     });
     if (result.canceled || !result.filePath) return null;
-    await grantDialogPath(result.filePath);
+    await grantDialogPath(result.filePath, "write");
     return result.filePath;
   });
 

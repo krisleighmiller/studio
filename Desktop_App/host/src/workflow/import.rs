@@ -60,11 +60,49 @@ fn rel(root: &Path, path: &Path) -> String {
         .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
 }
 
-fn list_files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(read) = fs::read_dir(dir) else {
+fn resolve_project_path(
+    root: &Path,
+    raw: &str,
+    intent: crate::project_path::PathIntent,
+) -> Result<PathBuf, String> {
+    let root = root.to_string_lossy();
+    crate::project_path::resolve(raw, Some(root.as_ref()), intent)
+        .map(|path| path.into_path_buf())
+        .map_err(|error| error.to_string())
+}
+
+fn project_relative_path(root: &Path, raw: &str) -> Option<String> {
+    let resolved = resolve_project_path(root, raw, crate::project_path::PathIntent::Read).ok()?;
+    crate::project_path::relative_to_root(root, &resolved)
+        .ok()
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+}
+
+fn list_files(root: &Path, dir: &Path) -> Vec<PathBuf> {
+    let Ok(dir) = resolve_project_path(
+        root,
+        &dir.to_string_lossy(),
+        crate::project_path::PathIntent::Read,
+    ) else {
         return Vec::new();
     };
-    let mut out: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let Ok(read) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = read
+        .flatten()
+        .filter_map(|entry| {
+            resolve_project_path(
+                root,
+                &entry.path().to_string_lossy(),
+                crate::project_path::PathIntent::Read,
+            )
+            .ok()
+        })
+        .collect();
     out.sort();
     out
 }
@@ -78,9 +116,10 @@ fn is_script_path(path: &Path) -> bool {
 
 fn discover_scripts(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let scripts = root.join("Scripts");
-    if scripts.is_dir() {
-        for p in list_files(&scripts) {
+    if let Ok(scripts) =
+        resolve_project_path(root, "Scripts", crate::project_path::PathIntent::Read)
+    {
+        for p in list_files(root, &scripts) {
             if p.is_file() && is_script_path(&p) {
                 out.push(p);
             }
@@ -93,37 +132,39 @@ fn discover_prod_md(root: &Path, plan: Option<&PlanState>) -> Option<PathBuf> {
     if let Some(plan) = plan {
         for section in &plan.sections {
             if let Some(p) = &section.production_path {
-                let path = PathBuf::from(p);
-                if path.is_file() {
-                    return Some(path);
-                }
-                let rel_path = root.join(p);
-                if rel_path.is_file() {
-                    return Some(rel_path);
+                if let Ok(path) =
+                    resolve_project_path(root, p, crate::project_path::PathIntent::Read)
+                {
+                    if path.is_file() {
+                        return Some(path);
+                    }
                 }
             }
         }
     }
-    let candidates = [
-        root.join("prod.md"),
-        root.join("Prod_Notes").join("prod.md"),
-    ];
-    candidates.into_iter().find(|p| p.is_file())
+    ["prod.md", "Prod_Notes/prod.md"].into_iter().find_map(|p| {
+        resolve_project_path(root, p, crate::project_path::PathIntent::Read)
+            .ok()
+            .filter(|path| path.is_file())
+    })
 }
 
 fn discover_sidecar_root(root: &Path, plan: Option<&PlanState>) -> PathBuf {
     if let Some(plan) = plan.filter(|p| !p.sidecar_root.trim().is_empty()) {
-        let recorded = PathBuf::from(&plan.sidecar_root);
-        if recorded.is_dir() {
-            return recorded;
-        }
-        let rel_path = root.join(&plan.sidecar_root);
-        if rel_path.is_dir() {
-            return rel_path;
+        if let Ok(recorded) = resolve_project_path(
+            root,
+            &plan.sidecar_root,
+            crate::project_path::PathIntent::Write,
+        ) {
+            if recorded.is_dir() {
+                return recorded;
+            }
         }
     }
     for name in ["Scene_Prompts", "Prod_Notes"] {
-        let p = root.join(name);
+        let Ok(p) = resolve_project_path(root, name, crate::project_path::PathIntent::Write) else {
+            continue;
+        };
         if p.is_dir() {
             return p;
         }
@@ -132,13 +173,15 @@ fn discover_sidecar_root(root: &Path, plan: Option<&PlanState>) -> PathBuf {
 }
 
 fn load_plan_state(root: &Path) -> Option<PlanState> {
-    for p in [
-        root.join("scene_plan_state.json"),
-        root.join("Preproduction").join("scene_plan_state.json"),
+    for relative in [
+        "scene_plan_state.json",
+        "Preproduction/scene_plan_state.json",
     ] {
-        if let Ok(text) = fs::read_to_string(&p) {
-            if let Ok((state, _)) = PlanState::load(&text) {
-                return Some(state);
+        if let Ok(p) = resolve_project_path(root, relative, crate::project_path::PathIntent::Read) {
+            if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok((state, _)) = PlanState::load(&text) {
+                    return Some(state);
+                }
             }
         }
     }
@@ -146,7 +189,7 @@ fn load_plan_state(root: &Path) -> Option<PlanState> {
 }
 
 fn load_previous(root: &Path) -> Option<ProjectState> {
-    let path = root.join(STATE_REL);
+    let path = resolve_project_path(root, STATE_REL, crate::project_path::PathIntent::Read).ok()?;
     fs::read_to_string(path)
         .ok()
         .and_then(|t| ProjectState::from_json(&t).ok())
@@ -236,7 +279,8 @@ fn import_characters(root: &Path, state: &mut ProjectState) {
         }
         let identity_ready = c.lipsync_ready();
         let voice_ready = c.voice.is_some();
-        let (profile_path, profile) = match crate::workflow::characters::load_profile(&c.dir) {
+        let (profile_path, profile) = match crate::workflow::characters::load_profile(root, &c.dir)
+        {
             Ok((path, profile)) => (path.map(|path| rel(root, &path)), profile),
             Err(error) => {
                 state.notes.push(error);
@@ -290,14 +334,16 @@ fn apply_handoff(root: &Path, state: &mut ProjectState, handoff: SceneHandoff, s
         .reference_assets
         .iter()
         .filter(|a| a.role == HandoffAssetRole::CharacterReference)
-        .map(|a| rel(root, Path::new(&a.path)))
+        .filter_map(|asset| project_relative_path(root, &asset.path))
         .collect();
     if let Some(start) = handoff
         .reference_assets
         .iter()
         .find(|a| a.role == HandoffAssetRole::StartFrame)
     {
-        let path = rel(root, Path::new(&start.path));
+        let Some(path) = project_relative_path(root, &start.path) else {
+            return;
+        };
         cut.approved_start_frame = Some(path.clone());
         state.push_asset(AssetRecord {
             id: String::new(),
@@ -318,7 +364,7 @@ fn import_sidecars(root: &Path, sidecar_root: &Path, state: &mut ProjectState) {
     if !sidecar_root.is_dir() {
         return;
     }
-    for scene_dir in list_files(sidecar_root) {
+    for scene_dir in list_files(root, sidecar_root) {
         if !scene_dir.is_dir() {
             continue;
         }
@@ -330,7 +376,7 @@ fn import_sidecars(root: &Path, sidecar_root: &Path, state: &mut ProjectState) {
         {
             continue;
         }
-        for file in list_files(&scene_dir) {
+        for file in list_files(root, &scene_dir) {
             if !file.is_file() {
                 continue;
             }
@@ -339,6 +385,13 @@ fn import_sidecars(root: &Path, sidecar_root: &Path, state: &mut ProjectState) {
                 .and_then(|s| s.to_str())
                 .and_then(cut_number_from_name)
             else {
+                continue;
+            };
+            let Ok(file) = resolve_project_path(
+                root,
+                &file.to_string_lossy(),
+                crate::project_path::PathIntent::Read,
+            ) else {
                 continue;
             };
             let Ok(text) = fs::read_to_string(&file) else {
@@ -359,13 +412,23 @@ fn import_sidecars(root: &Path, sidecar_root: &Path, state: &mut ProjectState) {
 }
 
 fn import_prod_md(root: &Path, prod: &Path, state: &mut ProjectState) {
-    let Ok(text) = fs::read_to_string(prod) else {
+    let Ok(prod) = resolve_project_path(
+        root,
+        &prod.to_string_lossy(),
+        crate::project_path::PathIntent::Read,
+    ) else {
+        state
+            .notes
+            .push("refusing to read production notes outside the project".into());
+        return;
+    };
+    let Ok(text) = fs::read_to_string(&prod) else {
         state
             .notes
             .push(format!("could not read {}", prod.display()));
         return;
     };
-    match scene_blocks_from_text(&rel(root, prod), &text) {
+    match scene_blocks_from_text(&rel(root, &prod), &text) {
         Ok(blocks) => {
             for block in blocks {
                 let already = state
@@ -376,21 +439,21 @@ fn import_prod_md(root: &Path, prod: &Path, state: &mut ProjectState) {
                     continue;
                 }
                 match parse_handoff_yaml(&block.yaml) {
-                    Ok(h) => apply_handoff(root, state, h, prod),
+                    Ok(h) => apply_handoff(root, state, h, &prod),
                     Err(e) => {
                         state
                             .notes
-                            .push(format!("{}: {}: {e}", rel(root, prod), block.heading))
+                            .push(format!("{}: {}: {e}", rel(root, &prod), block.heading))
                     }
                 }
             }
         }
         Err(issues) => {
             if let Ok(h) = load_handoff_document(&text) {
-                apply_handoff(root, state, h, prod);
+                apply_handoff(root, state, h, &prod);
             } else {
                 for i in issues {
-                    state.notes.push(format!("{}: {i}", rel(root, prod)));
+                    state.notes.push(format!("{}: {i}", rel(root, &prod)));
                 }
             }
         }
@@ -414,11 +477,15 @@ fn import_plan_coverage(plan: &PlanState, state: &mut ProjectState) {
 }
 
 fn import_takes(root: &Path, state: &mut ProjectState) {
-    let scenes_dir = root.join("Scenes");
+    let Ok(scenes_dir) =
+        resolve_project_path(root, "Scenes", crate::project_path::PathIntent::Read)
+    else {
+        return;
+    };
     if !scenes_dir.is_dir() {
         return;
     }
-    for scene_dir in list_files(&scenes_dir) {
+    for scene_dir in list_files(root, &scenes_dir) {
         if !scene_dir.is_dir() {
             continue;
         }
@@ -429,13 +496,13 @@ fn import_takes(root: &Path, state: &mut ProjectState) {
         else {
             continue;
         };
-        for cut_dir in list_files(&scene_dir) {
+        for cut_dir in list_files(root, &scene_dir) {
             let cut_n = cut_dir
                 .file_name()
                 .and_then(|s| s.to_str())
                 .and_then(cut_number_from_name);
             let search = if cut_dir.is_dir() {
-                list_files(&cut_dir)
+                list_files(root, &cut_dir)
             } else {
                 vec![cut_dir.clone()]
             };
@@ -597,13 +664,12 @@ fn prune_missing_scene_look_assets(project_root: &Path, state: &mut ProjectState
         .iter()
         .filter(|asset| asset.role.is_scene_look() || asset.role.is_cut_image())
         .filter(|asset| {
-            let path = PathBuf::from(&asset.path);
-            let path = if path.is_absolute() {
-                path
-            } else {
-                project_root.join(path)
-            };
-            !path.is_file()
+            resolve_project_path(
+                project_root,
+                &asset.path,
+                crate::project_path::PathIntent::Read,
+            )
+            .map_or(true, |path| !path.is_file())
         })
         .map(|asset| (asset.id.clone(), asset.path.clone()))
         .collect();
@@ -1002,7 +1068,12 @@ fn restore_render_jobs(project_root: &Path, state: &mut ProjectState) -> bool {
 }
 
 fn restore_assemble_jobs(project_root: &Path, state: &mut ProjectState) -> bool {
-    let jobs: Vec<(String, String, Option<String>, crate::workflow::state::JobStatus)> = state
+    let jobs: Vec<(
+        String,
+        String,
+        Option<String>,
+        crate::workflow::state::JobStatus,
+    )> = state
         .jobs
         .iter()
         .filter(|job| job.kind == "assemble")
@@ -1065,11 +1136,7 @@ fn restore_assemble_jobs(project_root: &Path, state: &mut ProjectState) -> bool 
                 parent_asset_id: None,
                 notes: Some("review export".into()),
             });
-            crate::workflow::identity::record_version(
-                state,
-                &id,
-                AssetStatus::Present,
-            );
+            crate::workflow::identity::record_version(state, &id, AssetStatus::Present);
             changed = true;
             id
         };
@@ -1095,7 +1162,8 @@ fn restore_assemble_jobs(project_root: &Path, state: &mut ProjectState) -> bool 
                 .and_then(|scene| scene.post.as_ref())
                 .map(|post| post.versions.len())
                 .unwrap_or(0);
-            if versions_after != versions_before || selected_take_count(state, scene_id) != selected_before
+            if versions_after != versions_before
+                || selected_take_count(state, scene_id) != selected_before
             {
                 changed = true;
             }
@@ -1139,14 +1207,8 @@ fn scene_id_from_final_path(path: &str) -> Option<u32> {
 }
 
 fn existing_media_path(root: &Path, requested: &str) -> Option<PathBuf> {
-    let requested = {
-        let path = PathBuf::from(requested);
-        if path.is_absolute() {
-            path
-        } else {
-            root.join(path)
-        }
-    };
+    let requested =
+        resolve_project_path(root, requested, crate::project_path::PathIntent::Read).ok()?;
     if requested.is_file() {
         return Some(requested);
     }
@@ -1155,7 +1217,14 @@ fn existing_media_path(root: &Path, requested: &str) -> Option<PathBuf> {
     fs::read_dir(parent)
         .ok()?
         .filter_map(Result::ok)
-        .map(|entry| entry.path())
+        .filter_map(|entry| {
+            resolve_project_path(
+                root,
+                &entry.path().to_string_lossy(),
+                crate::project_path::PathIntent::Read,
+            )
+            .ok()
+        })
         .find(|path| path.is_file() && path.file_stem() == Some(stem))
 }
 
@@ -1193,11 +1262,16 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
     let plan = load_plan_state(project_root);
     let scripts = discover_scripts(project_root);
     let mut script_texts = Vec::new();
-    for path in &scripts {
-        let text = fs::read_to_string(path)
+    for discovered_path in &scripts {
+        let path = resolve_project_path(
+            project_root,
+            &discovered_path.to_string_lossy(),
+            crate::project_path::PathIntent::Read,
+        )?;
+        let text = fs::read_to_string(&path)
             .map_err(|e| format!("could not read {}: {e}", path.display()))?;
         script_texts.push(text.clone());
-        let rel_path = rel(project_root, path);
+        let rel_path = rel(project_root, &path);
         if state.scripts.iter().all(|s| s.path != rel_path) {
             let title = text.lines().find_map(|line| {
                 let t = line.trim().trim_start_matches('#').trim();
@@ -1268,7 +1342,11 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
     }
 
     let persisted_path = if options.persist {
-        let path = project_root.join(STATE_REL);
+        let path = resolve_project_path(
+            project_root,
+            STATE_REL,
+            crate::project_path::PathIntent::Write,
+        )?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
@@ -1300,9 +1378,7 @@ fn reject_persisted_path(key: &str, value: &str) -> Result<(), String> {
     }
     let path = Path::new(value);
     if path.is_absolute() {
-        return Err(format!(
-            "workflow state field `{key}` is an absolute path"
-        ));
+        return Err(format!("workflow state field `{key}` is an absolute path"));
     }
     if path
         .components()
@@ -1336,7 +1412,11 @@ fn reject_unsafe_persisted_paths(value: &serde_json::Value) -> Result<(), String
 }
 
 pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
-    let path = project_root.join(STATE_REL);
+    let path = resolve_project_path(
+        project_root,
+        STATE_REL,
+        crate::project_path::PathIntent::Read,
+    )?;
     if path.is_file() {
         let text = fs::read_to_string(&path)
             .map_err(|e| format!("could not read {}: {e}", path.display()))?;
@@ -1355,7 +1435,15 @@ pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
             let texts = state
                 .scripts
                 .iter()
-                .filter_map(|script| fs::read_to_string(project_root.join(&script.path)).ok())
+                .filter_map(|script| {
+                    let path = resolve_project_path(
+                        project_root,
+                        &script.path,
+                        crate::project_path::PathIntent::Read,
+                    )
+                    .ok()?;
+                    fs::read_to_string(path).ok()
+                })
                 .collect::<Vec<_>>();
             crate::workflow::breakdown::apply(&mut state, &texts);
             repaired = true;
@@ -1377,7 +1465,11 @@ pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
 }
 
 pub fn persist_state(project_root: &Path, state: &ProjectState) -> Result<PathBuf, String> {
-    let path = project_root.join(STATE_REL);
+    let path = resolve_project_path(
+        project_root,
+        STATE_REL,
+        crate::project_path::PathIntent::Write,
+    )?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
@@ -1718,7 +1810,12 @@ mod tests {
         assert_eq!(scene.cuts[0].selected_take.as_deref(), Some("take_1"));
         assert_eq!(scene.cuts[0].takes[0].status, TakeStatus::UsedInAssembly);
         assert_eq!(
-            state.jobs.iter().find(|job| job.id == "job_8").unwrap().status,
+            state
+                .jobs
+                .iter()
+                .find(|job| job.id == "job_8")
+                .unwrap()
+                .status,
             JobStatus::Failed
         );
         assert!(!restore_assemble_jobs(dir.path(), &mut state));
@@ -1826,20 +1923,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(STATE_REL);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            r#"{"assets":[{"path":"../escape.png"}]}"#,
-        )
-        .unwrap();
+        fs::write(&path, r#"{"assets":[{"path":"../escape.png"}]}"#).unwrap();
         let error = load_or_import(dir.path()).unwrap_err();
         assert!(error.contains(".."), "{error}");
 
-        fs::write(
-            &path,
-            r#"{"assets":[{"path":"/etc/passwd"}]}"#,
-        )
-        .unwrap();
+        fs::write(&path, r#"{"assets":[{"path":"/etc/passwd"}]}"#).unwrap();
         let error = load_or_import(dir.path()).unwrap_err();
         assert!(error.contains("absolute"), "{error}");
+    }
+
+    #[test]
+    fn project_plan_paths_cannot_discover_external_production_or_sidecar_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let external_prod = outside.join("prod.md");
+        fs::write(&external_prod, "private source").unwrap();
+        let mut plan = PlanState::new(&outside, None);
+        let mut section = crate::scene_plan::state::PlanSection::new(1, "Scene", "Scene 1");
+        section.production_path = Some(external_prod.to_string_lossy().to_string());
+        plan.sections.push(section);
+
+        assert!(discover_prod_md(&root, Some(&plan)).is_none());
+        assert!(discover_sidecar_root(&root, Some(&plan)).starts_with(&root));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_state_file_symlink_cannot_read_outside_project() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(root.join("Preproduction")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("workflow_state.json"), r#"{"version":1}"#).unwrap();
+        symlink(outside.join("workflow_state.json"), root.join(STATE_REL)).unwrap();
+
+        assert!(load_or_import(&root).is_err());
     }
 }

@@ -5,7 +5,10 @@ use std::time::Duration;
 
 const DEFAULT_DOWNLOAD_CAP: u64 = 512_000_000;
 
-pub fn read_limited(mut response: reqwest::blocking::Response, max_bytes: u64) -> Result<Vec<u8>, String> {
+pub fn read_limited(
+    mut response: reqwest::blocking::Response,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let mut body = Vec::new();
     let mut buf = [0u8; 64 * 1024];

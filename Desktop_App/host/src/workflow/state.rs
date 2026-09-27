@@ -1317,7 +1317,12 @@ fn format_elapsed_seconds(seconds: u64) -> String {
     } else if seconds < 3600 {
         format!("{}m {}s", seconds / 60, seconds % 60)
     } else {
-        format!("{}h {}m {}s", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
+        format!(
+            "{}h {}m {}s",
+            seconds / 3600,
+            (seconds % 3600) / 60,
+            seconds % 60
+        )
     }
 }
 
@@ -1705,7 +1710,10 @@ pub struct ProjectState {
 /// Accept workflow files from the previous schema and unknown recipe ids.
 /// Newer files than this build are refused. Recipe work areas stay derived.
 fn migrate_workflow_json(value: &mut serde_json::Value) -> Result<Vec<String>, String> {
-    let version = value.get("version").and_then(|item| item.as_u64()).unwrap_or(1);
+    let version = value
+        .get("version")
+        .and_then(|item| item.as_u64())
+        .unwrap_or(1);
     if version > u64::from(WORKFLOW_VERSION) {
         return Err(format!(
             "workflow state version {version} is not supported (expected {WORKFLOW_VERSION})"
@@ -1725,11 +1733,11 @@ fn migrate_workflow_json(value: &mut serde_json::Value) -> Result<Vec<String>, S
                 .and_then(|item| crate::workflow::recipe::parse_recipe_document(item).ok())
                 .is_some_and(|item| item.id == normalized);
             if accepted {
-                if let Some(profile) = value.get_mut("profile").and_then(|item| item.as_object_mut()) {
-                    profile.insert(
-                        "recipe".into(),
-                        serde_json::Value::String(normalized),
-                    );
+                if let Some(profile) = value
+                    .get_mut("profile")
+                    .and_then(|item| item.as_object_mut())
+                {
+                    profile.insert("recipe".into(), serde_json::Value::String(normalized));
                 }
             } else {
                 let reason = document
@@ -1737,13 +1745,18 @@ fn migrate_workflow_json(value: &mut serde_json::Value) -> Result<Vec<String>, S
                     .map(|item| {
                         crate::workflow::recipe::parse_recipe_document(item)
                             .err()
-                            .unwrap_or_else(|| "recipe document id does not match the profile".into())
+                            .unwrap_or_else(|| {
+                                "recipe document id does not match the profile".into()
+                            })
                     })
                     .unwrap_or_else(|| "no recipe document was included".into());
                 warnings.push(format!(
                     "Unknown recipe `{recipe}` loaded as narrative dialogue. {reason}."
                 ));
-                if let Some(profile) = value.get_mut("profile").and_then(|item| item.as_object_mut()) {
+                if let Some(profile) = value
+                    .get_mut("profile")
+                    .and_then(|item| item.as_object_mut())
+                {
                     profile.insert(
                         "recipe".into(),
                         serde_json::Value::String("narrative_dialogue".into()),
@@ -1754,10 +1767,7 @@ fn migrate_workflow_json(value: &mut serde_json::Value) -> Result<Vec<String>, S
         }
     }
     if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "version".into(),
-            serde_json::Value::from(WORKFLOW_VERSION),
-        );
+        object.insert("version".into(), serde_json::Value::from(WORKFLOW_VERSION));
     }
     Ok(warnings)
 }
@@ -1784,8 +1794,8 @@ impl ProjectState {
         let mut value: serde_json::Value =
             serde_json::from_str(text).map_err(|e| format!("workflow state json: {e}"))?;
         let warnings = migrate_workflow_json(&mut value)?;
-        let mut state: Self = serde_json::from_value(value)
-            .map_err(|e| format!("workflow state json: {e}"))?;
+        let mut state: Self =
+            serde_json::from_value(value).map_err(|e| format!("workflow state json: {e}"))?;
         for warning in warnings {
             if !state.notes.iter().any(|note| note == &warning) {
                 state.notes.push(warning);

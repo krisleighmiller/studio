@@ -50,15 +50,22 @@ pub fn dispatch(
     match cmd {
         "open_project" => {
             let path = arg_string(args, "path")?;
+            pending::cancel_all();
             to_value(session::open(&path).map(|root| json!({ "root": root })))
         }
         "close_project" => {
+            pending::cancel_all();
             session::close();
             Ok(json!({ "closed": true }))
         }
         "grant_path" => {
             let path = arg_string(args, "path")?;
-            to_value(session::grant(&path).map(|path| json!({ "path": path })))
+            let intent = match arg_string(args, "intent")?.as_str() {
+                "read" => project_path::PathIntent::Read,
+                "write" => project_path::PathIntent::Write,
+                _ => return Err("Dialog grants must declare read or write intent.".into()),
+            };
+            to_value(session::grant(&path, intent).map(|path| json!({ "path": path })))
         }
         "list_dir" => {
             let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Read)?;
@@ -135,21 +142,7 @@ pub fn dispatch(
         }
         "director_approve" => {
             let id = arg_string(args, "id")?;
-            let model = arg_string(args, "model")?;
-            let api_id = opt_string(args, "apiId");
-            let context: director::DirectorContext = serde_json::from_value(
-                args.get("context")
-                    .cloned()
-                    .unwrap_or_else(|| json!({})),
-            )
-            .map_err(|error| format!("Invalid approval context: {error}"))?;
-            to_value(director::director_approve(
-                app.clone(),
-                id,
-                model,
-                api_id,
-                context,
-            ))
+            to_value(director::director_approve(app.clone(), id))
         }
         "elevenlabs_list_voices" => {
             let search = opt_string(args, "search");
@@ -278,20 +271,20 @@ pub fn dispatch(
         "workflow_approve_look" => workflow::cmd_approve_look(args),
         "workflow_reject_look" => workflow::cmd_reject_look(args),
         "workflow_delete_look" => workflow::cmd_delete_look(args),
-        "workflow_generate_look" => workflow::cmd_generate_look(args),
-        "workflow_generate_wardrobe_plate" => workflow::cmd_generate_wardrobe_plate(args),
+        "workflow_generate_look" => workflow::cmd_generate_look(app, args),
+        "workflow_generate_wardrobe_plate" => workflow::cmd_generate_wardrobe_plate(app, args),
         "workflow_delete_wardrobe_plate" => workflow::cmd_delete_wardrobe_plate(args),
         "workflow_draft_start_frame_prompt" => workflow::cmd_draft_start_frame_prompt(app, args),
         "workflow_save_start_frame_prompt" => workflow::cmd_save_start_frame_prompt(args),
         "workflow_save_production_prompt" => workflow::cmd_save_production_prompt(args),
         "workflow_refresh_production_handoff" => workflow::cmd_refresh_production_handoff(args),
         "workflow_sync_production_notes" => workflow::cmd_sync_production_notes(app, args),
-        "workflow_prepare_render" => workflow::cmd_prepare_render(args),
+        "workflow_prepare_render" => workflow::cmd_prepare_render(app, args),
         "workflow_set_visual_source" => workflow::cmd_set_visual_source(args),
         "workflow_bind_continuity_frame" => workflow::cmd_bind_continuity_frame(args),
         "workflow_set_take_status" => workflow::cmd_set_take_status(args),
         "workflow_delete_take" => workflow::cmd_delete_take(args),
-        "workflow_prepare_assemble" => workflow::cmd_prepare_assemble(args),
+        "workflow_prepare_assemble" => workflow::cmd_prepare_assemble_with_host(app, args),
         "workflow_add_alternate_shot" => workflow::cmd_add_alternate_shot(args),
         "workflow_mark_cut_version" => workflow::cmd_mark_cut_version(args),
         "workflow_set_cut_version_stage" => workflow::cmd_set_cut_version_stage(args),
@@ -299,8 +292,8 @@ pub fn dispatch(
         "workflow_set_post_status" => workflow::cmd_set_post_status(args),
         "workflow_set_editorial_path" => workflow::cmd_set_editorial_path(args),
         "workflow_check_deliverable" => workflow::cmd_check_deliverable(args),
-        "workflow_generate_start_frame" => workflow::cmd_generate_start_frame(args),
-        "workflow_edit_start_frame" => workflow::cmd_edit_start_frame(args),
+        "workflow_generate_start_frame" => workflow::cmd_generate_start_frame(app, args),
+        "workflow_edit_start_frame" => workflow::cmd_edit_start_frame(app, args),
         "workflow_attach_start_frame" => workflow::cmd_attach_start_frame(args),
         "workflow_approve_start_frame" => workflow::cmd_approve_start_frame(args),
         "workflow_reject_start_frame" => workflow::cmd_reject_start_frame(args),

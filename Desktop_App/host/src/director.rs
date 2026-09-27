@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 /// an entire 12-shot pack. The frontend / user continues with another turn.
 const TURN_WALL_CLOCK: Duration = Duration::from_secs(110);
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRef {
     /// Settings API entry id (user-named instance).
@@ -20,7 +20,7 @@ pub struct ModelRef {
     pub model_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectorContext {
     pub project_root: Option<String>,
@@ -32,6 +32,15 @@ pub struct DirectorContext {
     /// Settings → Generation defaults (capability slot → model). Empty/null = unset.
     #[serde(default)]
     pub capability_defaults: std::collections::HashMap<String, Option<ModelRef>>,
+    /// Host-owned API labels are only for approval-card disclosure.
+    #[serde(default)]
+    pub api_labels: std::collections::HashMap<String, String>,
+    /// Non-secret endpoint identity; approvals stale if a provider endpoint changes.
+    #[serde(default)]
+    pub api_fingerprints: std::collections::HashMap<String, u64>,
+    /// The chat model used while planning, bound for approved specialists that need it.
+    #[serde(default)]
+    pub planner_model: Option<ModelRef>,
     /// Settings → Adult content enabled (slots configured / UI opt-in). Not sufficient alone to use spicy models.
     #[serde(default)]
     pub adult_content_enabled: bool,
@@ -63,6 +72,192 @@ pub struct DirectorContext {
     pub workflow_work_area: Option<String>,
 }
 
+fn hydrate_context_from_app(app: &HostCtx, context: &mut DirectorContext) -> Result<(), String> {
+    let settings_value = settings::load_settings(app.clone())?;
+    let apis = settings::list_apis(app)?;
+    hydrate_routing_context(context, &settings_value, &apis)
+}
+
+fn hydrate_routing_context(
+    context: &mut DirectorContext,
+    settings_value: &Value,
+    apis: &[settings::ApiEntry],
+) -> Result<(), String> {
+    let enabled: std::collections::HashSet<&str> = apis
+        .iter()
+        .filter(|api| api.enabled)
+        .map(|api| api.id.as_str())
+        .collect();
+    context.api_labels = apis
+        .iter()
+        .filter(|api| api.enabled)
+        .map(|api| (api.id.clone(), format!("{} ({})", api.name, api.kind)))
+        .collect();
+    context.api_fingerprints = apis
+        .iter()
+        .filter(|api| api.enabled)
+        .map(|api| {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            api.id.hash(&mut hasher);
+            api.kind.hash(&mut hasher);
+            api.base_url.hash(&mut hasher);
+            (api.id.clone(), hasher.finish())
+        })
+        .collect();
+
+    fn read_models(
+        settings_value: &Value,
+        key: &str,
+        enabled: &std::collections::HashSet<&str>,
+    ) -> Result<std::collections::HashMap<String, Option<ModelRef>>, String> {
+        let mut result = std::collections::HashMap::new();
+        let Some(object) = settings_value.get(key).and_then(Value::as_object) else {
+            return Ok(result);
+        };
+        for (slot, raw) in object {
+            if raw.is_null() {
+                result.insert(slot.clone(), None);
+                continue;
+            }
+            let model: ModelRef = serde_json::from_value(raw.clone())
+                .map_err(|error| format!("Invalid model route in {key}.{slot}: {error}"))?;
+            if !model.model_id.trim().is_empty() && enabled.contains(model.api_id.as_str()) {
+                result.insert(slot.clone(), Some(model));
+            } else {
+                result.insert(slot.clone(), None);
+            }
+        }
+        Ok(result)
+    }
+
+    context.capability_defaults = read_models(settings_value, "capabilityDefaults", &enabled)?;
+    context.adult_capability_defaults =
+        read_models(settings_value, "adultCapabilityDefaults", &enabled)?;
+    context.adult_content_enabled = settings_value
+        .get("adultContentEnabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    context.adult_routing_requested &= context.adult_content_enabled;
+    Ok(())
+}
+
+fn routing_snapshot_matches(expected: &DirectorContext, current: &DirectorContext) -> bool {
+    expected.capability_defaults == current.capability_defaults
+        && expected.adult_capability_defaults == current.adult_capability_defaults
+        && expected.adult_content_enabled == current.adult_content_enabled
+        && expected.api_labels == current.api_labels
+        && expected.api_fingerprints == current.api_fingerprints
+}
+
+fn specialist_needs_planner_llm(specialist: &str) -> bool {
+    matches!(
+        specialist,
+        "production_helper"
+            | "scene_plan"
+            | "scene_intent"
+            | "cut_sketches"
+            | "scene_look"
+            | "script"
+            | "character_creation"
+    )
+}
+
+fn approval_route_details(
+    action: &crate::director_actions::DirectorAction,
+    context: &DirectorContext,
+    project_root: Option<&str>,
+) -> (String, String, String) {
+    let specialist = action.specialist.as_deref().unwrap_or("");
+    if matches!(specialist, "assemble" | "text_write") {
+        return (
+            "Local Workbench".into(),
+            "Local operation (no model)".into(),
+            "No provider charge".into(),
+        );
+    }
+    if action.inputs.contains_key("collect_prediction_id") {
+        return (
+            "Existing provider job".into(),
+            "Resume/download only".into(),
+            "No new generation charge expected".into(),
+        );
+    }
+    let mut routes = crate::specialists::approval_model_routes(action, context, project_root);
+    if specialist_needs_planner_llm(specialist) {
+        if let Some(model) = context.planner_model.clone() {
+            routes.push(("Director chat".into(), model));
+        }
+    }
+    if routes.is_empty() {
+        return (
+            "Not resolved from host settings".into(),
+            "No compatible model route configured".into(),
+            "Unknown; no provider call until a route is configured".into(),
+        );
+    }
+    let mut providers = Vec::new();
+    let mut models = Vec::new();
+    for (slot, model) in routes {
+        let provider = context
+            .api_labels
+            .get(&model.api_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                if model.api_id.trim().is_empty() {
+                    "Provider selected by default routing".into()
+                } else {
+                    format!("API {}", model.api_id)
+                }
+            });
+        if !providers.contains(&provider) {
+            providers.push(provider);
+        }
+        models.push(format!("{slot}: `{}`", model.model_id));
+    }
+    (
+        providers.join(", "),
+        models.join("; "),
+        "Unknown; provider pricing applies".into(),
+    )
+}
+
+pub(crate) fn approval_route_details_for_app(
+    app: &HostCtx,
+    action: &crate::director_actions::DirectorAction,
+    project_root: Option<&str>,
+) -> Result<(String, String, String), String> {
+    let mut context = DirectorContext::default();
+    context.project_root = project_root.map(str::to_string);
+    hydrate_context_from_app(app, &mut context)?;
+    Ok(approval_route_details(action, &context, project_root))
+}
+
+pub(crate) fn format_approval_request_for_app(
+    app: &HostCtx,
+    action: &crate::director_actions::DirectorAction,
+    validated: &crate::director_actions::ValidatedAction,
+    project_root: Option<&str>,
+) -> Result<String, String> {
+    let root = crate::session::command_root(project_root)?;
+    let root = root.to_string_lossy().into_owned();
+    let mut context = DirectorContext::default();
+    context.project_root = Some(root.clone());
+    hydrate_context_from_app(app, &mut context)?;
+    let (provider, model, cost) = approval_route_details(action, &context, Some(&root));
+    if provider == "Not resolved from host settings" {
+        return Err(format!(
+            "No compatible host provider/model route is configured for `{}`.",
+            action.specialist.as_deref().unwrap_or("this action")
+        ));
+    }
+    Ok(
+        crate::director_actions::format_approval_request_with_context(
+            action, validated, &context, &provider, &model, &cost,
+        ),
+    )
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
@@ -91,6 +286,9 @@ pub struct DirectorTurnResponse {
 }
 
 fn resolve_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
+    if crate::session::root().is_some() || !cfg!(test) {
+        return crate::session::authorize(raw, crate::project_path::PathIntent::Read);
+    }
     crate::project_path::resolve(raw, project_root, crate::project_path::PathIntent::Read)
         .map(|path| path.into_path_buf())
         .map_err(|error| error.to_string())
@@ -524,6 +722,10 @@ fn answer_pending_plan_question(
     Some(reply)
 }
 
+fn should_keep_pending_for_chat_turn(text: &str) -> bool {
+    looks_like_pending_plan_question(text)
+}
+
 /// User message that means paid-batch approval was just given.
 fn looks_like_paid_approval(text: &str) -> bool {
     let trimmed = text.trim().to_ascii_lowercase();
@@ -596,7 +798,8 @@ fn director_turn_inner(
     request: DirectorTurnRequest,
 ) -> Result<DirectorTurnResponse, String> {
     use crate::director_actions::{
-        format_approval_request, parse_actions, planner_system_prompt, validate_action, ActionKind,
+        format_approval_request_with_context, parse_actions, planner_system_prompt,
+        validate_action, ActionKind,
     };
     use crate::specialists::{self, specialist_requires_approval, SpecialistLlm};
 
@@ -647,9 +850,13 @@ fn director_turn_inner(
     };
     let mut context = request.context;
     context.project_root = crate::session::root().map(|path| path.to_string_lossy().into_owned());
-    // Per-turn adult routing from user keywords (adult / nsfw / …). Survives Approve/continue
-    // via recent user-message history.
+    // Renderer-supplied model maps are untrusted; resolve routing only from host settings.
     context.adult_routing_requested = adult_routing_from_history(&request.messages);
+    hydrate_context_from_app(&app, &mut context)?;
+    context.planner_model = Some(ModelRef {
+        api_id: chat_api_id.clone(),
+        model_id: model.clone(),
+    });
     let project_root = context
         .project_root
         .as_deref()
@@ -670,14 +877,11 @@ fn director_turn_inner(
     // A question about the parked plan keeps that plan. Any other chat text,
     // including "ok" and "continue", drops it. Only director_approve runs it.
     if let Some(user_text) = last_user_message(&request.messages) {
-        if looks_like_pending_plan_question(user_text) {
+        if should_keep_pending_for_chat_turn(user_text) {
             if let Some(pending) = crate::pending::current() {
-                if let Some(reply) = answer_pending_plan_question(
-                    &context,
-                    &pending,
-                    user_text,
-                    project_root_ref,
-                ) {
+                if let Some(reply) =
+                    answer_pending_plan_question(&context, &pending, user_text, project_root_ref)
+                {
                     tool_events.push("pending_plan_question".into());
                     return Ok(DirectorTurnResponse {
                         reply,
@@ -827,7 +1031,16 @@ fn director_turn_inner(
                     // but still plan-gated.
                     let needs_approval = specialist_requires_approval(&specialist);
                     if needs_approval {
-                        let mut approval = format_approval_request(&validated.action, &validated);
+                        let (provider, routed_model, cost) =
+                            approval_route_details(&validated.action, &context, project_root_ref);
+                        let mut approval = format_approval_request_with_context(
+                            &validated.action,
+                            &validated,
+                            &context,
+                            &provider,
+                            &routed_model,
+                            &cost,
+                        );
                         if specialist == "model_sheet" {
                             approval.push_str("\n\n");
                             approval.push_str(&specialists::model_sheet_approval_notes(
@@ -935,67 +1148,99 @@ pub fn director_turn(
     finish_director_reply(app.clone(), director_turn_inner(app, request))
 }
 
-pub fn director_approve(
-    app: HostCtx,
-    id: String,
-    model: String,
-    api_id: Option<String>,
-    mut context: DirectorContext,
-) -> Result<DirectorTurnResponse, String> {
+pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse, String> {
     use crate::director_actions::{validate_action, ActionKind};
     use crate::specialists::{self, SpecialistLlm};
 
-    let model = model.trim().to_string();
-    if model.is_empty() {
-        return Err("Select a chat model in the chat dropdown (or Settings) first.".into());
-    }
     let pending = crate::pending::take(id.trim())?;
-    context.project_root = crate::session::root().map(|path| path.to_string_lossy().into_owned());
-    let project_root = context
+    let current_root = crate::session::root();
+    if pending.project_root != current_root {
+        return Err(
+            "The project changed after this approval was issued. Request a new plan.".into(),
+        );
+    }
+    let project_root = pending
         .project_root
-        .as_deref()
-        .filter(|root| !root.is_empty())
-        .map(str::to_string);
+        .as_ref()
+        .map(|root| root.to_string_lossy().into_owned());
     let project_root_ref = project_root.as_deref();
-    let validated = validate_action(pending, project_root_ref).map_err(|error| error.to_string())?;
+    let has_snapshot = pending.context.is_some();
+    let mut context = match pending.context {
+        Some(value) => serde_json::from_value::<DirectorContext>(value)
+            .map_err(|error| format!("Stored approval context is invalid: {error}"))?,
+        None => {
+            let mut context = DirectorContext::default();
+            hydrate_context_from_app(&app, &mut context)?;
+            context
+        }
+    };
+    if has_snapshot {
+        let mut current_routing = DirectorContext::default();
+        hydrate_context_from_app(&app, &mut current_routing)?;
+        if !routing_snapshot_matches(&context, &current_routing) {
+            return Err(
+                "Provider or model settings changed after approval was issued. Request a new plan."
+                    .into(),
+            );
+        }
+    }
+    context.project_root = project_root.clone();
+    let mut validated =
+        validate_action(pending.action, project_root_ref).map_err(|error| error.to_string())?;
+    crate::text_writes::append_staged_paths_for_action(&mut validated)?;
+    crate::director_actions::append_context_attachments(
+        &mut validated,
+        &context.attached_paths,
+        project_root_ref,
+    )?;
+    if let Some(expected) = pending.input_fingerprints.as_ref() {
+        let current = crate::director_actions::snapshot_input_files(&validated)?;
+        if expected != &current {
+            return Err("An approved input file changed after the approval card was issued. Request a new plan.".into());
+        }
+    }
 
-    let chat_api_id = api_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            settings::list_apis(&app).ok().and_then(|apis| {
-                apis.into_iter()
-                    .find(|api| api.enabled && api.kind != "elevenlabs" && api.kind != "sync-labs")
-                    .map(|api| api.id)
-            })
-        });
-    let bound = chat_api_id
-        .as_deref()
-        .map(|api_id| settings::api_key_for(&app, api_id))
-        .transpose()?;
+    let specialist = validated.action.specialist.as_deref().unwrap_or("");
+    let planner_llm = if specialist_needs_planner_llm(specialist) {
+        let planner_model = context.planner_model.as_ref().ok_or_else(|| {
+            "This approval needs the chat model used to plan it; request a new plan.".to_string()
+        })?;
+        let apis = settings::list_apis(&app)?;
+        if !apis
+            .iter()
+            .any(|api| api.enabled && api.id == planner_model.api_id)
+        {
+            return Err("The chat provider used to plan this action is no longer enabled. Request a new plan.".into());
+        }
+        let (api, key) = settings::api_key_for(&app, &planner_model.api_id)?;
+        Some((api, key, planner_model.model_id.clone()))
+    } else {
+        None
+    };
+    let response_model = context
+        .planner_model
+        .as_ref()
+        .map(|model| model.model_id.clone())
+        .unwrap_or_else(|| "approved action".into());
+
     app.emit(
         "director-progress",
         "Host executing approved action…".to_string(),
     );
     let outcome = match validated.action.action {
         ActionKind::RunSpecialist => {
-            let (api, key) = bound.ok_or_else(|| {
-                "Select a chat model (with an API) before approving this plan.".to_string()
-            })?;
-            let specialist_llm = SpecialistLlm {
-                api: &api,
-                api_key: &key,
-                model: &model,
+            let specialist_llm = planner_llm.as_ref().map(|(api, key, model)| SpecialistLlm {
+                api,
+                api_key: key,
+                model,
                 user_question: "",
-            };
+            });
             specialists::run_specialist(
                 &app,
                 &context,
                 &validated,
                 project_root_ref,
-                Some(&specialist_llm),
+                specialist_llm.as_ref(),
             )
         }
         ActionKind::Inspect => specialists::run_inspect(&validated, project_root_ref).map(|text| {
@@ -1016,7 +1261,7 @@ pub fn director_approve(
                 app,
                 Ok(DirectorTurnResponse {
                     reply: format!("Host could not execute the approved action: {error}"),
-                    model,
+                    model: response_model,
                     tool_events: vec!["approve:error".into()],
                     continue_suggested: false,
                 }),
@@ -1027,7 +1272,7 @@ pub fn director_approve(
         app,
         Ok(DirectorTurnResponse {
             reply: result.message,
-            model,
+            model: response_model,
             tool_events: vec![format!(
                 "approve:{}",
                 validated
@@ -1126,6 +1371,17 @@ Here is the action:
         ));
         assert!(looks_like_paid_approval(
             "I'd like you to send the attached scene for video generation."
+        ));
+    }
+
+    #[test]
+    fn chat_approval_words_do_not_preserve_or_execute_a_parked_plan() {
+        assert!(looks_like_paid_approval("ok"));
+        assert!(looks_like_continue_request("continue"));
+        assert!(!should_keep_pending_for_chat_turn("ok"));
+        assert!(!should_keep_pending_for_chat_turn("continue"));
+        assert!(should_keep_pending_for_chat_turn(
+            "Which model will this use?"
         ));
     }
 
@@ -1302,5 +1558,164 @@ Here is the action:
                 .and_then(|v| v.as_str()),
             Some("Videos/misty_pine_forest_at_dawn.mp4")
         );
+    }
+
+    #[test]
+    fn renderer_model_defaults_are_replaced_by_enabled_host_settings() {
+        let mut context = DirectorContext::default();
+        context.capability_defaults.insert(
+            "image.text_to_image".into(),
+            Some(ModelRef {
+                api_id: "renderer-api".into(),
+                model_id: "untrusted-model".into(),
+            }),
+        );
+        context.adult_content_enabled = true;
+        let settings = serde_json::json!({
+            "capabilityDefaults": {
+                "image.text_to_image": {
+                    "apiId": "host-api",
+                    "modelId": "host-model"
+                }
+            },
+            "adultContentEnabled": false
+        });
+        let apis = vec![settings::ApiEntry {
+            id: "host-api".into(),
+            name: "Host Provider".into(),
+            kind: "image-provider".into(),
+            base_url: "https://provider.invalid".into(),
+            api_key: String::new(),
+            secret_key: String::new(),
+            enabled: true,
+        }];
+
+        hydrate_routing_context(&mut context, &settings, &apis).unwrap();
+
+        let route = context.capability_defaults["image.text_to_image"]
+            .as_ref()
+            .unwrap();
+        assert_eq!(route.api_id, "host-api");
+        assert_eq!(route.model_id, "host-model");
+        assert_eq!(
+            context.api_labels["host-api"],
+            "Host Provider (image-provider)"
+        );
+        assert!(!context.adult_content_enabled);
+        assert!(context.adult_capability_defaults.is_empty());
+    }
+
+    #[test]
+    fn workflow_approval_route_disclosure_uses_host_model_defaults() {
+        let mut context = DirectorContext::default();
+        context.capability_defaults.insert(
+            "image.text_to_image".into(),
+            Some(ModelRef {
+                api_id: "host-api".into(),
+                model_id: "host-image-model".into(),
+            }),
+        );
+        context
+            .api_labels
+            .insert("host-api".into(), "Image Provider (image-provider)".into());
+        let action = crate::director_actions::DirectorAction {
+            action: ActionKind::RunSpecialist,
+            specialist: Some("still_image".into()),
+            inputs: serde_json::json!({ "prompt": "approved input" })
+                .as_object()
+                .unwrap()
+                .clone(),
+            message: None,
+            op: None,
+            path: None,
+        };
+
+        let (provider, model, cost) = approval_route_details(&action, &context, Some("/project"));
+
+        assert!(provider.contains("Image Provider"), "{provider}");
+        assert!(model.contains("host-image-model"), "{model}");
+        assert!(cost.contains("Unknown"), "{cost}");
+    }
+
+    #[test]
+    fn workflow_card_parks_the_host_resolved_action_and_input_snapshot() {
+        let _session_guard = crate::session::test_session_lock();
+        let _pending_guard = crate::pending::test_pending_lock();
+        crate::session::close();
+        crate::pending::cancel_all();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(root.join("Refs")).unwrap();
+        std::fs::write(root.join("Refs/source.png"), b"source image").unwrap();
+        let root = root.canonicalize().unwrap();
+        crate::session::open(root.to_str().unwrap()).unwrap();
+        let app = crate::ctx::HostCtx::new(dir.path().join("settings"));
+        let settings = serde_json::json!({
+            "apis": [{
+                "id": "host-api",
+                "name": "Host Provider",
+                "kind": "image-provider",
+                "baseUrl": "https://provider.invalid",
+                "apiKey": "",
+                "secretKey": "",
+                "enabled": true
+            }],
+            "capabilityDefaults": {
+                "image.text_to_image": {
+                    "apiId": "host-api",
+                    "modelId": "host-image-model"
+                }
+            }
+        });
+        std::fs::write(app.settings_path(), serde_json::to_vec(&settings).unwrap()).unwrap();
+        let action = crate::director_actions::DirectorAction {
+            action: ActionKind::RunSpecialist,
+            specialist: Some("still_image".into()),
+            inputs: serde_json::json!({
+                "prompt": "approved prompt",
+                "reference_images": ["Refs/source.png"],
+                "output_path": "Stills/output.png"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            message: None,
+            op: None,
+            path: None,
+        };
+        let validated = validate_action(action.clone(), Some(root.to_str().unwrap())).unwrap();
+
+        let card = format_approval_request_for_app(
+            &app,
+            &action,
+            &validated,
+            Some(root.to_str().unwrap()),
+        )
+        .unwrap();
+        assert!(card.contains("Provider: Host Provider (image-provider)"));
+        assert!(card.contains("Model: image.text_to_image: `host-image-model`"));
+        assert!(card.contains("Cost estimate: Unknown; provider pricing applies"));
+        assert!(card.contains("Refs/source.png"));
+        assert!(card.contains("Stills/output.png"));
+
+        let id = card
+            .split(crate::pending::APPROVE_TOKEN_PREFIX)
+            .nth(1)
+            .and_then(|rest| rest.strip_suffix("]]"))
+            .expect("one-time approval ID");
+        let pending = crate::pending::take(id).unwrap();
+        assert_eq!(pending.action.specialist.as_deref(), Some("still_image"));
+        assert_eq!(pending.project_root, Some(root));
+        assert!(pending
+            .input_fingerprints
+            .unwrap()
+            .get("reference_images[0]")
+            .is_some());
+        assert!(
+            crate::pending::take(id).is_err(),
+            "approval cannot be replayed"
+        );
+        crate::session::close();
+        crate::pending::cancel_all();
     }
 }

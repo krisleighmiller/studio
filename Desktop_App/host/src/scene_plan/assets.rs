@@ -125,14 +125,21 @@ struct ApprovedAudio {
     path: String,
 }
 
-fn resolve(raw: &str, dir: &Path) -> Option<PathBuf> {
+fn resolve(raw: &str, dir: &Path, project_root: &Path) -> Option<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
     }
+    let requested = Path::new(raw);
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        dir.join(requested)
+    };
+    let root = project_root.to_string_lossy();
     crate::project_path::resolve(
-        raw,
-        Some(dir.to_string_lossy().as_ref()),
+        &candidate.to_string_lossy(),
+        Some(root.as_ref()),
         crate::project_path::PathIntent::Read,
     )
     .ok()
@@ -145,7 +152,18 @@ impl AssetRegistry {
             root: Some(project_root.to_path_buf()),
             ..Default::default()
         };
-        let chars_dir = project_root.join("Characters");
+        let root = project_root.to_string_lossy();
+        let Some(chars_dir) = crate::project_path::resolve(
+            "Characters",
+            Some(root.as_ref()),
+            crate::project_path::PathIntent::Read,
+        )
+        .ok()
+        .map(|path| path.into_path_buf()) else {
+            reg.scan_notes
+                .push("refusing to read Characters/ outside the project root".into());
+            return reg;
+        };
         let Ok(read) = fs::read_dir(&chars_dir) else {
             reg.scan_notes.push(format!(
                 "no Characters/ directory at {}",
@@ -156,11 +174,22 @@ impl AssetRegistry {
         let mut dirs: Vec<PathBuf> = read
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.is_dir())
+            .filter_map(|path| {
+                if !path.is_dir() {
+                    return None;
+                }
+                crate::project_path::resolve(
+                    &path.to_string_lossy(),
+                    Some(root.as_ref()),
+                    crate::project_path::PathIntent::Read,
+                )
+                .ok()
+                .map(|resolved| resolved.into_path_buf())
+            })
             .collect();
         dirs.sort();
         for dir in dirs {
-            if let Some(c) = scan_character_dir(&dir, &mut reg.scan_notes) {
+            if let Some(c) = scan_character_dir(&dir, project_root, &mut reg.scan_notes) {
                 reg.characters.push(c);
             }
         }
@@ -246,14 +275,19 @@ impl AssetRegistry {
     }
 }
 
-fn scan_character_dir(dir: &Path, notes: &mut Vec<String>) -> Option<CharacterAssets> {
+fn scan_character_dir(
+    dir: &Path,
+    project_root: &Path,
+    notes: &mut Vec<String>,
+) -> Option<CharacterAssets> {
     let dir_name = dir.file_name()?.to_string_lossy().to_string();
     let manifest_path = [
         dir.join("model_sheet_manifest.yaml"),
         dir.join("model_sheet").join("model_sheet_manifest.yaml"),
     ]
     .into_iter()
-    .find(|p| p.is_file());
+    .filter_map(|path| resolve(&path.to_string_lossy(), dir, project_root))
+    .find(|path| path.is_file());
     let mut c = CharacterAssets {
         name: dir_name,
         dir: dir.to_path_buf(),
@@ -274,7 +308,7 @@ fn scan_character_dir(dir: &Path, notes: &mut Vec<String>) -> Option<CharacterAs
                     if !m.character.trim().is_empty() {
                         c.name = m.character.trim().to_string();
                     }
-                    match resolve(&m.identity_source.approval_shot_path, dir) {
+                    match resolve(&m.identity_source.approval_shot_path, dir, project_root) {
                         Some(p) if p.is_file() => c.approval_shot = Some(p),
                         Some(_) => c
                             .notes
@@ -283,7 +317,7 @@ fn scan_character_dir(dir: &Path, notes: &mut Vec<String>) -> Option<CharacterAs
                     }
                     for s in m.shots {
                         let saved = s.status.trim().eq_ignore_ascii_case("saved");
-                        match (saved, resolve(&s.path, dir)) {
+                        match (saved, resolve(&s.path, dir, project_root)) {
                             (true, Some(p)) if p.is_file() => c.shots.push(ShotAsset {
                                 shot_id: s.shot_id,
                                 path: p,
@@ -299,7 +333,7 @@ fn scan_character_dir(dir: &Path, notes: &mut Vec<String>) -> Option<CharacterAs
                         }
                     }
                     for r in m.identity_source.reference_images {
-                        if let Some(p) = resolve(&r, dir).filter(|p| p.is_file()) {
+                        if let Some(p) = resolve(&r, dir, project_root).filter(|p| p.is_file()) {
                             if !c.owns_image(&p.to_string_lossy()) {
                                 c.shots.push(ShotAsset {
                                     shot_id: "reference_image".into(),
@@ -317,32 +351,38 @@ fn scan_character_dir(dir: &Path, notes: &mut Vec<String>) -> Option<CharacterAs
         }
         None => c.notes.push("no model_sheet_manifest.yaml".into()),
     }
-    c.voice = find_voice_profile(dir, &c.name, notes);
+    c.voice = find_voice_profile(dir, project_root, &c.name, notes);
     Some(c)
 }
 
-fn approved_sample(character_dir: &Path, profile: &VoiceProfile) -> Option<PathBuf> {
+fn approved_sample(
+    character_dir: &Path,
+    project_root: &Path,
+    profile: &VoiceProfile,
+) -> Option<PathBuf> {
     profile.approved_audio.iter().find_map(|audio| {
-        let raw = audio.path.trim();
-        if raw.is_empty() {
-            return None;
-        }
-        let path = Path::new(raw);
-        let resolved = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            character_dir.join(path)
-        };
+        let resolved = resolve(&audio.path, character_dir, project_root)?;
         resolved.is_file().then_some(resolved)
     })
 }
 
-fn find_voice_profile(dir: &Path, character: &str, notes: &mut Vec<String>) -> Option<VoiceAsset> {
+fn find_voice_profile(
+    dir: &Path,
+    project_root: &Path,
+    character: &str,
+    notes: &mut Vec<String>,
+) -> Option<VoiceAsset> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     for d in [dir.join("voice"), dir.to_path_buf()] {
+        let Some(d) = resolve(&d.to_string_lossy(), dir, project_root).filter(|path| path.is_dir())
+        else {
+            continue;
+        };
         if let Ok(read) = fs::read_dir(&d) {
             for entry in read.flatten() {
-                let p = entry.path();
+                let Some(p) = resolve(&entry.path().to_string_lossy(), dir, project_root) else {
+                    continue;
+                };
                 let name = p
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -371,7 +411,7 @@ fn find_voice_profile(dir: &Path, character: &str, notes: &mut Vec<String>) -> O
                     .filter(|id| !id.is_empty())
                     .unwrap_or("")
                     .to_string();
-                let sample_path = approved_sample(dir, &v);
+                let sample_path = approved_sample(dir, project_root, &v);
                 if voice_id.is_empty() && sample_path.is_none() {
                     notes.push(format!(
                         "{}: voice profile has no voice_id and no audio file on disk",
@@ -543,5 +583,46 @@ approved_audio:
         assert!(reg.is_empty());
         assert!(reg.scan_notes[0].contains("no Characters/ directory"));
         assert!(reg.prompt_block().contains("- none found"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_does_not_follow_character_or_voice_asset_paths_outside_project() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        let external_char = outside.join("Characters/Tom Vale");
+        let external_image = external_char.join("model_sheet/tom.png");
+        fs::create_dir_all(external_image.parent().unwrap()).unwrap();
+        fs::write(&external_image, b"image").unwrap();
+        fs::write(
+            external_char.join("model_sheet_manifest.yaml"),
+            "character: Tom Vale\nidentity_source:\n  approval_shot_path: model_sheet/tom.png\nshots:\n  - shot_id: closeup_front\n    path: model_sheet/tom.png\n    status: saved\n",
+        )
+        .unwrap();
+        fs::create_dir_all(&root).unwrap();
+        symlink(outside.join("Characters"), root.join("Characters")).unwrap();
+        assert!(AssetRegistry::discover(&root).is_empty());
+
+        let project_chars = root.join("Characters");
+        fs::remove_file(&project_chars).unwrap();
+        fs::create_dir_all(project_chars.join("Tom Vale/voice")).unwrap();
+        let external_audio = outside.join("private.wav");
+        fs::write(&external_audio, b"RIFF").unwrap();
+        fs::write(
+            project_chars.join("Tom Vale/voice/Tom_voice_profile.yaml"),
+            format!(
+                "profile_version: 1\ncharacter: Tom Vale\napproved_audio:\n  - path: {}\n",
+                external_audio.display()
+            ),
+        )
+        .unwrap();
+        let registry = AssetRegistry::discover(&root);
+        assert!(registry
+            .find_character("Tom")
+            .and_then(|character| character.voice.as_ref())
+            .is_none());
     }
 }

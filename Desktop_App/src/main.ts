@@ -3315,15 +3315,10 @@ async function approveDirectorAction(
 ): Promise<void> {
   const tab = activeChat();
   if (!tab || tab.busy || chatSendInFlight) return;
-  const selected = getSettings().selectedChatModel;
-  if (!selected?.modelId) {
-    setStatus("Select a chat model before approving");
-    return;
-  }
   tab.busy = true;
   chatSendInFlight = true;
   renderChat();
-  setStatus("Running approved plan…", selected.modelId);
+  setStatus("Running approved plan…");
   try {
     const result = await invoke<{
       reply: string;
@@ -3332,9 +3327,6 @@ async function approveDirectorAction(
       continueSuggested?: boolean;
     }>("director_approve", {
       id: actionId,
-      model: selected.modelId,
-      apiId: selected.apiId,
-      context: currentDirectorContext(),
     });
     const source = tab.messages.find((message) => message.id === messageId);
     if (source) {
@@ -4739,7 +4731,13 @@ async function boot(): Promise<void> {
       });
       setChatCollapsed(false);
       renderChat();
-      setStatus("Generation ready", "Approve in chat to spend");
+      const hasApprovalId = /\[\[workbench_approve:[A-Za-z0-9]+\]\]/.test(text);
+      setStatus(
+        hasApprovalId ? "Approval ready" : "Plan prepared",
+        hasApprovalId
+          ? "Use the one-time approval button; chat text cannot approve"
+          : "No provider operation has been approved or started",
+      );
     },
   });
   try {

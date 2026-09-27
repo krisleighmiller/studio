@@ -568,6 +568,26 @@ pub fn prepare_render(
     scene_id: u32,
     cut_number: u32,
 ) -> Result<(String, String), String> {
+    prepare_render_inner(root, state, scene_id, cut_number, None)
+}
+
+pub fn prepare_render_with_host(
+    app: &crate::ctx::HostCtx,
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+) -> Result<(String, String), String> {
+    prepare_render_inner(root, state, scene_id, cut_number, Some(app))
+}
+
+fn prepare_render_inner(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+    approval_app: Option<&crate::ctx::HostCtx>,
+) -> Result<(String, String), String> {
     let id = CutId::new(scene_id, cut_number);
     // Render preflight refreshes host-owned fields and concrete source
     // bindings without replacing the user-approved production prompt.
@@ -655,7 +675,16 @@ pub fn prepare_render(
     let mut card = format!(
         "Render Scene {scene_id} Cut {cut_number}\nProduction note: `{handoff_path}`\nVisual source: `{source_label}`\nNew take: `{output_path}`\n\n"
     );
-    card.push_str(&format_approval_request(&action, &validated));
+    let approval = match approval_app {
+        Some(app) => crate::director::format_approval_request_for_app(
+            app,
+            &action,
+            &validated,
+            Some(&root_s),
+        )?,
+        None => format_approval_request(&action, &validated),
+    };
+    card.push_str(&approval);
 
     let mut input_asset_ids: Vec<String> = cut
         .visual_source
@@ -696,10 +725,14 @@ pub fn prepare_render(
             ..JobRecord::open(job_id, "render")
         });
     }
-    Ok((
-        card,
-        format!("Render for Cut {cut_number} is ready. Approve the provider plan in chat."),
-    ))
+    let note = if approval_app.is_some() {
+        format!("Render for Cut {cut_number} is ready. Use the one-time approval button; chat text cannot approve it.")
+    } else {
+        format!(
+            "Render plan for Cut {cut_number} prepared; no provider operation is authorized here."
+        )
+    };
+    Ok((card, note))
 }
 
 #[cfg(test)]

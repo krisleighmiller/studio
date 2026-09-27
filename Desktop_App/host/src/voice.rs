@@ -151,12 +151,17 @@ fn write_profile_files(
     let profile_path = character_directory
         .join("voice")
         .join(format!("{stem}_voice_profile.yaml"));
-    // The sheet is optional. A guessed or stale path must not block the voice profile.
+    // The sheet is optional, and its path must be scoped to the open project (or a
+    // one-time grant). A guessed, stale, or out-of-project path must not block the
+    // voice profile and must never append to a file the host has not authorized.
     let reference_path = character_reference_path
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .filter(|path| path.is_file());
+        .and_then(|raw| {
+            crate::session::authorize_user_path(raw, crate::project_path::PathIntent::Write)
+                .ok()
+                .filter(|path| path.is_file())
+        });
     let metadata_path = if let Some(reference_path) = reference_path {
         append_character_audio_profile(&reference_path, profile)?;
         // Also keep a machine-readable sidecar for pipeline tools.
@@ -228,10 +233,8 @@ pub fn voice_start_recording(
         return Err("A recording is already in progress.".into());
     }
 
-    let path = crate::session::authorize_user_path(
-        &output_path,
-        crate::project_path::PathIntent::Write,
-    )?;
+    let path =
+        crate::session::authorize_user_path(&output_path, crate::project_path::PathIntent::Write)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("Could not create recording directory: {error}"))?;

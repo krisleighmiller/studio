@@ -228,10 +228,7 @@ fn navigation_rows(stages: &[NavRow<'_>], scene: &SceneRecord) -> Vec<StageNav> 
 }
 
 pub fn recipe_key(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['-', ' '], "_")
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
 fn recipe_slug(value: &str) -> bool {
@@ -577,14 +574,25 @@ mod tests {
     fn narrative_graph_keeps_the_slice_and_requires_cast_and_mouth() {
         let narrative = graph(ProductionRecipe::narrative());
         let _montage = graph(ProductionRecipe::montage());
-        let ids: Vec<_> = narrative.stages.iter().map(|stage| stage.id.as_str()).collect();
-        let expected: Vec<_> = WorkflowStage::ALL.iter().map(|stage| stage.as_str()).collect();
+        let ids: Vec<_> = narrative
+            .stages
+            .iter()
+            .map(|stage| stage.id.as_str())
+            .collect();
+        let expected: Vec<_> = WorkflowStage::ALL
+            .iter()
+            .map(|stage| stage.as_str())
+            .collect();
         assert_eq!(ids, expected);
         assert!(narrative.requires_role("cast"));
         assert!(narrative.requires_role("voice"));
         assert!(narrative.requires_role("mouth_policy"));
         assert!(narrative.stages.iter().any(|stage| {
-            stage.id == "render" && stage.depends_on.iter().any(|item| item == "production_notes")
+            stage.id == "render"
+                && stage
+                    .depends_on
+                    .iter()
+                    .any(|item| item == "production_notes")
         }));
     }
 
@@ -595,14 +603,14 @@ mod tests {
         assert!(!graph.requires_role("cast"));
         assert!(!graph.requires_role("voice"));
         assert!(!graph.requires_role("mouth_policy"));
-        assert!(graph
-            .stages
-            .iter()
-            .all(|stage| {
-                stage.id != "characters"
-                    && !stage.required_roles.iter().any(|role| role == "mouth_policy")
-                    && !stage.required_roles.iter().any(|role| role == "cast")
-            }));
+        assert!(graph.stages.iter().all(|stage| {
+            stage.id != "characters"
+                && !stage
+                    .required_roles
+                    .iter()
+                    .any(|role| role == "mouth_policy")
+                && !stage.required_roles.iter().any(|role| role == "cast")
+        }));
 
         let mut state = ProjectState::new();
         state.profile = Some(ProductionProfile {
@@ -797,7 +805,10 @@ mod tests {
             .any(|item| item.id == "assemble" && item.work_area == "finish"));
         let intent = nav.iter().find(|item| item.id == "scene_intent").unwrap();
         assert!(!intent.available);
-        assert_eq!(intent.disabled_reason.as_deref(), Some("Waiting on Characters."));
+        assert_eq!(
+            intent.disabled_reason.as_deref(),
+            Some("Waiting on Characters.")
+        );
         assert!(nav.iter().any(|item| item.id == "script" && item.available));
     }
 
@@ -813,7 +824,12 @@ mod tests {
                 .stages
                 .iter()
                 .find(|stage| stage.id == item.id)
-                .is_some_and(|stage| !stage.required_roles.iter().any(|role| role == "mouth_policy"))
+                .is_some_and(|stage| {
+                    !stage
+                        .required_roles
+                        .iter()
+                        .any(|role| role == "mouth_policy")
+                })
         }));
         assert_eq!(nav[0].id, "script");
         assert_eq!(nav[1].id, "scene_intent");
@@ -874,7 +890,10 @@ mod tests {
             alias.profile.as_ref().unwrap().recipe.as_str(),
             "narrative_dialogue"
         );
-        assert_eq!(alias.profile.as_ref().unwrap().recipe.label(), "Narrative dialogue");
+        assert_eq!(
+            alias.profile.as_ref().unwrap().recipe.label(),
+            "Narrative dialogue"
+        );
 
         let future = ProjectState::from_json(r#"{"version":99}"#);
         assert!(future.is_err());
@@ -947,7 +966,9 @@ mod tests {
         let mut state = ProjectState::new();
         let scene = state.scene_mut(1, "Dawn");
         scene.source_excerpt = Some("Light.".into());
-        scene.stages.set_extension("color_script", StageStatus::Present);
+        scene
+            .stages
+            .set_extension("color_script", StageStatus::Present);
         apply_stages(&mut state);
         let loaded = ProjectState::from_json(&state.to_json().unwrap()).unwrap();
         let scene = loaded.scene(1).unwrap();
@@ -990,8 +1011,14 @@ mod tests {
         }"#;
         assert!(ProductionRecipe::parse("color_grade").is_none());
         let mut state = ProjectState::from_json(json).unwrap();
-        assert_eq!(state.profile.as_ref().unwrap().recipe.as_str(), "color_grade");
-        assert!(state.notes.iter().all(|note| !note.contains("Unknown recipe")));
+        assert_eq!(
+            state.profile.as_ref().unwrap().recipe.as_str(),
+            "color_grade"
+        );
+        assert!(state
+            .notes
+            .iter()
+            .all(|note| !note.contains("Unknown recipe")));
         apply_stages(&mut state);
         let scene = state.scene(1).unwrap();
         assert_eq!(scene.stages.characters, StageStatus::Missing);
@@ -1000,17 +1027,34 @@ mod tests {
         let report = project_report(&state);
         assert_eq!(report.recipe.id, "color_grade");
         assert_eq!(report.recipe.label, "Color grade");
-        let ids: Vec<_> = report.recipe.stages.iter().map(|stage| stage.id.as_str()).collect();
+        let ids: Vec<_> = report
+            .recipe
+            .stages
+            .iter()
+            .map(|stage| stage.id.as_str())
+            .collect();
         assert_eq!(ids, ["script", "color_script", "assemble"]);
         assert!(!ids.contains(&"characters"));
         assert!(report.recipe.stages.iter().all(|stage| {
-            stage.required_roles.iter().all(|role| role != "mouth_policy" && role != "cast")
+            stage
+                .required_roles
+                .iter()
+                .all(|role| role != "mouth_policy" && role != "cast")
         }));
         assert_eq!(
-            report.recipe.stages.iter().map(|stage| stage.work_area.as_str()).collect::<Vec<_>>(),
+            report
+                .recipe
+                .stages
+                .iter()
+                .map(|stage| stage.work_area.as_str())
+                .collect::<Vec<_>>(),
             ["plan", "produce", "finish"]
         );
-        let nav_ids: Vec<_> = report.scenes[0].navigation.iter().map(|item| item.id.as_str()).collect();
+        let nav_ids: Vec<_> = report.scenes[0]
+            .navigation
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
         assert_eq!(nav_ids, ids);
         let color = report.scenes[0]
             .navigation
@@ -1022,7 +1066,10 @@ mod tests {
         assert!(color.available);
         assert!(color.disabled_reason.is_none());
         let again = ProjectState::from_json(&state.to_json().unwrap()).unwrap();
-        assert_eq!(again.profile.as_ref().unwrap().recipe.as_str(), "color_grade");
+        assert_eq!(
+            again.profile.as_ref().unwrap().recipe.as_str(),
+            "color_grade"
+        );
 
         let blocked = ProjectState::from_json(
             r#"{
@@ -1050,7 +1097,10 @@ mod tests {
             .find(|item| item.id == "color_script")
             .unwrap();
         assert!(!waiting.available);
-        assert_eq!(waiting.disabled_reason.as_deref(), Some("Waiting on Track."));
+        assert_eq!(
+            waiting.disabled_reason.as_deref(),
+            Some("Waiting on Track.")
+        );
 
         let future_schema = ProjectState::from_json(
             r#"{"version":1,"profile":{"recipe":"opera","recipe_document":{"version":9,"id":"opera","label":"Opera","stages":[{"id":"grade","label":"Grade","work_area":"finish"}]},"deliverables":[]}}"#,
@@ -1073,7 +1123,10 @@ mod tests {
             broken.profile.as_ref().unwrap().recipe,
             ProductionRecipe::narrative()
         );
-        assert!(broken.notes.iter().any(|note| note.contains("Unknown recipe `opera`")));
+        assert!(broken
+            .notes
+            .iter()
+            .any(|note| note.contains("Unknown recipe `opera`")));
         assert!(broken.profile.as_ref().unwrap().recipe_document.is_none());
     }
 }

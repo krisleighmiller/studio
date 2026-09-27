@@ -19,6 +19,20 @@ use std::path::{Path, PathBuf};
 const MAX_SCENE_REFS: usize = 4;
 const START_FRAME_INSTRUCTION: &str = "Create one production-ready still image: the frozen opening frame before any dialogue or movement begins. Preserve the named characters' identities from their model sheets and match approved scene references. Any visible mouth must be naturally relaxed and closed, ready for later animation. Do not render speech, lip movement, captions, labels, contact sheets, or model-sheet layouts.";
 
+fn approval_details(
+    app: Option<&crate::ctx::HostCtx>,
+    action: &DirectorAction,
+    validated: &crate::director_actions::ValidatedAction,
+    root: &str,
+) -> Result<String, String> {
+    match app {
+        Some(app) => {
+            crate::director::format_approval_request_for_app(app, action, validated, Some(root))
+        }
+        None => Ok(format_approval_request(action, validated)),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationRef {
     pub asset_id: String,
@@ -472,6 +486,26 @@ pub fn prepare_generate(
     scene_id: u32,
     cut_number: u32,
 ) -> Result<(String, String), String> {
+    prepare_generate_inner(root, state, scene_id, cut_number, None)
+}
+
+pub fn prepare_generate_with_host(
+    app: &crate::ctx::HostCtx,
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+) -> Result<(String, String), String> {
+    prepare_generate_inner(root, state, scene_id, cut_number, Some(app))
+}
+
+fn prepare_generate_inner(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+    approval_app: Option<&crate::ctx::HostCtx>,
+) -> Result<(String, String), String> {
     let cut = state
         .scenes
         .iter_mut()
@@ -572,7 +606,12 @@ pub fn prepare_generate(
     );
     append_refs(&mut card, &refs);
     card.push_str("\n\n");
-    card.push_str(&format_approval_request(&action, &validated));
+    card.push_str(&approval_details(
+        approval_app,
+        &action,
+        &validated,
+        &root_s,
+    )?);
     push_job(
         state,
         "cut_start_frame",
@@ -583,10 +622,12 @@ pub fn prepare_generate(
             .map(|reference| reference.asset_id.clone())
             .collect(),
     );
-    Ok((
-        card,
-        format!("Start-frame generate ready for Scene {scene_id} Cut {cut_number}. Approve the still_image plan in chat."),
-    ))
+    let note = if approval_app.is_some() {
+        format!("Start-frame generate ready for Scene {scene_id} Cut {cut_number}. Use the one-time approval button; chat text cannot approve it.")
+    } else {
+        format!("Start-frame plan prepared for Scene {scene_id} Cut {cut_number}; no provider operation is authorized here.")
+    };
+    Ok((card, note))
 }
 
 pub fn prepare_edit(
@@ -596,6 +637,38 @@ pub fn prepare_edit(
     cut_number: u32,
     asset_id: &str,
     brief: &str,
+) -> Result<(String, String), String> {
+    prepare_edit_inner(root, state, scene_id, cut_number, asset_id, brief, None)
+}
+
+pub fn prepare_edit_with_host(
+    app: &crate::ctx::HostCtx,
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+    asset_id: &str,
+    brief: &str,
+) -> Result<(String, String), String> {
+    prepare_edit_inner(
+        root,
+        state,
+        scene_id,
+        cut_number,
+        asset_id,
+        brief,
+        Some(app),
+    )
+}
+
+fn prepare_edit_inner(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    cut_number: u32,
+    asset_id: &str,
+    brief: &str,
+    approval_app: Option<&crate::ctx::HostCtx>,
 ) -> Result<(String, String), String> {
     let brief = brief.trim();
     if brief.is_empty() {
@@ -655,7 +728,12 @@ pub fn prepare_edit(
     );
     append_refs(&mut card, &refs);
     card.push_str("\n\n");
-    card.push_str(&format_approval_request(&action, &validated));
+    card.push_str(&approval_details(
+        approval_app,
+        &action,
+        &validated,
+        &root_s,
+    )?);
     let mut input_asset_ids = vec![source.id];
     for reference in refs {
         if !input_asset_ids.contains(&reference.asset_id) {
@@ -670,10 +748,12 @@ pub fn prepare_edit(
         rel,
         input_asset_ids,
     );
-    Ok((
-        card,
-        format!("Start-frame edit ready for Scene {scene_id} Cut {cut_number}. Approve the still_image plan in chat."),
-    ))
+    let note = if approval_app.is_some() {
+        format!("Start-frame edit ready for Scene {scene_id} Cut {cut_number}. Use the one-time approval button; chat text cannot approve it.")
+    } else {
+        format!("Start-frame edit plan prepared for Scene {scene_id} Cut {cut_number}; no provider operation is authorized here.")
+    };
+    Ok((card, note))
 }
 
 pub fn attach_image(
@@ -863,7 +943,7 @@ pub fn on_still_saved(project_root: Option<&str>, requested_path: &str) -> Optio
         return None;
     }
     let actual = actual_path(root, requested_path)?;
-    let rel = relativize(root, &actual);
+    let rel = relativize(root, &actual)?;
     if !is_start_frame_rel(&rel) {
         return None;
     }
@@ -1010,12 +1090,14 @@ fn same_stem(a: &str, b: &str) -> bool {
 }
 
 fn actual_path(root: &Path, requested: &str) -> Option<PathBuf> {
-    let requested = PathBuf::from(requested);
-    let requested = if requested.is_absolute() {
-        requested
-    } else {
-        root.join(requested)
-    };
+    let root_string = root.to_string_lossy();
+    let requested = crate::project_path::resolve(
+        requested,
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Read,
+    )
+    .ok()?
+    .into_path_buf();
     if requested.is_file() {
         return Some(requested);
     }
@@ -1025,16 +1107,29 @@ fn actual_path(root: &Path, requested: &str) -> Option<PathBuf> {
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.is_file() && path.file_stem() == Some(stem) && is_image_path(path))
+        .find_map(|path| {
+            if path.file_stem() != Some(stem) || !is_image_path(&path) {
+                return None;
+            }
+            let confined = crate::project_path::resolve(
+                &path.to_string_lossy(),
+                Some(root_string.as_ref()),
+                crate::project_path::PathIntent::Read,
+            )
+            .ok()?
+            .into_path_buf();
+            confined.is_file().then_some(confined)
+        })
 }
 
 fn file_exists(root: &Path, value: &str) -> bool {
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        path.is_file()
-    } else {
-        root.join(path).is_file()
-    }
+    let root_string = root.to_string_lossy();
+    crate::project_path::resolve(
+        value,
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Read,
+    )
+    .is_ok_and(|path| path.as_path().is_file())
 }
 
 fn is_image_path(path: &Path) -> bool {
@@ -1052,7 +1147,19 @@ fn is_image_ext(value: &str) -> bool {
 
 fn is_start_frame_rel(value: &str) -> bool {
     let normalized = value.replace('\\', "/");
-    normalized.contains("Preproduction/Scene") && normalized.contains("/start_frames/")
+    let parts: Vec<_> = normalized.split('/').collect();
+    parts.len() == 4
+        && parts[0] == "Preproduction"
+        && parts[1].strip_prefix("Scene").is_some_and(|number| {
+            !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
+        })
+        && parts[2] == "start_frames"
+        && is_image_ext(
+            Path::new(parts[3])
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or(""),
+        )
 }
 
 fn scene_from_rel(value: &str) -> Option<u32> {
@@ -1068,11 +1175,10 @@ fn cut_from_rel(value: &str) -> Option<u32> {
     rest.split("_v").next()?.parse().ok()
 }
 
-fn relativize(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+fn relativize(root: &Path, path: &Path) -> Option<String> {
+    crate::project_path::relative_to_root(root, path)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
 }
 
 #[cfg(test)]
@@ -1552,5 +1658,30 @@ mod tests {
             .unwrap();
         assert_eq!(version.path, old_rel);
         assert_eq!(version.status, AssetStatus::Superseded);
+    }
+
+    #[test]
+    fn path_helpers_reject_files_outside_the_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let outside = dir
+            .path()
+            .join("Preproduction/Scene1/start_frames/cut_1.png");
+        fs::create_dir_all(root.join("Preproduction/Scene1/start_frames")).unwrap();
+        fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        fs::write(&outside, b"outside").unwrap();
+        fs::write(
+            root.join("Preproduction/Scene1/start_frames/cut_1.png"),
+            b"inside",
+        )
+        .unwrap();
+
+        assert!(actual_path(&root, outside.to_str().unwrap()).is_none());
+        assert!(!file_exists(&root, outside.to_str().unwrap()));
+        assert!(actual_path(&root, "../Preproduction/Scene1/start_frames/cut_1.png").is_none());
+        assert!(file_exists(
+            &root,
+            "Preproduction/Scene1/start_frames/cut_1.png"
+        ));
     }
 }

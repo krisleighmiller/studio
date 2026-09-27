@@ -14,8 +14,26 @@ struct CharacterProfileFile {
     profile: CharacterProfile,
 }
 
-pub fn load_profile(character_dir: &Path) -> Result<(Option<PathBuf>, CharacterProfile), String> {
-    let path = character_dir.join("character.yaml");
+pub fn load_profile(
+    root: &Path,
+    character_dir: &Path,
+) -> Result<(Option<PathBuf>, CharacterProfile), String> {
+    let root_string = root.to_string_lossy();
+    let character_dir = crate::project_path::resolve(
+        &character_dir.to_string_lossy(),
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Read,
+    )
+    .map_err(|error| error.to_string())?
+    .into_path_buf();
+    validate_character_directory(root, &character_dir, None)?;
+    let path = crate::project_path::resolve(
+        &character_dir.join("character.yaml").to_string_lossy(),
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Read,
+    )
+    .map_err(|error| error.to_string())?
+    .into_path_buf();
     if !path.is_file() {
         return Ok((None, CharacterProfile::default()));
     }
@@ -53,7 +71,7 @@ pub fn save_profile(
                     .into(),
             );
         }
-        root.join(&character.dir)
+        character.dir.clone().into()
     } else {
         let id = character_id(&name);
         if state
@@ -63,15 +81,30 @@ pub fn save_profile(
         {
             return Err(format!("character `{name}` already exists"));
         }
-        root.join("Characters").join(&name)
+        PathBuf::from("Characters").join(&name)
     };
+    let root_string = root.to_string_lossy();
+    let character_dir = crate::project_path::resolve(
+        &character_dir.to_string_lossy(),
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Write,
+    )
+    .map_err(|error| error.to_string())?
+    .into_path_buf();
+    validate_character_directory(root, &character_dir, Some(&name))?;
     fs::create_dir_all(&character_dir).map_err(|error| {
         format!(
             "could not create character directory `{}`: {error}",
             character_dir.display()
         )
     })?;
-    let path = character_dir.join("character.yaml");
+    let path = crate::project_path::resolve(
+        &character_dir.join("character.yaml").to_string_lossy(),
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Write,
+    )
+    .map_err(|error| error.to_string())?
+    .into_path_buf();
     let file = CharacterProfileFile {
         profile_version: PROFILE_VERSION,
         name,
@@ -79,12 +112,39 @@ pub fn save_profile(
     };
     let text = serde_yaml_ng::to_string(&file)
         .map_err(|error| format!("could not serialize character profile: {error}"))?;
-    let temp = path.with_extension("yaml.tmp");
+    let temp = crate::project_path::resolve(
+        &path.with_extension("yaml.tmp").to_string_lossy(),
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Write,
+    )
+    .map_err(|error| error.to_string())?
+    .into_path_buf();
     fs::write(&temp, text)
         .map_err(|error| format!("could not write `{}`: {error}", temp.display()))?;
     fs::rename(&temp, &path)
         .map_err(|error| format!("could not save `{}`: {error}", path.display()))?;
-    Ok(relative(root, &path))
+    relative(root, &path)
+}
+
+fn validate_character_directory(
+    root: &Path,
+    character_dir: &Path,
+    expected_name: Option<&str>,
+) -> Result<(), String> {
+    let relative = crate::project_path::relative_to_root(root, character_dir)?;
+    let parts: Vec<_> = relative
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    if parts.len() != 2
+        || parts[0] != "Characters"
+        || expected_name.is_some_and(|name| parts[1] != name)
+    {
+        return Err(
+            "character profile path must be Characters/<character name> inside the project".into(),
+        );
+    }
+    Ok(())
 }
 
 fn valid_name(value: &str) -> Result<String, String> {
@@ -129,11 +189,9 @@ fn clean_list(values: Vec<String>) -> Vec<String> {
     cleaned
 }
 
-fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+fn relative(root: &Path, path: &Path) -> Result<String, String> {
+    crate::project_path::relative_to_root(root, path)
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
 }
 
 #[cfg(test)]
@@ -162,7 +220,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(path, "Characters/Tom Vale/character.yaml");
-        let (loaded_path, profile) = load_profile(&root.join("Characters/Tom Vale")).unwrap();
+        let (loaded_path, profile) = load_profile(root, &root.join("Characters/Tom Vale")).unwrap();
         assert_eq!(loaded_path.unwrap(), root.join(&path));
         assert_eq!(
             profile.description.as_deref(),
@@ -197,7 +255,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load_profile(&root.join("Characters/Tom Vale"))
+            load_profile(root, &root.join("Characters/Tom Vale"))
                 .unwrap()
                 .1
                 .description
@@ -225,6 +283,57 @@ mod tests {
         });
         assert!(save_profile(root, &state, None, "Tom Vale", CharacterProfile::default()).is_err());
         assert!(save_profile(root, &state, None, "../Nell", CharacterProfile::default()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_existing_profile_rejects_traversal_and_escaping_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let character = CharacterRecord {
+            id: "tom_vale".into(),
+            name: "Tom Vale".into(),
+            dir: "../../outside".into(),
+            identity_ready: false,
+            voice_ready: false,
+            profile_path: None,
+            model_sheet_manifest_path: None,
+            profile: CharacterProfile::default(),
+            asset_ids: Vec::new(),
+            notes: Vec::new(),
+        };
+        let state = ProjectState {
+            characters: vec![character.clone()],
+            ..ProjectState::new()
+        };
+        assert!(save_profile(
+            &root,
+            &state,
+            Some("tom_vale"),
+            "Tom Vale",
+            CharacterProfile::default()
+        )
+        .is_err());
+        assert!(!outside.join("character.yaml").exists());
+
+        fs::create_dir_all(root.join("Characters")).unwrap();
+        symlink(&outside, root.join("Characters/Tom Vale")).unwrap();
+        let mut symlink_state = state;
+        symlink_state.characters[0].dir = "Characters/Tom Vale".into();
+        assert!(save_profile(
+            &root,
+            &symlink_state,
+            Some("tom_vale"),
+            "Tom Vale",
+            CharacterProfile::default()
+        )
+        .is_err());
+        assert!(!outside.join("character.yaml").exists());
     }
 
     #[test]

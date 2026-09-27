@@ -238,7 +238,11 @@ fn rehydrate_secrets(
     };
     let mut rewrite = force_rewrite;
     for api in apis {
-        let Some(id) = api.get("id").and_then(|item| item.as_str()).map(str::to_string) else {
+        let Some(id) = api
+            .get("id")
+            .and_then(|item| item.as_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         for field in ["apiKey", "secretKey"] {
@@ -312,11 +316,18 @@ fn preserve_saved_secrets(app: &HostCtx, incoming: &mut Value) {
     let Some(saved) = existing.get("apis").and_then(|value| value.as_array()) else {
         return;
     };
-    let Some(apis) = incoming.get_mut("apis").and_then(|value| value.as_array_mut()) else {
+    let Some(apis) = incoming
+        .get_mut("apis")
+        .and_then(|value| value.as_array_mut())
+    else {
         return;
     };
     for api in apis {
-        let Some(id) = api.get("id").and_then(|value| value.as_str()).map(str::to_string) else {
+        let Some(id) = api
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         let Some(previous) = saved
@@ -331,7 +342,10 @@ fn preserve_saved_secrets(app: &HostCtx, incoming: &mut Value) {
 }
 
 fn restore_blank(api: &mut Value, previous: &Value, field: &str) {
-    let incoming = api.get(field).and_then(|value| value.as_str()).unwrap_or("");
+    let incoming = api
+        .get(field)
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     if !incoming.trim().is_empty() {
         return;
     }
@@ -346,7 +360,10 @@ fn restore_blank(api: &mut Value, previous: &Value, field: &str) {
     }
 }
 
-pub fn fetch_catalog_for_renderer(app: &HostCtx, args: &Value) -> Result<Vec<CatalogModel>, String> {
+pub fn fetch_catalog_for_renderer(
+    app: &HostCtx,
+    args: &Value,
+) -> Result<Vec<CatalogModel>, String> {
     let api_id = args
         .get("apiId")
         .and_then(|value| value.as_str())
@@ -434,7 +451,11 @@ fn store_secrets(app: &HostCtx, value: &mut Value) -> Result<(), String> {
         return Ok(());
     };
     for api in apis {
-        let Some(id) = api.get("id").and_then(|item| item.as_str()).map(str::to_string) else {
+        let Some(id) = api
+            .get("id")
+            .and_then(|item| item.as_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         for field in ["apiKey", "secretKey"] {
@@ -457,9 +478,8 @@ fn tighten_settings_permissions(dir: &Path, file: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            format!("Could not restrict config directory permissions: {error}")
-        })?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("Could not restrict config directory permissions: {error}"))?;
         if file.exists() {
             fs::set_permissions(file, fs::Permissions::from_mode(0o600)).map_err(|error| {
                 format!("Could not restrict settings file permissions: {error}")
@@ -974,8 +994,11 @@ mod tests {
     #[test]
     fn a_plaintext_settings_file_is_migrated_on_load() {
         let (dir, app) = app();
-        fs::write(dir.path().join("settings.json"), sample("sk-legacy-secret-value").to_string())
-            .unwrap();
+        fs::write(
+            dir.path().join("settings.json"),
+            sample("sk-legacy-secret-value").to_string(),
+        )
+        .unwrap();
         let loaded = load_settings(app).unwrap();
         assert_eq!(loaded["apis"][0]["apiKey"], "sk-legacy-secret-value");
         let raw = fs::read_to_string(dir.path().join("settings.json")).unwrap();

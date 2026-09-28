@@ -79,6 +79,7 @@ export function surfacesForArea(input: {
     );
   if (input.area === "plan") {
     items.push(navItem("profile", "Profile", "neutral", input.active, true, null));
+    items.push(navItem("assets", "Assets", "neutral", input.active, true, null));
   }
   return items;
 }

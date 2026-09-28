@@ -54,7 +54,7 @@ const AUDIO_KEYWORDS: Array<[string, string[]]> = [
   ["mix", ["final mix", "mixdown", "master"]],
 ];
 
-function isAudioRole(role: string): boolean {
+export function isAudioRole(role: string): boolean {
   return (
     AUDIO_ROLES.includes(role) ||
     role === "audio_take" ||

@@ -39,6 +39,8 @@ import {
 import { continuityChoice } from "./studio/selectors/continuityChoice";
 import { requirementBlocks } from "./studio/selectors/project";
 import { audioSections, buildAudioStatus } from "./studio/selectors/audio";
+import { buildAssetsModel, type AssetFilterId } from "./studio/selectors/assets";
+import { renderAssetsView } from "./studio/assetsView";
 import { buildStudioView } from "./studio/viewModel";
 import { renderProjectSummary } from "./studio/components/projectSummary";
 import { renderBudgetSummary } from "./studio/components/budgetSummary";
@@ -92,6 +94,7 @@ type WorkflowViewport = {
 
 let hooks: DeskHooks | null = null;
 let state: ProjectState | null = null;
+let assetFilter: AssetFilterId = "all";
 let report: ProjectReport | null = null;
 let loadError: string | null = null;
 let selectedSceneId: number | null = null;
@@ -560,7 +563,7 @@ function useStage(stage: StageId): void {
 }
 
 function ensureSurface(): void {
-  if (selectedSurface === "profile") return;
+  if (selectedSurface === "profile" || selectedSurface === "assets") return;
   const stages = activeStages();
   const current = stages.find((stage) => stage.id === selectedStage);
   if (!current || !current.available) {
@@ -763,7 +766,7 @@ function renderSceneList(): HTMLElement {
 
 function showSurface(id: SurfaceId): void {
   selectedSurface = id;
-  if (id !== "profile") selectedStage = id;
+  if (id !== "profile" && id !== "assets") selectedStage = id;
   if (id === "profile") setProfileOpen(true);
   renderWorkflowDesk();
   emitSelection();
@@ -786,6 +789,10 @@ function renderMain(): HTMLElement {
       showSurface,
     ),
   );
+  if (selectedSurface === "assets") {
+    main.append(renderAssetsPanel());
+    return main;
+  }
   const studio = currentStudioView();
   const blockers = scene ? sceneBlockers(scene.id) : [];
   const currentStage = activeStages().find((stage) => stage.id === selectedSurface);
@@ -877,6 +884,19 @@ function renderMain(): HTMLElement {
   main.append(details);
   if (detailsOpen) main.append(renderInspector());
   return main;
+}
+
+function renderAssetsPanel(): HTMLElement {
+  if (!state) {
+    const wrap = document.createElement("div");
+    wrap.className = "workflow-stage-content";
+    wrap.append(block("empty-state", "Open a project to browse assets."));
+    return wrap;
+  }
+  return renderAssetsView(buildAssetsModel(state, assetFilter), (id) => {
+    assetFilter = id;
+    renderWorkflowDesk();
+  });
 }
 
 function renderSceneAudio(scene: SceneRecord): HTMLElement | null {

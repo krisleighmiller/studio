@@ -2,6 +2,7 @@
 pub mod animatic;
 pub mod audio;
 pub mod breakdown;
+pub mod captions;
 pub mod characters;
 pub mod cost;
 pub mod identity;

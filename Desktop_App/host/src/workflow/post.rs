@@ -521,13 +521,20 @@ pub fn check_deliverable(
             } else {
                 project_root.join(relative)
             };
-            crate::workflow::qc::check_media_file(&absolute, None, 0.3)
-                .into_iter()
-                .map(|mut finding| {
-                    finding.artifact_id = version_id.clone();
-                    finding
-                })
-                .collect::<Vec<_>>()
+            crate::workflow::qc::check_media_file_against_spec(
+                &absolute,
+                None,
+                0.3,
+                deliverable.resolution.as_deref(),
+                deliverable.aspect_ratio.as_deref(),
+                deliverable.frame_rate.as_deref(),
+            )
+            .into_iter()
+            .map(|mut finding| {
+                finding.artifact_id = version_id.clone();
+                finding
+            })
+            .collect::<Vec<_>>()
         })
         .unwrap_or_default();
     let media_ok = !media_findings

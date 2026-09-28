@@ -177,12 +177,32 @@ pub fn parse_volumedetect(stderr: &str) -> Option<AudioLevels> {
     })
 }
 
-/// Run the full deterministic media QC for one artifact, returning findings in
-/// run order. Any `Error` finding means the artifact is technically invalid.
+/// Run the full deterministic media QC for one artifact. Any `Error` finding
+/// means the artifact is technically invalid.
 pub fn check_media_file(
     path: &Path,
     expected_runtime_secs: Option<f64>,
     runtime_tolerance_secs: f64,
+) -> Vec<QCFinding> {
+    check_media_file_against_spec(
+        path,
+        expected_runtime_secs,
+        runtime_tolerance_secs,
+        None,
+        None,
+        None,
+    )
+}
+
+/// As `check_media_file`, but also compares the probed file against the
+/// declared deliverable spec (resolution, aspect ratio, frame rate).
+pub fn check_media_file_against_spec(
+    path: &Path,
+    expected_runtime_secs: Option<f64>,
+    runtime_tolerance_secs: f64,
+    resolution: Option<&str>,
+    aspect: Option<&str>,
+    frame_rate: Option<&str>,
 ) -> Vec<QCFinding> {
     if !path.is_file() {
         return vec![error(
@@ -214,7 +234,95 @@ pub fn check_media_file(
         expected_runtime_secs,
         runtime_tolerance_secs,
     ));
+    findings.extend(spec_findings(&probe, resolution, aspect, frame_rate));
     findings
+}
+
+/// Compare a probed file against the declared deliverable spec. Pure.
+pub fn spec_findings(
+    probe: &MediaProbe,
+    resolution: Option<&str>,
+    aspect: Option<&str>,
+    frame_rate: Option<&str>,
+) -> Vec<QCFinding> {
+    let mut findings = Vec::new();
+    let Some(video) = &probe.video else {
+        return findings;
+    };
+    if let Some((spec_width, spec_height)) = resolution.and_then(parse_resolution) {
+        if video.width != spec_width || video.height != spec_height {
+            findings.push(warning(
+                "resolution_mismatch",
+                "Resolution",
+                format!(
+                    "File is {}×{} but the deliverable specifies {spec_width}×{spec_height}.",
+                    video.width, video.height
+                ),
+            ));
+        } else {
+            findings.push(info(
+                "resolution",
+                "Resolution",
+                format!("{}×{} matches the spec.", video.width, video.height),
+            ));
+        }
+    }
+    if let Some(ratio) = aspect.and_then(parse_aspect) {
+        if video.height == 0 {
+            return findings;
+        }
+        let actual = video.width as f64 / video.height as f64;
+        if (actual - ratio).abs() > 0.02 {
+            findings.push(warning(
+                "aspect_mismatch",
+                "Aspect",
+                format!("File aspect {actual:.3} does not match the specified {ratio:.3}."),
+            ));
+        }
+    }
+    if let Some(fps) = frame_rate.and_then(parse_frame_rate_spec) {
+        if (video.frame_rate - fps).abs() > 0.05 {
+            findings.push(warning(
+                "framerate_mismatch",
+                "Frame rate",
+                format!(
+                    "File is {:.2} fps but the deliverable specifies {fps:.2} fps.",
+                    video.frame_rate
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+fn parse_resolution(raw: &str) -> Option<(u32, u32)> {
+    let (width, height) = raw.trim().split_once('x')?;
+    Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+}
+
+fn parse_aspect(raw: &str) -> Option<f64> {
+    let (width, height) = raw.trim().split_once(':')?;
+    let width: f64 = width.trim().parse().ok()?;
+    let height: f64 = height.trim().parse().ok()?;
+    if height == 0.0 {
+        None
+    } else {
+        Some(width / height)
+    }
+}
+
+fn parse_frame_rate_spec(raw: &str) -> Option<f64> {
+    let trimmed = raw.trim();
+    if let Some((numerator, denominator)) = trimmed.split_once('/') {
+        let numerator: f64 = numerator.trim().parse().ok()?;
+        let denominator: f64 = denominator.trim().parse().ok()?;
+        return if denominator == 0.0 {
+            None
+        } else {
+            Some(numerator / denominator)
+        };
+    }
+    trimmed.parse::<f64>().ok()
 }
 
 /// Derive findings from an already-computed probe. Pure and unit-testable.
@@ -547,5 +655,59 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, "file_exists");
         assert_eq!(findings[0].severity, QCSeverity::Error);
+    }
+
+    #[test]
+    fn parse_spec_resolution_and_aspect() {
+        assert_eq!(parse_resolution("1080x1920"), Some((1080, 1920)));
+        assert_eq!(parse_resolution("bogus"), None);
+        assert!((parse_aspect("9:16").unwrap() - 0.5625).abs() < 0.001);
+        assert_eq!(parse_aspect("9"), None);
+    }
+
+    #[test]
+    fn parse_frame_rate_spec_handles_plain_and_fraction() {
+        assert_eq!(parse_frame_rate_spec("24"), Some(24.0));
+        let ntsc = parse_frame_rate_spec("30000/1001").unwrap();
+        assert!((ntsc - 29.97).abs() < 0.01);
+        assert_eq!(parse_frame_rate_spec("nope"), None);
+    }
+
+    #[test]
+    fn spec_findings_flag_resolution_aspect_and_framerate_mismatch() {
+        let probe = MediaProbe {
+            duration_secs: Some(1.0),
+            video: Some(VideoStream {
+                width: 1280,
+                height: 720,
+                frame_rate: 30.0,
+                codec: "h264".into(),
+                nb_frames: Some(30),
+            }),
+            audio: None,
+        };
+        let findings = spec_findings(&probe, Some("1920x1080"), Some("9:16"), Some("24"));
+        assert!(findings.iter().any(|f| f.id == "resolution_mismatch"));
+        assert!(findings.iter().any(|f| f.id == "aspect_mismatch"));
+        assert!(findings.iter().any(|f| f.id == "framerate_mismatch"));
+        assert!(!findings.iter().any(|f| f.severity == QCSeverity::Error));
+    }
+
+    #[test]
+    fn spec_findings_pass_when_file_matches() {
+        let probe = MediaProbe {
+            duration_secs: Some(1.0),
+            video: Some(VideoStream {
+                width: 1080,
+                height: 1920,
+                frame_rate: 24.0,
+                codec: "h264".into(),
+                nb_frames: Some(24),
+            }),
+            audio: None,
+        };
+        let findings = spec_findings(&probe, Some("1080x1920"), Some("9:16"), Some("24"));
+        assert!(findings.iter().any(|f| f.id == "resolution"));
+        assert!(!findings.iter().any(|f| f.id.ends_with("_mismatch")));
     }
 }

@@ -38,6 +38,7 @@ import {
 } from "./studio/selectors/directorContext";
 import { continuityChoice } from "./studio/selectors/continuityChoice";
 import { requirementBlocks } from "./studio/selectors/project";
+import { audioSections, buildAudioStatus } from "./studio/selectors/audio";
 import { buildStudioView } from "./studio/viewModel";
 import { renderProjectSummary } from "./studio/components/projectSummary";
 import { renderBudgetSummary } from "./studio/components/budgetSummary";
@@ -848,6 +849,10 @@ function renderMain(): HTMLElement {
     }
     main.append(details);
   }
+  if (scene && selectedSurface !== "scene_look" && selectedSurface !== "profile") {
+    const audioPanel = renderSceneAudio(scene);
+    if (audioPanel) main.append(audioPanel);
+  }
   if (selectedSurface === "profile") {
     main.append(renderProjectProfile((intent) => handleProfileIntent(intent)));
     return main;
@@ -872,6 +877,41 @@ function renderMain(): HTMLElement {
   main.append(details);
   if (detailsOpen) main.append(renderInspector());
   return main;
+}
+
+function renderSceneAudio(scene: SceneRecord): HTMLElement | null {
+  if (!state) return null;
+  const status = buildAudioStatus(state, scene.id);
+  if (!status) return null;
+  const sections = audioSections(status);
+  if (sections.length === 0) return null;
+
+  const panel = document.createElement("section");
+  panel.className = "studio-scene-audio";
+
+  const heading = document.createElement("h2");
+  heading.className = "studio-audio-heading";
+  heading.textContent = "Audio";
+  panel.append(heading);
+
+  for (const section of sections) {
+    const row = document.createElement("div");
+    row.className = "studio-audio-section";
+    const label = document.createElement("span");
+    label.className = "studio-audio-label";
+    label.textContent = section.label;
+    row.append(label);
+    const detail = document.createElement("span");
+    detail.className = "studio-audio-status";
+    detail.textContent = section.entries
+      .map((entry) =>
+        entry.present ? `${entry.label} ${entry.approved ? "approved" : "draft"}` : `${entry.label} missing`,
+      )
+      .join(" · ");
+    row.append(detail);
+    panel.append(row);
+  }
+  return panel;
 }
 
 function renderStageContent(scene: SceneRecord | undefined, sceneStatus: SceneReport | undefined): HTMLElement {

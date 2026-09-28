@@ -2468,6 +2468,37 @@ button {
   font-size: 11px;
 }
 
+.studio-scene-audio {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.studio-audio-heading {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.studio-audio-section {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.studio-audio-label {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.studio-audio-status {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .workflow-main {
   min-width: 0;
   overflow: auto;

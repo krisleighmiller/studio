@@ -131,3 +131,47 @@ export function describeAudioStatus(status: AudioStatusModel | null): string | n
   if (unapproved.length) parts.push(`unapproved ${unapproved.join(", ")}`);
   return `Audio: ${parts.join("; ")}`;
 }
+
+/** Four display sections (the plan's Dialogue / Music / Ambience / Effects),
+ *  each collapsing the finer-grained audio roles into one entry list. */
+export type AudioSectionId = "dialogue" | "music" | "ambience" | "effects";
+
+export type AudioSectionEntry = {
+  role: string;
+  label: string;
+  present: boolean;
+  approved: boolean;
+  required: boolean;
+};
+
+export type AudioSection = {
+  id: AudioSectionId;
+  label: string;
+  entries: AudioSectionEntry[];
+};
+
+export const AUDIO_SECTIONS: { id: AudioSectionId; label: string; roles: string[] }[] = [
+  { id: "dialogue", label: "Dialogue", roles: ["dialogue", "voice_over"] },
+  { id: "music", label: "Music", roles: ["music"] },
+  { id: "ambience", label: "Ambience", roles: ["ambience", "room_tone"] },
+  { id: "effects", label: "Effects", roles: ["sound_effect", "foley"] },
+];
+
+export function audioSections(status: AudioStatusModel): AudioSection[] {
+  const present = new Map(
+    status.roles.filter((role) => role.present).map((role) => [role.role, role.approved]),
+  );
+  return AUDIO_SECTIONS.map((section) => {
+    const roles = new Set<string>();
+    for (const role of status.required) if (section.roles.includes(role)) roles.add(role);
+    for (const entry of present.keys()) if (section.roles.includes(entry)) roles.add(entry);
+    const entries = [...roles].map((role) => ({
+      role,
+      label: audioRoleLabel(role),
+      present: present.has(role),
+      approved: present.get(role) ?? false,
+      required: status.required.includes(role),
+    }));
+    return { id: section.id, label: section.label, entries };
+  }).filter((section) => section.entries.length > 0);
+}

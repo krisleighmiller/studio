@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAudioStatus, describeAudioStatus, parseAudioRoles } from "../src/studio/selectors/audio";
+import { audioSections, buildAudioStatus, describeAudioStatus, parseAudioRoles } from "../src/studio/selectors/audio";
 import type { AssetRecord, ProjectState, SceneRecord } from "../src/workflowTypes";
 
 function baseState(): ProjectState {
@@ -110,5 +110,37 @@ describe("describeAudioStatus", () => {
     state.scenes = [scene(1, false)];
     state.assets = [asset("m", "music", 1, "approved")];
     expect(describeAudioStatus(buildAudioStatus(state, 1)!)).toBe("Audio complete");
+  });
+});
+
+describe("audioSections", () => {
+  it("groups dialogue, music, ambience, and effects", () => {
+    const state = withProfile(baseState(), "music, ambience, and foley");
+    state.scenes = [scene(1, true)]; // dialogue required via a cut
+    state.assets = [asset("m", "music", 1, "draft")];
+    const sections = audioSections(buildAudioStatus(state, 1)!);
+    const labels = sections.map((section) => section.label);
+    expect(labels).toEqual(["Dialogue", "Music", "Ambience", "Effects"]);
+
+    const dialogue = sections.find((section) => section.id === "dialogue")!;
+    expect(dialogue.entries).toHaveLength(1);
+    expect(dialogue.entries[0]).toMatchObject({
+      label: "Dialogue",
+      present: false,
+      required: true,
+    });
+
+    const music = sections.find((section) => section.id === "music")!;
+    expect(music.entries[0]).toMatchObject({ present: true, approved: false, required: true });
+
+    const effects = sections.find((section) => section.id === "effects")!;
+    expect(effects.entries).toHaveLength(1);
+    expect(effects.entries[0]).toMatchObject({ label: "Foley", present: false, required: true });
+  });
+
+  it("omits sections with no required or present roles", () => {
+    const state = baseState();
+    state.scenes = [scene(1, false)];
+    expect(audioSections(buildAudioStatus(state, 1)!)).toEqual([]);
   });
 });

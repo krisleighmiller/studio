@@ -691,6 +691,7 @@ pub struct SaveDesignedVoiceRequest {
     pub audio_base64: String,
     pub media_type: Option<String>,
     pub design_fields: Option<serde_json::Value>,
+    pub project_root: Option<String>,
 }
 
 pub fn voice_save_designed_voice(
@@ -770,18 +771,68 @@ updated_at: {}\n",
         yaml_string(&stamp),
         yaml_string(&stamp),
     );
-    write_profile_files(
+    let saved = write_profile_files(
         &character_directory,
         &request.character_name,
         request.character_reference_path.as_deref(),
         &profile,
         &audio_path,
-    )
+    )?;
+    if let Some(root) = request
+        .project_root
+        .as_deref()
+        .filter(|root| !root.trim().is_empty())
+    {
+        record_voice_clone_job(root, &voice_id)?;
+    }
+    Ok(saved)
+}
+
+/// Record the paid voice clone as a completed ledger entry so the budget gate
+/// and spend ledger see it. Only attempted when a project root is known — a
+/// voice can be cloned outside any open project, in which case there is no
+/// ledger to write.
+fn record_voice_clone_job(project_root: &str, voice_id: &str) -> Result<(), String> {
+    let mut state = crate::workflow::import::load_state(Path::new(project_root))?;
+    let job_id = state.next_job_id();
+    let mut job = crate::workflow::state::JobRecord::open(job_id, "voice_clone");
+    job.provider = Some("elevenlabs".into());
+    job.raw_provider_id = Some(voice_id.to_string());
+    if let Some((currency, minor)) = crate::workflow::cost::known_price("elevenlabs", "voice_clone")
+    {
+        job.currency = Some(currency);
+        job.estimated_cost_minor = Some(minor);
+    }
+    job.finish(None, None);
+    state.jobs.push(job);
+    crate::workflow::import::save_project(Path::new(project_root), state)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_designed_voice_clone_is_recorded_as_a_completed_ledger_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::workflow::import::save_project(root, crate::workflow::state::ProjectState::new())
+            .unwrap();
+
+        record_voice_clone_job(root.to_string_lossy().as_ref(), "voice_abc").unwrap();
+
+        let state = crate::workflow::import::load_state(root).unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        let job = &state.jobs[0];
+        assert_eq!(job.kind, "voice_clone");
+        assert_eq!(job.provider.as_deref(), Some("elevenlabs"));
+        assert_eq!(job.raw_provider_id.as_deref(), Some("voice_abc"));
+        assert_eq!(job.status, crate::workflow::state::JobStatus::Completed);
+        assert_eq!(job.estimated_cost_minor, Some(1000));
+        assert_eq!(job.cost_minor, Some(1000));
+        assert_eq!(job.currency.as_deref(), Some("USD"));
+    }
 
     #[test]
     fn attach_keeps_a_file_already_in_the_voice_folder() {

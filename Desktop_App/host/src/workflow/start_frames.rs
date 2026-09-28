@@ -621,6 +621,9 @@ fn prepare_generate_inner(
         refs.iter()
             .map(|reference| reference.asset_id.clone())
             .collect(),
+        approval_app,
+        &action,
+        &root_s,
     );
     let note = if approval_app.is_some() {
         format!("Start-frame generate ready for Scene {scene_id} Cut {cut_number}. Use the one-time approval button; chat text cannot approve it.")
@@ -747,6 +750,9 @@ fn prepare_edit_inner(
         cut_number,
         rel,
         input_asset_ids,
+        approval_app,
+        &action,
+        &root_s,
     );
     let note = if approval_app.is_some() {
         format!("Start-frame edit ready for Scene {scene_id} Cut {cut_number}. Use the one-time approval button; chat text cannot approve it.")
@@ -1001,14 +1007,27 @@ fn push_job(
     cut_number: u32,
     rel: String,
     input_asset_ids: Vec<String>,
+    approval_app: Option<&crate::ctx::HostCtx>,
+    action: &DirectorAction,
+    root_s: &str,
 ) {
     let job_id = state.next_job_id();
-    state.jobs.push(JobRecord {
+    let mut job = JobRecord {
         input_asset_ids,
         output_path: Some(rel),
         raw_provider_id: Some(format!("s{scene_id}_c{cut_number}")),
         ..JobRecord::open(job_id, kind)
-    });
+    };
+    if let Some(app) = approval_app {
+        if let Ok(Some(estimate)) = crate::director::estimate_for_action(app, action, Some(root_s))
+        {
+            job.provider = Some(estimate.kind);
+            job.model = estimate.model;
+            job.currency = Some(estimate.currency);
+            job.estimated_cost_minor = Some(estimate.minor);
+        }
+    }
+    state.jobs.push(job);
 }
 
 fn require_cut(state: &ProjectState, scene_id: u32, cut_number: u32) -> Result<(), String> {
@@ -1511,8 +1530,8 @@ mod tests {
             completed_at: None,
             scope: None,
             progress: None,
-            cost: None,
-            estimated_cost: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
             currency: None,
             retry_of: None,
         });

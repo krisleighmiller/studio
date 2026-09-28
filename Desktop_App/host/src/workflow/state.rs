@@ -1153,10 +1153,12 @@ pub struct JobRecord {
     pub scope: Option<JobScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<String>,
+    /// Actual cost in integer minor units (e.g. cents). `None` means unknown, never zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<f64>,
+    pub cost_minor: Option<i64>,
+    /// Committed estimate in integer minor units. `None` means unknown, never zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimated_cost: Option<f64>,
+    pub estimated_cost_minor: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
     /// Job id this attempt retries. The previous job stays in the ledger.
@@ -1211,8 +1213,8 @@ impl JobRecord {
             completed_at: None,
             scope: None,
             progress: None,
-            cost: None,
-            estimated_cost: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
             currency: None,
             retry_of: None,
             attempts: vec![JobAttempt {
@@ -1228,6 +1230,12 @@ impl JobRecord {
 
     pub fn finish(&mut self, path: Option<&str>, asset_id: Option<&str>) {
         self.status = JobStatus::Completed;
+        // Providers here do not report a precise actual cost, so a completed job's
+        // actual cost defaults to its known estimate. A caller can still overwrite
+        // `cost_minor` afterward when a precise figure is available.
+        if self.cost_minor.is_none() {
+            self.cost_minor = self.estimated_cost_minor;
+        }
         if self.completed_at.is_none() {
             self.completed_at = Some(utc_now());
         }
@@ -1680,6 +1688,33 @@ pub fn requirement_id(kind: RequirementKind, key: &str) -> String {
     format!("req_{}_{slug}", kind.as_str())
 }
 
+/// Structured project budget, in integer minor units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectBudget {
+    /// ISO 4217 currency code for every amount in this budget.
+    pub currency: String,
+    /// Hard ceiling in minor units. `None` means no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_minor: Option<i64>,
+    /// Spend level (minor units) that should surface a warning before the limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_at_minor: Option<i64>,
+    /// When true, the budget ceiling cannot be bypassed by the Director.
+    #[serde(default)]
+    pub hard_stop: bool,
+}
+
+impl Default for ProjectBudget {
+    fn default() -> Self {
+        Self {
+            currency: "USD".to_string(),
+            limit_minor: None,
+            warning_at_minor: None,
+            hard_stop: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectState {
     pub version: u32,
@@ -1699,6 +1734,9 @@ pub struct ProjectState {
     pub settings: SettingsSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<ProductionProfile>,
+    /// Structured project budget. `None` means unbudgeted (no limit, no warning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<ProjectBudget>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requirements: Vec<RequirementRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1784,6 +1822,7 @@ impl ProjectState {
             jobs: Vec::new(),
             settings: SettingsSnapshot::default(),
             profile: None,
+            budget: None,
             requirements: Vec::new(),
             versions: Vec::new(),
             notes: Vec::new(),
@@ -1962,8 +2001,8 @@ mod tests {
         assert!(job.created_at.is_none());
         assert!(job.started_at.is_none());
         assert!(job.completed_at.is_none());
-        assert!(job.cost.is_none());
-        assert!(job.estimated_cost.is_none());
+        assert!(job.cost_minor.is_none());
+        assert!(job.estimated_cost_minor.is_none());
         assert!(job.currency.is_none());
         assert!(job.scope.is_none());
         assert_eq!(job.elapsed_label(), "unknown");

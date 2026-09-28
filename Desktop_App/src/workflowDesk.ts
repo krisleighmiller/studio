@@ -40,6 +40,8 @@ import { continuityChoice } from "./studio/selectors/continuityChoice";
 import { requirementBlocks } from "./studio/selectors/project";
 import { buildStudioView } from "./studio/viewModel";
 import { renderProjectSummary } from "./studio/components/projectSummary";
+import { renderBudgetSummary } from "./studio/components/budgetSummary";
+import { buildBudgetModel } from "./studio/selectors/budget";
 import { renderWorkspaceStatus } from "./studio/components/workspaceStatus";
 import { mouthLabel, roleLabel, speechLabel } from "./studio/labels";
 import { paintUnknownRecipeStage } from "./studio/recipeStage";
@@ -938,6 +940,9 @@ function handleProfileIntent(intent: ProfileIntent): void {
     case "save":
       void runAction("Saving production profile", "workflow_save_profile", { profile: intent.profile });
       break;
+    case "set-budget":
+      void runAction("Saving spend budget", "workflow_set_budget", { budget: intent.budget });
+      break;
     case "set-requirement":
       void runAction(`Updating ${intent.name}`, "workflow_set_requirement_status", {
         requirementId: intent.requirementId,
@@ -1742,17 +1747,23 @@ function renderInspector(): HTMLElement {
 }
 
 function renderJobsPanel(): HTMLElement {
-  return renderJobsView(
-    buildJobsModel({
-      jobs: state?.jobs ?? [],
-      scenes: state?.scenes ?? [],
-      assets: state?.assets ?? [],
-      filter: jobsFilter,
-    }),
-    jobsOpen,
-    jobsFilter,
-    handleJobsIntent,
+  const panel = document.createElement("div");
+  panel.className = "studio-jobs-panel";
+  panel.append(
+    renderBudgetSummary(buildBudgetModel(state)),
+    renderJobsView(
+      buildJobsModel({
+        jobs: state?.jobs ?? [],
+        scenes: state?.scenes ?? [],
+        assets: state?.assets ?? [],
+        filter: jobsFilter,
+      }),
+      jobsOpen,
+      jobsFilter,
+      handleJobsIntent,
+    ),
   );
+  return panel;
 }
 
 function handleJobsIntent(intent: JobsIntent): void {

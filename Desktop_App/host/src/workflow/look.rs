@@ -1031,12 +1031,23 @@ fn prepare_generate_inner(
             input_asset_ids.push(reference.asset_id.clone());
         }
     }
-    state.jobs.push(JobRecord {
+    let mut job = JobRecord {
         input_asset_ids,
         output_path: Some(rel),
         raw_provider_id: Some(slot_id.to_string()),
         ..JobRecord::open(job_id, "scene_look")
-    });
+    };
+    if let Some(app) = approval_app {
+        if let Ok(Some(estimate)) =
+            crate::director::estimate_for_action(app, &action, Some(&root_s))
+        {
+            job.provider = Some(estimate.kind);
+            job.model = estimate.model;
+            job.currency = Some(estimate.currency);
+            job.estimated_cost_minor = Some(estimate.minor);
+        }
+    }
+    state.jobs.push(job);
     let note = if approval_app.is_some() {
         format!("Look generate ready for `{slot_id}`. Use the one-time approval button; chat text cannot approve it.")
     } else {
@@ -1211,14 +1222,27 @@ Dress them only in the clothes from the wardrobe reference: the same garments, c
         &root_s,
     )?);
     let wardrobe_id = wardrobe.asset_id.clone();
+    let estimate = match approval_app {
+        Some(app) => crate::director::estimate_for_action(app, &action, Some(&root_s))
+            .ok()
+            .flatten(),
+        None => None,
+    };
     for plan in &plans {
         let job_id = state.next_job_id();
-        state.jobs.push(JobRecord {
+        let mut job = JobRecord {
             input_asset_ids: vec![plan.identity_id.clone(), wardrobe_id.clone()],
             output_path: Some(plan.rel.clone()),
             raw_provider_id: Some(format!("{}|{}", plan.character_id, plan.shot)),
             ..JobRecord::open(job_id, "wardrobe_plate")
-        });
+        };
+        if let Some(estimate) = &estimate {
+            job.provider = Some(estimate.kind.clone());
+            job.model = estimate.model.clone();
+            job.currency = Some(estimate.currency.clone());
+            job.estimated_cost_minor = Some(estimate.minor);
+        }
+        state.jobs.push(job);
     }
     let count = plans.len();
     let names = plans
@@ -1820,8 +1844,8 @@ mod tests {
             completed_at: None,
             scope: None,
             progress: None,
-            cost: None,
-            estimated_cost: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
             currency: None,
             retry_of: None,
         });
@@ -1858,8 +1882,8 @@ mod tests {
             completed_at: None,
             scope: None,
             progress: None,
-            cost: None,
-            estimated_cost: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
             currency: None,
             retry_of: None,
         });
@@ -1912,8 +1936,8 @@ mod tests {
             completed_at: None,
             scope: None,
             progress: None,
-            cost: None,
-            estimated_cost: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
             currency: None,
             retry_of: None,
         });
@@ -2313,8 +2337,8 @@ mod tests {
             completed_at: None,
             scope: None,
             progress: None,
-            cost: None,
-            estimated_cost: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
             currency: None,
             retry_of: None,
         });

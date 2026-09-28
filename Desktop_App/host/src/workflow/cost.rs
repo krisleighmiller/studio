@@ -1,0 +1,472 @@
+//! Cost, budget, and provider-pricing foundations.
+//!
+//! Money is represented as integer minor units (cents, pence, …) so authoritative
+//! totals never accumulate floating-point error. Unknown cost is an explicit
+//! `None`/`Unknown`, never zero.
+//!
+//! The pricing registry is API-agnostic: it keys on the two data strings the app
+//! already owns — `ApiEntry.kind` (a provider family) and a `capabilityDefaults`
+//! key (a production operation). No enum of providers or capabilities lives in
+//! this module; adding one is a data edit to `providers.json`, not a code change.
+
+use crate::workflow::state::{JobStatus, ProjectState};
+use serde::{Deserialize, Serialize};
+
+/// A price the registry knows, or an explicit "we do not know" marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Price {
+    Known { currency: String, minor: i64 },
+    Unknown,
+}
+
+impl Price {
+    pub fn minor(&self) -> Option<i64> {
+        match self {
+            Price::Known { minor, .. } => Some(*minor),
+            Price::Unknown => None,
+        }
+    }
+
+    pub fn currency(&self) -> Option<&str> {
+        match self {
+            Price::Known { currency, .. } => Some(currency),
+            Price::Unknown => None,
+        }
+    }
+}
+
+/// Format integer minor units as a decimal string, e.g. `1234` → `"12.34 USD"`.
+pub fn format_minor(minor: i64, currency: &str) -> String {
+    let sign = if minor < 0 { "-" } else { "" };
+    let abs = minor.unsigned_abs();
+    let major = abs / 100;
+    let frac = abs % 100;
+    format!("{sign}{major}.{frac:02} {currency}")
+}
+
+//
+// Provider pricing registry (data-driven and API-agnostic).
+//
+// Keys are data strings, not enums:
+//   * `kind`       — an `ApiEntry.kind` ("atlas-cloud", "elevenlabs", …).
+//   * `capability` — a `capabilityDefaults` key ("video.text_only", …).
+//
+
+#[derive(Debug, Clone, PartialEq)]
+struct PriceEntry {
+    kind: String,
+    capability: String,
+    currency: String,
+    price_minor: i64,
+}
+
+fn registry() -> &'static [PriceEntry] {
+    static REGISTRY: std::sync::OnceLock<Vec<PriceEntry>> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let raw: serde_json::Value = serde_json::from_str(include_str!("providers.json"))
+            .expect("providers.json is invalid");
+        raw["prices"]
+            .as_array()
+            .expect("providers.json needs a prices array")
+            .iter()
+            .map(|item| PriceEntry {
+                kind: item["kind"].as_str().unwrap_or("").to_string(),
+                capability: item["capability"].as_str().unwrap_or("").to_string(),
+                currency: item["currency"].as_str().unwrap_or("USD").to_string(),
+                price_minor: item["price_minor"].as_i64().unwrap_or(0),
+            })
+            .collect()
+    })
+}
+
+/// Resolve a known price for a provider `kind` + `capability`, case-insensitively.
+/// Anything not listed resolves to `Price::Unknown`.
+pub fn resolve_price(kind: &str, capability: &str) -> Price {
+    let key = |s: &str| s.trim().to_ascii_lowercase();
+    let kind_key = key(kind);
+    let capability_key = key(capability);
+    registry()
+        .iter()
+        .find(|entry| key(&entry.kind) == kind_key && key(&entry.capability) == capability_key)
+        .map(|entry| Price::Known {
+            currency: entry.currency.clone(),
+            minor: entry.price_minor,
+        })
+        .unwrap_or(Price::Unknown)
+}
+
+/// Map a Director specialist name to the capability key its paid work uses.
+/// Non-provider specialists (assembly, text writes, …) resolve to `None`, so
+/// their cost is honestly reported as unknown rather than invented.
+pub fn specialist_capability(specialist: &str) -> Option<&'static str> {
+    match specialist.trim().to_ascii_lowercase().as_str() {
+        "still_image" | "scene_look" | "model_sheet" | "wardrobe_plate" | "reference_assets" => {
+            Some("image.text_to_image")
+        }
+        "video" | "render" | "scene_generation" => Some("video.text_only"),
+        "voice_clone" => Some("audio.tts_clone"),
+        "tts" | "tts_profile" => Some("audio.tts_profile"),
+        "lip_sync" => Some("video.lip_sync_text_narration"),
+        _ => None,
+    }
+}
+
+/// Known price as `(currency, minor_units)` for a provider `kind` + specialist,
+/// or `None` when unknown. Unknown is not zero.
+pub fn known_price(kind: &str, specialist: &str) -> Option<(String, i64)> {
+    let capability = specialist_capability(specialist)?;
+    match resolve_price(kind, capability) {
+        Price::Known { currency, minor } => Some((currency, minor)),
+        Price::Unknown => None,
+    }
+}
+
+/// Host-known price as a display label, e.g. `"0.05 USD"`.
+pub fn known_price_label(kind: &str, specialist: &str) -> Option<String> {
+    known_price(kind, specialist).map(|(currency, minor)| format_minor(minor, &currency))
+}
+
+/// Known spend in minor units, or `None` when unknown (not gated numerically).
+pub fn known_spend_minor(kind: &str, specialist: &str) -> Option<i64> {
+    known_price(kind, specialist).map(|(_, minor)| minor)
+}
+
+//
+// Budget ledger: derive authoritative spend totals from project state.
+//
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetLedger {
+    pub currency: String,
+    pub limit_minor: Option<i64>,
+    pub warning_at_minor: Option<i64>,
+    pub hard_stop: bool,
+    /// Sum of known estimates for pending/running (committed but unsettled) jobs.
+    pub committed_minor: i64,
+    /// Sum of actual cost for completed jobs.
+    pub completed_minor: i64,
+    /// Sum of billable cost for failed/cancelled jobs (retried spend is still spend).
+    pub failed_minor: i64,
+    /// `limit - (completed + failed)`. `None` when there is no budget limit.
+    pub remaining_minor: Option<i64>,
+    /// Count of jobs whose spend is real but whose cost is unknown.
+    pub unknown_cost_jobs: usize,
+}
+
+pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
+    let budget = state.budget.clone().unwrap_or_default();
+    let mut committed = 0i64;
+    let mut completed = 0i64;
+    let mut failed = 0i64;
+    let mut unknown = 0usize;
+    for job in &state.jobs {
+        match job.status {
+            JobStatus::Pending | JobStatus::Running => {
+                if let Some(estimate) = job.estimated_cost_minor {
+                    committed = committed.saturating_add(estimate);
+                }
+            }
+            JobStatus::Completed => match job.cost_minor {
+                Some(cost) => completed = completed.saturating_add(cost),
+                None => unknown += 1,
+            },
+            JobStatus::Failed | JobStatus::Cancelled => match job.cost_minor {
+                Some(cost) => failed = failed.saturating_add(cost),
+                None => unknown += 1,
+            },
+        }
+    }
+    let spent = completed.saturating_add(failed);
+    let remaining = budget.limit_minor.map(|limit| limit.saturating_sub(spent));
+    BudgetLedger {
+        currency: budget.currency,
+        limit_minor: budget.limit_minor,
+        warning_at_minor: budget.warning_at_minor,
+        hard_stop: budget.hard_stop,
+        committed_minor: committed,
+        completed_minor: completed,
+        failed_minor: failed,
+        remaining_minor: remaining,
+        unknown_cost_jobs: unknown,
+    }
+}
+
+/// Whether a proposed spend can proceed under the project budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendGate {
+    /// No budget limit configured — always allowed.
+    NoLimit,
+    /// Under both the warning threshold and the limit.
+    Allow,
+    /// Over the warning threshold but under the limit.
+    Warn,
+    /// Would exceed the limit, but the budget is not hard-stop: explicit
+    /// confirmation is required.
+    Confirm,
+    /// Would exceed the limit and the budget is hard-stop: vetoed.
+    Blocked,
+}
+
+/// Decide whether `proposed_minor` of new spend is allowed given committed,
+/// completed, and failed spend already in the project. A hard-stop budget
+/// blocks spending over its limit; this is the mechanism the Director cannot
+/// bypass.
+pub fn gate_spend(state: &ProjectState, proposed_minor: i64) -> SpendGate {
+    let Some(budget) = &state.budget else {
+        return SpendGate::NoLimit;
+    };
+    let Some(limit) = budget.limit_minor else {
+        return SpendGate::NoLimit;
+    };
+    let ledger = compute_ledger(state);
+    let on_the_hook = ledger
+        .committed_minor
+        .saturating_add(ledger.completed_minor)
+        .saturating_add(ledger.failed_minor);
+    let total = on_the_hook.saturating_add(proposed_minor.max(0));
+    if total > limit {
+        return if budget.hard_stop {
+            SpendGate::Blocked
+        } else {
+            SpendGate::Confirm
+        };
+    }
+    if let Some(warning) = budget.warning_at_minor {
+        if total > warning {
+            return SpendGate::Warn;
+        }
+    }
+    SpendGate::Allow
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflow::state::{JobRecord, JobStatus, ProjectBudget};
+
+    fn job(
+        kind: &str,
+        status: JobStatus,
+        cost_minor: Option<i64>,
+        estimated_minor: Option<i64>,
+    ) -> JobRecord {
+        let mut job = JobRecord::open("job", kind);
+        job.status = status;
+        job.cost_minor = cost_minor;
+        job.estimated_cost_minor = estimated_minor;
+        job
+    }
+
+    #[test]
+    fn registry_resolves_known_price_case_insensitively() {
+        assert_eq!(
+            resolve_price("ATLAS-CLOUD", " IMAGE.TEXT_TO_IMAGE "),
+            Price::Known {
+                currency: "USD".to_string(),
+                minor: 5
+            }
+        );
+        assert_eq!(
+            resolve_price("atlas-cloud", "video.text_only"),
+            Price::Known {
+                currency: "USD".to_string(),
+                minor: 40
+            }
+        );
+    }
+
+    #[test]
+    fn registry_marks_unlisted_entries_unknown_not_zero() {
+        assert_eq!(resolve_price("runway", "video.text_only"), Price::Unknown);
+        assert_eq!(
+            resolve_price("atlas-cloud", "audio.tts_clone"),
+            Price::Unknown
+        );
+        assert_eq!(resolve_price("", ""), Price::Unknown);
+        assert_eq!(
+            resolve_price("elevenlabs", "video.text_only"),
+            Price::Unknown
+        );
+    }
+
+    #[test]
+    fn minor_units_format_to_decimal_without_float_error() {
+        assert_eq!(format_minor(1234, "USD"), "12.34 USD");
+        assert_eq!(format_minor(400, "USD"), "4.00 USD");
+        assert_eq!(format_minor(5, "USD"), "0.05 USD");
+        assert_eq!(format_minor(-1234, "USD"), "-12.34 USD");
+    }
+
+    #[test]
+    fn ledger_sums_spend_and_keeps_unknown_separate_from_zero() {
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            currency: "USD".to_string(),
+            limit_minor: Some(10_000),
+            warning_at_minor: Some(7_000),
+            hard_stop: true,
+        });
+        state.jobs = vec![
+            job("render", JobStatus::Pending, None, Some(1_000)),
+            job("render", JobStatus::Completed, Some(2_000), Some(1_500)),
+            job("look", JobStatus::Failed, Some(500), Some(250)),
+            job("look", JobStatus::Completed, None, None), // unknown-cost completed job
+            job("look", JobStatus::Cancelled, Some(300), None),
+        ];
+
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.currency, "USD");
+        assert_eq!(ledger.committed_minor, 1_000);
+        assert_eq!(ledger.completed_minor, 2_000);
+        assert_eq!(ledger.failed_minor, 800);
+        assert_eq!(ledger.remaining_minor, Some(7_200));
+        assert_eq!(ledger.unknown_cost_jobs, 1);
+        assert!(ledger.hard_stop);
+    }
+
+    #[test]
+    fn ledger_without_a_limit_has_no_remaining_but_still_tracks_unknown() {
+        let mut state = ProjectState::new();
+        state.jobs = vec![
+            job("render", JobStatus::Completed, None, None),
+            job("render", JobStatus::Completed, Some(123), None),
+        ];
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.remaining_minor, None);
+        assert_eq!(ledger.completed_minor, 123);
+        assert_eq!(ledger.unknown_cost_jobs, 1);
+        assert_eq!(ledger.currency, "USD");
+    }
+
+    #[test]
+    fn missing_budget_defaults_to_usd_and_no_limit() {
+        let state = ProjectState::new();
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.currency, "USD");
+        assert_eq!(ledger.limit_minor, None);
+        assert!(!ledger.hard_stop);
+    }
+
+    #[test]
+    fn specialist_names_map_to_capability_keys() {
+        assert_eq!(
+            specialist_capability("still_image"),
+            Some("image.text_to_image")
+        );
+        assert_eq!(
+            specialist_capability("scene_look"),
+            Some("image.text_to_image")
+        );
+        assert_eq!(specialist_capability("VIDEO"), Some("video.text_only"));
+        assert_eq!(
+            specialist_capability("voice_clone"),
+            Some("audio.tts_clone")
+        );
+        assert_eq!(specialist_capability("assemble"), None);
+        assert_eq!(specialist_capability("text_write"), None);
+        assert_eq!(specialist_capability(""), None);
+    }
+
+    #[test]
+    fn known_price_label_resolves_known_and_unknown() {
+        assert_eq!(
+            known_price_label("atlas-cloud", "still_image"),
+            Some("0.05 USD".to_string())
+        );
+        assert_eq!(
+            known_price_label("atlas-cloud", "video"),
+            Some("0.40 USD".to_string())
+        );
+        assert_eq!(
+            known_price_label("elevenlabs", "voice_clone"),
+            Some("10.00 USD".to_string())
+        );
+        // Unknown kind, unknown capability, non-provider specialist: unknown.
+        assert_eq!(known_price_label("runway", "still_image"), None);
+        assert_eq!(known_price_label("atlas-cloud", "assemble"), None);
+        assert_eq!(known_price_label("atlas-cloud", ""), None);
+    }
+
+    #[test]
+    fn known_spend_minor_returns_minor_units_or_unknown() {
+        assert_eq!(known_spend_minor("atlas-cloud", "still_image"), Some(5));
+        assert_eq!(known_spend_minor("atlas-cloud", "video"), Some(40));
+        assert_eq!(known_spend_minor("elevenlabs", "voice_clone"), Some(1000));
+        // Unknown spend is None, never 0.
+        assert_eq!(known_spend_minor("runway", "still_image"), None);
+        assert_eq!(known_spend_minor("atlas-cloud", "assemble"), None);
+    }
+
+    #[test]
+    fn the_director_cannot_bypass_a_hard_stop_for_known_spend() {
+        let state = ProjectState {
+            budget: Some(ProjectBudget {
+                currency: "USD".into(),
+                limit_minor: Some(500),
+                warning_at_minor: None,
+                hard_stop: true,
+            }),
+            ..ProjectState::new()
+        };
+        // Known spend (1000 minor) over a 500-minor hard-stop limit → vetoed.
+        let spend = known_spend_minor("elevenlabs", "voice_clone").unwrap();
+        assert_eq!(gate_spend(&state, spend), SpendGate::Blocked);
+        // Unknown spend has no minor value to compare, so it is not vetoed here;
+        // the ledger flags it separately.
+        assert_eq!(known_spend_minor("runway", "still_image"), None);
+    }
+
+    #[test]
+    fn a_completed_job_defaults_actual_cost_to_its_known_estimate() {
+        let mut job = JobRecord::open("j", "scene_look");
+        job.estimated_cost_minor = Some(40);
+        job.currency = Some("USD".to_string());
+        job.finish(Some("out.png"), None);
+        assert_eq!(job.cost_minor, Some(40));
+
+        let mut state = ProjectState::new();
+        state.jobs = vec![job];
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.completed_minor, 40);
+        assert_eq!(ledger.unknown_cost_jobs, 0);
+    }
+
+    #[test]
+    fn gate_spend_applies_warning_confirm_and_hard_stop() {
+        let budgeted = |limit: i64, warning: i64, hard_stop: bool| ProjectState {
+            budget: Some(ProjectBudget {
+                currency: "USD".into(),
+                limit_minor: Some(limit),
+                warning_at_minor: Some(warning),
+                hard_stop,
+            }),
+            ..ProjectState::new()
+        };
+
+        // No budget, and a budget with no limit: always allowed.
+        assert_eq!(
+            gate_spend(&ProjectState::new(), 100_000),
+            SpendGate::NoLimit
+        );
+        assert_eq!(
+            gate_spend(&ProjectState::default(), 100_000),
+            SpendGate::NoLimit
+        );
+
+        let mut hard = budgeted(10_000, 7_000, true);
+        assert_eq!(gate_spend(&hard, 1_000), SpendGate::Allow);
+        assert_eq!(gate_spend(&hard, 8_000), SpendGate::Warn);
+        assert_eq!(gate_spend(&hard, 11_000), SpendGate::Blocked);
+
+        let soft = budgeted(10_000, 7_000, false);
+        assert_eq!(gate_spend(&soft, 11_000), SpendGate::Confirm);
+
+        // Already over the limit from completed spend: hard stop blocks even a
+        // zero-cost proposal, and a negative proposal cannot buy headroom.
+        hard.jobs = vec![job("render", JobStatus::Completed, Some(12_000), None)];
+        assert_eq!(gate_spend(&hard, 0), SpendGate::Blocked);
+        assert_eq!(gate_spend(&hard, -5_000), SpendGate::Blocked);
+    }
+}

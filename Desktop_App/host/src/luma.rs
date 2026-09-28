@@ -111,7 +111,7 @@ pub fn get_prediction(
     let client = http_client(60)?;
     let auth = auth(api)?;
     let deadline = Instant::now() + Duration::from_secs(wait_seconds.max(1));
-    let mut last = Value::Null;
+    let mut last: Value;
     loop {
         let response = client
             .get(&url)

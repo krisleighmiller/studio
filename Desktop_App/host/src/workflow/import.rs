@@ -1567,8 +1567,8 @@ mod tests {
             completed_at: None,
             scope: None,
             progress: None,
-            cost: None,
-            estimated_cost: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
             currency: None,
             retry_of: None,
         });
@@ -1663,8 +1663,8 @@ mod tests {
             completed_at: None,
             scope: None,
             progress: None,
-            cost: None,
-            estimated_cost: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
             currency: None,
             retry_of: None,
         });
@@ -1720,8 +1720,8 @@ mod tests {
             completed_at: None,
             scope: None,
             progress: None,
-            cost: None,
-            estimated_cost: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
             currency: None,
             retry_of: None,
         });
@@ -1863,8 +1863,8 @@ mod tests {
             completed_at: None,
             scope: None,
             progress: None,
-            cost: None,
-            estimated_cost: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
             currency: None,
             retry_of: None,
         }

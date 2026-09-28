@@ -1160,8 +1160,11 @@ fn format_approval_request_inner(
             "unresolved",
         )
     });
+    let known_cost = crate::workflow::cost::known_price_label(&provider, specialist);
     let cost = cost_override
         .map(str::to_string)
+        .filter(|value| !value.trim().is_empty() && value != "unknown" && value != "unresolved")
+        .or(known_cost)
         .unwrap_or_else(|| input_display(&action.inputs, &["cost", "cost_estimate"], "unknown"));
     let output = resolved
         .resolved_paths

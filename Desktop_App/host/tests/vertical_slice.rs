@@ -65,20 +65,10 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
     assert!(scene.cuts.iter().all(|cut| cut.takes.len() == 1));
     assert!(scene.cuts.iter().all(|cut| cut.selected_take.is_none()));
     assert_eq!(scene.stages.assemble, StageStatus::Missing);
-    let first_take = scene
-        .cuts
-        .iter()
-        .find(|cut| cut.id.cut == 1)
-        .unwrap()
-        .takes[0]
+    let first_take = scene.cuts.iter().find(|cut| cut.id.cut == 1).unwrap().takes[0]
         .id
         .clone();
-    let second_take = scene
-        .cuts
-        .iter()
-        .find(|cut| cut.id.cut == 2)
-        .unwrap()
-        .takes[0]
+    let second_take = scene.cuts.iter().find(|cut| cut.id.cut == 2).unwrap().takes[0]
         .id
         .clone();
 
@@ -99,7 +89,10 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
         }),
     ))
     .unwrap();
-    assert!(planned["note"].as_str().unwrap().contains("Bind a reviewed continuity frame"));
+    assert!(planned["note"]
+        .as_str()
+        .unwrap()
+        .contains("Bind a reviewed continuity frame"));
     let blocked = load_state(root).unwrap();
     let successor = blocked
         .scene(1)
@@ -133,21 +126,30 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
     assert_eq!(frame.role, AssetRole::ContinuityFrame);
     assert_eq!(frame.status, AssetStatus::Approved);
     assert_eq!(frame.parent_asset_id.as_deref(), Some(first_take.as_str()));
-    assert!(bound.versions.iter().any(|version| version.asset_id == frame.id));
+    assert!(bound
+        .versions
+        .iter()
+        .any(|version| version.asset_id == frame.id));
     assert!(matches!(
         resolve_render_source(&bound, CutId::new(1, 2)).unwrap(),
         RenderSourceResolution::Bound(_)
     ));
 
     let prepared = cmd_prepare_assemble(&project_args(root, json!({ "sceneId": 1 }))).unwrap();
-    assert!(prepared["pendingAction"].as_str().unwrap().contains("Assemble Scene 1"));
+    assert!(prepared["pendingAction"]
+        .as_str()
+        .unwrap()
+        .contains("Assemble Scene 1"));
     let pending = load_state(root).unwrap();
     let job = pending
         .jobs
         .iter()
         .find(|job| job.kind == "assemble")
         .unwrap();
-    assert_eq!(job.status, workbench_host::workflow::state::JobStatus::Pending);
+    assert_eq!(
+        job.status,
+        workbench_host::workflow::state::JobStatus::Pending
+    );
     let output = job.output_path.clone().unwrap();
     assert_eq!(output, "Final/Scene1_master.mp4");
     fs::create_dir_all(root.join("Final")).unwrap();
@@ -164,7 +166,10 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
         .iter()
         .find(|job| job.kind == "assemble")
         .unwrap();
-    assert_eq!(finished.status, workbench_host::workflow::state::JobStatus::Completed);
+    assert_eq!(
+        finished.status,
+        workbench_host::workflow::state::JobStatus::Completed
+    );
     assert_eq!(finished.output_path.as_deref(), Some(output.as_str()));
     for cut in &scene.cuts {
         let take = &cut.takes[0];
@@ -196,9 +201,19 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
     let second = "Final/Scene1_master_v2.mp4";
     fs::write(root.join(second), b"master-2").unwrap();
     let reassembled = import_project(root, ImportOptions { persist: true }).unwrap();
-    let versions = &reassembled.state.scene(1).unwrap().post.as_ref().unwrap().versions;
+    let versions = &reassembled
+        .state
+        .scene(1)
+        .unwrap()
+        .post
+        .as_ref()
+        .unwrap()
+        .versions;
     assert_eq!(versions.len(), 2);
-    assert_eq!(versions[0].assembly_path.as_deref(), Some("Final/Scene1_master.mp4"));
+    assert_eq!(
+        versions[0].assembly_path.as_deref(),
+        Some("Final/Scene1_master.mp4")
+    );
     assert_eq!(versions[1].assembly_path.as_deref(), Some(second));
     assert_ne!(versions[0].id, versions[1].id);
     assert_eq!(

@@ -716,14 +716,25 @@ fn prepare_render_inner(
         }
     } else {
         let job_id = state.next_job_id();
-        state.jobs.push(JobRecord {
-            provider: Some("atlascloud".into()),
+        let mut job = JobRecord {
+            provider: None,
             input_asset_ids,
             output_path: Some(output_path),
             raw_provider_id: Some(id.code()),
             scope,
             ..JobRecord::open(job_id, "render")
-        });
+        };
+        if let Some(app) = approval_app {
+            if let Ok(Some(estimate)) =
+                crate::director::estimate_for_action(app, &action, Some(&root_s))
+            {
+                job.provider = Some(estimate.kind);
+                job.model = estimate.model;
+                job.currency = Some(estimate.currency);
+                job.estimated_cost_minor = Some(estimate.minor);
+            }
+        }
+        state.jobs.push(job);
     }
     let note = if approval_app.is_some() {
         format!("Render for Cut {cut_number} is ready. Use the one-time approval button; chat text cannot approve it.")

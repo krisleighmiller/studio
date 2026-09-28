@@ -75,6 +75,15 @@ export type AssembleIntent =
 
 export type ProfileIntent =
   | { type: "save"; profile: Record<string, unknown> }
+  | {
+      type: "set-budget";
+      budget: {
+        currency: string;
+        limit_minor: number | null;
+        warning_at_minor: number | null;
+        hard_stop: boolean;
+      } | null;
+    }
   | { type: "set-requirement"; requirementId: string; status: string; name: string }
   | { type: "add-requirement"; name: string; kind: string; sceneId: number | null };
 

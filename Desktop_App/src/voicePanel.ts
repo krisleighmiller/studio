@@ -963,6 +963,7 @@ async function saveDesign(generatedVoiceId: string): Promise<void> {
           accent: designAccent,
           note: designNote,
         },
+        projectRoot: hostProjectRoot(),
       },
     });
     designPreviewUrl = audioUrlFromBase64(preview.audioBase64, preview.mediaType);

@@ -2090,8 +2090,41 @@ button {
   grid-area: scenes;
 }
 
+.studio-jobs-panel {
+  grid-area: jobs;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
 .studio-jobs {
   grid-area: jobs;
+}
+
+.studio-budget {
+  margin: 0;
+  padding: 3px 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+  background: var(--sidebar);
+  border-top: 1px solid var(--border);
+}
+
+.studio-budget-over {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.workflow-budget-note {
+  margin: 4px 0 0;
+  color: var(--danger);
+  font-size: 11px;
+}
+
+.workflow-budget-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .workflow-main {

@@ -386,8 +386,8 @@ export type JobRecord = {
   completed_at?: string | null;
   scope?: JobScope | null;
   progress?: string | null;
-  cost?: number | null;
-  estimated_cost?: number | null;
+  cost_minor?: number | null;
+  estimated_cost_minor?: number | null;
   currency?: string | null;
   retry_of?: string | null;
 };
@@ -500,6 +500,17 @@ export type RequirementRecord = {
   user_added?: boolean;
 };
 
+export type ProjectBudget = {
+  /** ISO 4217 code for every amount in this budget. */
+  currency: string;
+  /** Hard ceiling in minor units (cents). Absent means no limit. */
+  limit_minor?: number | null;
+  /** Spend level that should surface a warning before the limit. */
+  warning_at_minor?: number | null;
+  /** When true, the ceiling cannot be bypassed by the Director. */
+  hard_stop?: boolean;
+};
+
 export type ProjectState = {
   version: number;
   project_name?: string | null;
@@ -508,6 +519,8 @@ export type ProjectState = {
   scenes: SceneRecord[];
   assets?: AssetRecord[];
   jobs?: JobRecord[];
+  /** Structured project budget. Absent means unbudgeted (no limit, no warning). */
+  budget?: ProjectBudget | null;
   profile?: ProductionProfile | null;
   requirements?: RequirementRecord[];
   notes?: string[];

@@ -1,4 +1,5 @@
 import type { AssetRecord, JobRecord, SceneRecord, StageId } from "../workflowTypes";
+import { minorToMoney } from "./money";
 
 export type JobFilter = "active" | "failed" | "awaiting" | "completed";
 
@@ -114,8 +115,8 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
   const completed = knownText(job.completed_at);
   const scope = job.scope?.kind && job.scope.id ? `${job.scope.kind} ${job.scope.id}` : "unknown";
   const progress = knownText(job.progress);
-  const estimate = money(job.estimated_cost);
-  const actual = money(job.cost);
+  const estimate = money(job.estimated_cost_minor);
+  const actual = money(job.cost_minor);
   const currency = knownText(job.currency);
   const retry = knownText(job.retry_of);
   const cost = `estimate ${estimate} · actual ${actual} · currency ${currency}`;
@@ -333,8 +334,7 @@ function knownText(value: string | null | undefined): string {
 }
 
 function money(value: number | null | undefined): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "unknown";
-  return String(value);
+  return minorToMoney(value);
 }
 
 function labelize(value: string): string {

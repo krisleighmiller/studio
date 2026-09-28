@@ -2,6 +2,7 @@
 pub mod animatic;
 pub mod breakdown;
 pub mod characters;
+pub mod cost;
 pub mod identity;
 pub mod import;
 pub mod intent;
@@ -33,7 +34,7 @@ use crate::director_actions::{
 };
 use crate::scene_plan::handoff::CutId;
 use crate::scene_plan::strategy::SceneStrategy;
-use crate::workflow::state::{AssetStatus, MouthPolicy, ShotRole, TakeStatus};
+use crate::workflow::state::{AssetStatus, MouthPolicy, ProjectBudget, ShotRole, TakeStatus};
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
@@ -268,6 +269,77 @@ pub fn cmd_save_profile(args: &Value) -> Result<Value, String> {
     state.profile = Some(profile);
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_note(imported, "Production profile saved.")
+}
+
+fn opt_i64_field(value: &Value, key: &str) -> Result<Option<i64>, String> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| format!("{key} must be an integer number of minor units")),
+        Some(Value::String(text)) if text.trim().is_empty() => Ok(None),
+        Some(Value::String(text)) => text
+            .trim()
+            .parse::<i64>()
+            .map(Some)
+            .map_err(|_| format!("{key} must be an integer number of minor units")),
+        _ => Err(format!("{key} must be an integer number of minor units")),
+    }
+}
+
+/// Parse and validate a budget object from the command payload. `None` (or
+/// `null`) clears the budget — it does not mean zero. A warning level above the
+/// limit, or any negative amount, is rejected outright.
+pub fn parse_budget(value: Option<&Value>) -> Result<Option<ProjectBudget>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let currency = value
+                .get("currency")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .unwrap_or("USD")
+                .to_string();
+            let limit_minor = opt_i64_field(value, "limit_minor")?;
+            let warning_at_minor = opt_i64_field(value, "warning_at_minor")?;
+            let hard_stop = value
+                .get("hard_stop")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if let Some(limit) = limit_minor {
+                if limit < 0 {
+                    return Err("Budget limit cannot be negative.".into());
+                }
+            }
+            if let Some(warning) = warning_at_minor {
+                if warning < 0 {
+                    return Err("Budget warning level cannot be negative.".into());
+                }
+            }
+            if let (Some(limit), Some(warning)) = (limit_minor, warning_at_minor) {
+                if warning > limit {
+                    return Err("Budget warning level cannot exceed the limit.".into());
+                }
+            }
+            Ok(Some(ProjectBudget {
+                currency,
+                limit_minor,
+                warning_at_minor,
+                hard_stop,
+            }))
+        }
+    }
+}
+
+pub fn cmd_set_budget(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let budget = parse_budget(args.get("budget"))?;
+    let mut state = import::load_state(Path::new(&root))?;
+    state.budget = budget;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(imported, "Project budget saved.")
 }
 
 pub fn cmd_set_requirement_status(args: &Value) -> Result<Value, String> {
@@ -1751,4 +1823,51 @@ fn push_intent_fields(lines: &mut Vec<String>, intent: Option<&Value>) {
         "Audience must know",
         intent.get("audience_must_know"),
     );
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn parse_budget_nulls_clear_the_budget() {
+        assert_eq!(parse_budget(None).unwrap(), None);
+        assert_eq!(parse_budget(Some(&Value::Null)).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_budget_reads_limit_warning_and_hard_stop() {
+        let value = json!({
+            "currency": "EUR",
+            "limit_minor": 5000,
+            "warning_at_minor": 4000,
+            "hard_stop": true,
+        });
+        let budget = parse_budget(Some(&value)).unwrap().unwrap();
+        assert_eq!(budget.currency, "EUR");
+        assert_eq!(budget.limit_minor, Some(5000));
+        assert_eq!(budget.warning_at_minor, Some(4000));
+        assert!(budget.hard_stop);
+    }
+
+    #[test]
+    fn parse_budget_defaults_currency_to_usd() {
+        let value = json!({ "limit_minor": 1000, "hard_stop": false });
+        let budget = parse_budget(Some(&value)).unwrap().unwrap();
+        assert_eq!(budget.currency, "USD");
+        assert_eq!(budget.limit_minor, Some(1000));
+        assert!(!budget.hard_stop);
+    }
+
+    #[test]
+    fn parse_budget_rejects_a_warning_above_the_limit() {
+        let value = json!({ "limit_minor": 1000, "warning_at_minor": 1500 });
+        assert!(parse_budget(Some(&value)).is_err());
+    }
+
+    #[test]
+    fn parse_budget_rejects_negative_amounts() {
+        assert!(parse_budget(Some(&json!({ "limit_minor": -1 }))).is_err());
+        assert!(parse_budget(Some(&json!({ "warning_at_minor": -5 }))).is_err());
+    }
 }

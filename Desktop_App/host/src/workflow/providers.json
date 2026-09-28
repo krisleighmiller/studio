@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "pricing_version": "2026-09-27-placeholder",
+  "note": "Representative pricing only. Keys are data strings, not enums: `kind` is an ApiEntry.kind (e.g. atlas-cloud, elevenlabs) and `capability` is a capabilityDefaults key (e.g. video.text_only, audio.tts_clone). Replace price_minor with current rate-card data and bump pricing_version before relying on totals. Unlisted kind/capability pairs resolve to Unknown, never zero.",
+  "prices": [
+    { "kind": "atlas-cloud", "capability": "image.text_to_image", "currency": "USD", "price_minor": 5 },
+    { "kind": "atlas-cloud", "capability": "video.text_only", "currency": "USD", "price_minor": 40 },
+    { "kind": "atlas-cloud", "capability": "video.start_frame", "currency": "USD", "price_minor": 40 },
+    { "kind": "elevenlabs", "capability": "audio.tts_profile", "currency": "USD", "price_minor": 15 },
+    { "kind": "elevenlabs", "capability": "audio.tts_clone", "currency": "USD", "price_minor": 1000 }
+  ]
+}

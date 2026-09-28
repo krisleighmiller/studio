@@ -252,6 +252,7 @@ pub fn dispatch(
         "workflow_approve_intent" => workflow::cmd_approve_intent(args),
         "workflow_set_strategy" => workflow::cmd_set_strategy(args),
         "workflow_save_profile" => workflow::cmd_save_profile(args),
+        "workflow_set_budget" => workflow::cmd_set_budget(args),
         "workflow_set_requirement_status" => workflow::cmd_set_requirement_status(args),
         "workflow_add_requirement" => workflow::cmd_add_requirement(args),
         "workflow_backfill_sketches" => workflow::cmd_backfill_sketches(args),

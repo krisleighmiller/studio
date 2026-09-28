@@ -145,7 +145,7 @@ pub fn get_prediction(
     let url = format!("{}/v1/tasks/{task_id}", base(api));
     let client = http_client(60)?;
     let deadline = Instant::now() + Duration::from_secs(wait_seconds.max(1));
-    let mut last = Value::Null;
+    let mut last: Value;
     loop {
         let mut req = client.get(&url);
         for (k, v) in auth_headers(api)? {

@@ -617,7 +617,6 @@ pub fn ensure_talking_still_9x16(input_path: &str, output_path: &str) -> Result<
 mod delete_tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
 
     #[test]
     fn deletes_nonempty_directory() {

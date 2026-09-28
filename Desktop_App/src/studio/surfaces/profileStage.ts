@@ -1,4 +1,5 @@
 import { REQUIREMENT_KINDS, REQUIREMENT_STATUSES } from "../../workflowTypes";
+import { minorToMoney, moneyToMinor } from "../money";
 import { getSurfaceHost, isProfileOpen, setProfileOpen } from "./session";
 import { presentSurface } from "./shared";
 import { buildProfileModel } from "./surfaceModels";
@@ -36,6 +37,7 @@ function paintProjectProfile(emit: (intent: ProfileIntent) => void): HTMLElement
   bar.append(recipe, summary, edit);
   wrap.append(bar);
   if (isProfileOpen()) wrap.append(renderProfileForm(emit));
+  if (isProfileOpen()) wrap.append(renderBudgetEditor(emit));
   wrap.append(renderRequirements(emit));
   return wrap;
 }
@@ -187,6 +189,104 @@ function renderProfileForm(emit: (intent: ProfileIntent) => void): HTMLElement {
     });
   });
   return form;
+}
+
+function renderBudgetEditor(emit: (intent: ProfileIntent) => void): HTMLElement {
+  const budget = getSurfaceHost().state?.budget ?? null;
+  const section = document.createElement("section");
+  section.className = "workflow-budget-editor";
+  section.setAttribute("aria-label", "Spend budget");
+  const heading = document.createElement("h2");
+  heading.textContent = "Spend budget";
+  const form = document.createElement("form");
+  form.className = "workflow-profile-form";
+
+  const currency = document.createElement("label");
+  currency.textContent = "Currency";
+  const currencyInput = document.createElement("input");
+  currencyInput.name = "budget_currency";
+  currencyInput.value = budget?.currency ?? "USD";
+
+  const limit = document.createElement("label");
+  limit.textContent = "Limit";
+  const limitInput = document.createElement("input");
+  limitInput.name = "budget_limit";
+  limitInput.placeholder = "e.g. 50.00";
+  limitInput.value = budget?.limit_minor != null ? minorToMoney(budget.limit_minor) : "";
+
+  const warning = document.createElement("label");
+  warning.textContent = "Warning at";
+  const warningInput = document.createElement("input");
+  warningInput.name = "budget_warning";
+  warningInput.placeholder = "e.g. 40.00";
+  warningInput.value = budget?.warning_at_minor != null ? minorToMoney(budget.warning_at_minor) : "";
+
+  const hardStop = document.createElement("label");
+  hardStop.className = "wide";
+  const hardStopInput = document.createElement("input");
+  hardStopInput.name = "budget_hard_stop";
+  hardStopInput.type = "checkbox";
+  hardStopInput.checked = budget?.hard_stop ?? false;
+  const hardStopText = document.createElement("span");
+  hardStopText.textContent = " Hard stop — the Director cannot exceed this limit";
+  hardStop.append(hardStopInput, hardStopText);
+
+  const note = document.createElement("p");
+  note.className = "workflow-budget-note";
+
+  currency.append(currencyInput);
+  limit.append(limitInput);
+  warning.append(warningInput);
+  form.append(currency, limit, warning, hardStop, note);
+
+  const actions = document.createElement("span");
+  actions.className = "workflow-budget-actions";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.className = "ghost-button";
+  save.textContent = "Save budget";
+  save.disabled = Boolean(getSurfaceHost().busy);
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "ghost-button";
+  clear.textContent = "Clear budget";
+  clear.disabled = Boolean(getSurfaceHost().busy) || !budget;
+  clear.addEventListener("click", () => emit({ type: "set-budget", budget: null }));
+  actions.append(save, clear);
+  form.append(actions);
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const currencyValue = currencyInput.value.trim() || "USD";
+    const limitText = limitInput.value.trim();
+    const warningText = warningInput.value.trim();
+    const limitMinor = limitText ? moneyToMinor(limitText) : null;
+    const warningMinor = warningText ? moneyToMinor(warningText) : null;
+    if (limitText && limitMinor == null) {
+      note.textContent = "Limit must be a dollar amount like 50 or 50.00.";
+      return;
+    }
+    if (warningText && warningMinor == null) {
+      note.textContent = "Warning level must be a dollar amount like 40 or 40.00.";
+      return;
+    }
+    if (limitMinor != null && warningMinor != null && warningMinor > limitMinor) {
+      note.textContent = "Warning level cannot exceed the limit.";
+      return;
+    }
+    emit({
+      type: "set-budget",
+      budget: {
+        currency: currencyValue,
+        limit_minor: limitMinor,
+        warning_at_minor: warningMinor,
+        hard_stop: hardStopInput.checked,
+      },
+    });
+  });
+
+  section.append(heading, form);
+  return section;
 }
 
 function renderRequirements(emit: (intent: ProfileIntent) => void): HTMLElement {

@@ -35,6 +35,11 @@ pub struct DirectorContext {
     /// Host-owned API labels are only for approval-card disclosure.
     #[serde(default)]
     pub api_labels: std::collections::HashMap<String, String>,
+    /// api id → provider kind (`ApiEntry.kind`), the data key the pricing
+    /// registry resolves against. Kept separate from the display label so the
+    /// cost layer stays API-agnostic.
+    #[serde(default)]
+    pub api_kinds: std::collections::HashMap<String, String>,
     /// Non-secret endpoint identity; approvals stale if a provider endpoint changes.
     #[serde(default)]
     pub api_fingerprints: std::collections::HashMap<String, u64>,
@@ -92,6 +97,11 @@ fn hydrate_routing_context(
         .iter()
         .filter(|api| api.enabled)
         .map(|api| (api.id.clone(), format!("{} ({})", api.name, api.kind)))
+        .collect();
+    context.api_kinds = apis
+        .iter()
+        .filter(|api| api.enabled)
+        .map(|api| (api.id.clone(), api.kind.clone()))
         .collect();
     context.api_fingerprints = apis
         .iter()
@@ -198,7 +208,13 @@ fn approval_route_details(
     }
     let mut providers = Vec::new();
     let mut models = Vec::new();
+    let mut known_cost: Option<String> = None;
     for (slot, model) in routes {
+        if known_cost.is_none() {
+            if let Some(kind) = context.api_kinds.get(&model.api_id) {
+                known_cost = crate::workflow::cost::known_price_label(kind, specialist);
+            }
+        }
         let provider = context
             .api_labels
             .get(&model.api_id)
@@ -218,7 +234,7 @@ fn approval_route_details(
     (
         providers.join(", "),
         models.join("; "),
-        "Unknown; provider pricing applies".into(),
+        known_cost.unwrap_or_else(|| "Unknown; provider pricing applies".into()),
     )
 }
 
@@ -231,6 +247,42 @@ pub(crate) fn approval_route_details_for_app(
     context.project_root = project_root.map(str::to_string);
     hydrate_context_from_app(app, &mut context)?;
     Ok(approval_route_details(action, &context, project_root))
+}
+
+/// A resolved paid estimate for one specialist action.
+pub struct ActionEstimate {
+    pub kind: String,
+    pub model: Option<String>,
+    pub currency: String,
+    pub minor: i64,
+}
+
+/// Resolve the first routed `(kind, model, price)` for a specialist action, or
+/// `None` when there is no route or the price is unknown. Used to stamp a known
+/// estimate onto a workflow job before generation. Unknown stays unknown.
+pub fn estimate_for_action(
+    app: &HostCtx,
+    action: &crate::director_actions::DirectorAction,
+    project_root: Option<&str>,
+) -> Result<Option<ActionEstimate>, String> {
+    let mut context = DirectorContext::default();
+    context.project_root = project_root.map(str::to_string);
+    hydrate_context_from_app(app, &mut context)?;
+    let specialist = action.specialist.as_deref().unwrap_or("");
+    let routes = crate::specialists::approval_model_routes(action, &context, project_root);
+    for (_slot, model) in routes {
+        if let Some(kind) = context.api_kinds.get(&model.api_id) {
+            if let Some((currency, minor)) = crate::workflow::cost::known_price(kind, specialist) {
+                return Ok(Some(ActionEstimate {
+                    kind: kind.clone(),
+                    model: Some(model.model_id.clone()),
+                    currency,
+                    minor,
+                }));
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn format_approval_request_for_app(
@@ -1227,6 +1279,38 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
         "director-progress",
         "Host executing approved action…".to_string(),
     );
+
+    // Budget gate: veto a hard-stop over-limit spend before any paid provider
+    // call. Unknown-cost operations are not vetoed here — the ledger flags them
+    // once their cost is known. This is the one path the Director cannot bypass.
+    if validated.action.action == ActionKind::RunSpecialist {
+        if let Some(root) = project_root_ref {
+            if let Ok(state) = crate::workflow::import::load_state(std::path::Path::new(root)) {
+                let routes = crate::specialists::approval_model_routes(
+                    &validated.action,
+                    &context,
+                    project_root_ref,
+                );
+                for (_slot, model) in routes {
+                    if let Some(kind) = context.api_kinds.get(&model.api_id) {
+                        if let Some(minor) =
+                            crate::workflow::cost::known_spend_minor(kind, specialist)
+                        {
+                            if crate::workflow::cost::gate_spend(&state, minor)
+                                == crate::workflow::cost::SpendGate::Blocked
+                            {
+                                return Err(
+                                    "Budget hard stop: this operation would exceed the project budget limit. Adjust the budget or the operation before retrying."
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let outcome = match validated.action.action {
         ActionKind::RunSpecialist => {
             let specialist_llm = planner_llm.as_ref().map(|(api, key, model)| SpecialistLlm {

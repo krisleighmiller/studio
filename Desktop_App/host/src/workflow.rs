@@ -1,5 +1,6 @@
 //! V2 workflow: typed project state and import from existing folders.
 pub mod animatic;
+pub mod audio;
 pub mod breakdown;
 pub mod characters;
 pub mod cost;

@@ -232,6 +232,16 @@ pub enum AssetRole {
     EditSource,
     VideoTake,
     AudioTake,
+    Dialogue,
+    VoiceOver,
+    Music,
+    Ambience,
+    RoomTone,
+    SoundEffect,
+    Foley,
+    SourceAudio,
+    ScratchAudio,
+    Mix,
     SelectedTake,
     AssemblyDraft,
     FinalExport,
@@ -325,6 +335,62 @@ impl AssetRole {
         ]
     }
 
+    /// All audio roles as one flat set (per the "one surface, not one per role" rule).
+    pub fn audio_roles() -> [Self; 10] {
+        [
+            Self::Dialogue,
+            Self::VoiceOver,
+            Self::Music,
+            Self::Ambience,
+            Self::RoomTone,
+            Self::SoundEffect,
+            Self::Foley,
+            Self::SourceAudio,
+            Self::ScratchAudio,
+            Self::Mix,
+        ]
+    }
+
+    pub fn is_audio(self) -> bool {
+        matches!(
+            self,
+            Self::AudioTake
+                | Self::VoiceSample
+                | Self::VoiceProfile
+                | Self::Dialogue
+                | Self::VoiceOver
+                | Self::Music
+                | Self::Ambience
+                | Self::RoomTone
+                | Self::SoundEffect
+                | Self::Foley
+                | Self::SourceAudio
+                | Self::ScratchAudio
+                | Self::Mix
+        )
+    }
+
+    /// Resolve a role keyword (from a plan string or UI) to an audio role.
+    pub fn parse_audio(value: &str) -> Option<Self> {
+        let v = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        let mapped = match v.as_str() {
+            "dialogue" | "dialog" | "speech" => Some(Self::Dialogue),
+            "voice_over" | "voiceover" | "vo" | "narration" | "narrator" => Some(Self::VoiceOver),
+            "music" | "score" | "soundtrack" | "theme" => Some(Self::Music),
+            "ambience" | "ambient" | "atmosphere" | "bed" => Some(Self::Ambience),
+            "room_tone" | "roomtone" | "tone" => Some(Self::RoomTone),
+            "sound_effect" | "soundeffect" | "sfx" | "effect" | "effects" => {
+                Some(Self::SoundEffect)
+            }
+            "foley" => Some(Self::Foley),
+            "source_audio" | "sourceaudio" | "source" => Some(Self::SourceAudio),
+            "scratch_audio" | "scratchaudio" | "scratch" => Some(Self::ScratchAudio),
+            "mix" | "final_mix" | "master" => Some(Self::Mix),
+            other => serde_json::from_value(serde_json::Value::String(other.to_string())).ok(),
+        };
+        mapped.filter(|role| role.is_audio())
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::IdentityReference => "identity_reference",
@@ -351,6 +417,16 @@ impl AssetRole {
             Self::EditSource => "edit_source",
             Self::VideoTake => "video_take",
             Self::AudioTake => "audio_take",
+            Self::Dialogue => "dialogue",
+            Self::VoiceOver => "voice_over",
+            Self::Music => "music",
+            Self::Ambience => "ambience",
+            Self::RoomTone => "room_tone",
+            Self::SoundEffect => "sound_effect",
+            Self::Foley => "foley",
+            Self::SourceAudio => "source_audio",
+            Self::ScratchAudio => "scratch_audio",
+            Self::Mix => "mix",
             Self::SelectedTake => "selected_take",
             Self::AssemblyDraft => "assembly_draft",
             Self::FinalExport => "final_export",
@@ -369,6 +445,16 @@ impl AssetRole {
             Self::LightingReference => "Lighting",
             Self::CompositionReference => "Composition",
             Self::GroupReference => "Group",
+            Self::Dialogue => "Dialogue",
+            Self::VoiceOver => "Voice over",
+            Self::Music => "Music",
+            Self::Ambience => "Ambience",
+            Self::RoomTone => "Room tone",
+            Self::SoundEffect => "Sound effect",
+            Self::Foley => "Foley",
+            Self::SourceAudio => "Source audio",
+            Self::ScratchAudio => "Scratch audio",
+            Self::Mix => "Mix",
             other => other.label(),
         }
     }

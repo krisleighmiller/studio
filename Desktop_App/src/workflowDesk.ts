@@ -735,6 +735,7 @@ function renderSceneList(): HTMLElement {
       selectedKey: selected ? sceneSelectionKey(selected) : null,
       blockerCounts,
       resolvePath: resolveProjectPath,
+      state: state ?? null,
     }),
     (key) => {
       const scene = state?.scenes.find((item) => sceneSelectionKey(item) === key);

@@ -45,6 +45,12 @@ export function renderSceneListView(
     meta.className = "workflow-scene-mix";
     meta.textContent = `${item.numberLabel} · ${item.readiness}`;
     copy.append(title, meta);
+    if (item.audio) {
+      const audio = document.createElement("span");
+      audio.className = "workflow-scene-audio";
+      audio.textContent = item.audio;
+      copy.append(audio);
+    }
     button.append(copy);
     button.addEventListener("click", () => onSelect(item.key));
     aside.append(button);

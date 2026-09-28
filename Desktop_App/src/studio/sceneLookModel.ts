@@ -3,9 +3,11 @@ import {
   type AssetRecord,
   type JobRecord,
   type LookSlot,
+  type ProjectState,
   type SceneRecord,
   type SceneReport,
 } from "../workflowTypes";
+import { buildAudioStatus, describeAudioStatus } from "./selectors/audio";
 
 export type SceneListItemModel = {
   key: string;
@@ -15,6 +17,7 @@ export type SceneListItemModel = {
   readiness: string;
   warning: boolean;
   active: boolean;
+  audio: string | null;
 };
 
 export type LookVersionModel = {
@@ -77,6 +80,7 @@ export function buildSceneList(input: {
   selectedKey: string | null;
   blockerCounts: Map<number, number>;
   resolvePath: (path: string | null | undefined) => string | null;
+  state: ProjectState | null;
 }): SceneListItemModel[] {
   return input.scenes.map((scene) => {
     const sceneReport = input.reports.find((item) => item.id === scene.id);
@@ -90,6 +94,9 @@ export function buildSceneList(input: {
       readiness: readinessLabel(scene, sceneReport, blockers),
       warning: warningCount > 0 || Boolean(sceneReport?.effectively_performance_heavy),
       active: sceneSelectionKey(scene) === input.selectedKey,
+      audio: input.state
+        ? describeAudioStatus(buildAudioStatus(input.state, scene.id))
+        : null,
     };
   });
 }

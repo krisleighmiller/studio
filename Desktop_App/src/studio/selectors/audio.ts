@@ -114,3 +114,20 @@ export function buildAudioStatus(state: ProjectState, sceneId: number): AudioSta
     blocksFinish: missing.length > 0 || !allApproved,
   };
 }
+
+/** Compact one-line summary of a scene's audio status, or `null` when nothing
+ *  is required or present (so callers can omit the line). */
+export function describeAudioStatus(status: AudioStatusModel | null): string | null {
+  if (!status) return null;
+  if (status.required.length === 0 && status.roles.every((role) => !role.present)) return null;
+  if (!status.blocksFinish) return "Audio complete";
+  const parts: string[] = [];
+  if (status.missing.length) {
+    parts.push(`missing ${status.missing.map(audioRoleLabel).join(", ")}`);
+  }
+  const unapproved = status.roles
+    .filter((role) => role.present && !role.approved)
+    .map((role) => audioRoleLabel(role.role));
+  if (unapproved.length) parts.push(`unapproved ${unapproved.join(", ")}`);
+  return `Audio: ${parts.join("; ")}`;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAudioStatus, parseAudioRoles } from "../src/studio/selectors/audio";
+import { buildAudioStatus, describeAudioStatus, parseAudioRoles } from "../src/studio/selectors/audio";
 import type { AssetRecord, ProjectState, SceneRecord } from "../src/workflowTypes";
 
 function baseState(): ProjectState {
@@ -85,5 +85,30 @@ describe("buildAudioStatus", () => {
 
   it("returns null for an unknown scene", () => {
     expect(buildAudioStatus(baseState(), 99)).toBeNull();
+  });
+});
+
+describe("describeAudioStatus", () => {
+  it("is null when nothing is required or present", () => {
+    const state = baseState();
+    state.scenes = [scene(1, false)];
+    expect(describeAudioStatus(buildAudioStatus(state, 1)!)).toBeNull();
+  });
+
+  it("summarizes missing and unapproved roles", () => {
+    const state = withProfile(baseState(), "music and ambience");
+    state.scenes = [scene(1, true)];
+    state.assets = [asset("m", "music", 1, "draft")];
+    const status = buildAudioStatus(state, 1)!;
+    expect(describeAudioStatus(status)).toBe(
+      "Audio: missing Ambience, Dialogue; unapproved Music",
+    );
+  });
+
+  it("reports complete when required audio is approved", () => {
+    const state = withProfile(baseState(), "music");
+    state.scenes = [scene(1, false)];
+    state.assets = [asset("m", "music", 1, "approved")];
+    expect(describeAudioStatus(buildAudioStatus(state, 1)!)).toBe("Audio complete");
   });
 });

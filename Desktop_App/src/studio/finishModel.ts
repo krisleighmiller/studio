@@ -225,14 +225,19 @@ function qcItem(scene: SceneRecord, deliverables: DeliverableRecord[]): FinishIt
   if (!check) return item("qc", "QC", "pending", "Not checked");
   const name = deliverables.find((item) => item.id === check.deliverable_id)?.name ?? "Deliverable";
   const notes = (check.messages ?? []).filter(Boolean).join(" ");
+  const mediaNotes = (check.media_findings ?? [])
+    .filter((finding) => finding.severity !== "info")
+    .map((finding) => finding.message)
+    .join(" · ");
+  const detail = [notes, mediaNotes].filter(Boolean).join(" · ");
   if (!check.passed) {
-    return item("qc", "QC", "blocked", notes ? `${name} failed. ${notes}` : `${name} failed`);
+    return item("qc", "QC", "blocked", detail ? `${name} failed. ${detail}` : `${name} failed`);
   }
   const lockedId = scene.post?.picture_locked_id;
   if (lockedId && check.version_id && check.version_id !== lockedId) {
     return item("qc", "QC", "stale", `${name} passed an older cut version`);
   }
-  return item("qc", "QC", "complete", notes ? `${name} passed. ${notes}` : `${name} passed`);
+  return item("qc", "QC", "complete", detail ? `${name} passed. ${detail}` : `${name} passed`);
 }
 
 function postStatus(post: SceneRecord["post"], field: string): string {

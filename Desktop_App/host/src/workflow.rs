@@ -10,6 +10,7 @@ pub mod llm;
 pub mod look;
 pub mod post;
 pub mod production;
+pub mod qc;
 pub mod recipe;
 pub mod report;
 pub mod route;
@@ -1528,7 +1529,7 @@ pub fn cmd_check_deliverable(args: &Value) -> Result<Value, String> {
     let deliverable_id =
         opt_str(args, "deliverableId").ok_or_else(|| "Missing deliverableId".to_string())?;
     let mut state = import::load_state(Path::new(&root))?;
-    let check = post::check_deliverable(&mut state, scene_id, &deliverable_id)?;
+    let check = post::check_deliverable(&mut state, scene_id, &deliverable_id, Path::new(&root))?;
     let imported = import::save_project(Path::new(&root), state)?;
     let verdict = if check.passed { "passed" } else { "failed" };
     result_with_note(

@@ -4,7 +4,9 @@
 //! version. Straightforward concat stays on the assemble job. Taste-heavy
 //! editorial is recorded as an external NLE decision and leaves the files put.
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
+use crate::workflow::qc::{QCFinding, QCSeverity};
 use crate::workflow::state::{
     CutRecord, ProductionProfile, ProjectState, SceneRecord, TakeRecord, TakeStatus,
 };
@@ -195,6 +197,8 @@ pub struct DeliverableCheck {
     pub aspect_ok: bool,
     pub missing_shots: Vec<MissingShot>,
     pub messages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_findings: Vec<QCFinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -440,6 +444,7 @@ pub fn check_deliverable(
     state: &mut ProjectState,
     scene_id: u32,
     deliverable_id: &str,
+    project_root: &Path,
 ) -> Result<DeliverableCheck, String> {
     let profile = state
         .profile
@@ -451,7 +456,7 @@ pub fn check_deliverable(
         .find(|item| item.id == deliverable_id)
         .cloned()
         .ok_or_else(|| format!("deliverable `{deliverable_id}` not found"))?;
-    let (missing, version_id) = {
+    let (missing, version_id, assembly_path) = {
         let scene = state
             .scene(scene_id)
             .ok_or_else(|| format!("Scene {scene_id} not found"))?;
@@ -462,6 +467,7 @@ pub fn check_deliverable(
                 .or_else(|| post.versions.last())
         });
         let version_id = version.map(|version| version.id.clone());
+        let assembly_path = version.and_then(|version| version.assembly_path.clone());
         let mut missing = Vec::new();
         for cut in &scene.cuts {
             let covered = version.is_some_and(|version| {
@@ -484,7 +490,7 @@ pub fn check_deliverable(
                 });
             }
         }
-        (missing, version_id)
+        (missing, version_id, assembly_path)
     };
     let (resolution_ok, resolution_message) = resolution_gate(&profile, &deliverable.resolution);
     let (aspect_ok, aspect_message) = aspect_gate(
@@ -507,14 +513,58 @@ pub fn check_deliverable(
                 .join(", ")
         ));
     }
+    let media_findings = assembly_path
+        .as_deref()
+        .map(|relative| {
+            let absolute = if Path::new(relative).is_absolute() {
+                Path::new(relative).to_path_buf()
+            } else {
+                project_root.join(relative)
+            };
+            crate::workflow::qc::check_media_file(&absolute, None, 0.3)
+                .into_iter()
+                .map(|mut finding| {
+                    finding.artifact_id = version_id.clone();
+                    finding
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let media_ok = !media_findings
+        .iter()
+        .any(|finding| finding.severity == QCSeverity::Error);
+    if !media_findings.is_empty() {
+        let errors = media_findings
+            .iter()
+            .filter(|finding| finding.severity == QCSeverity::Error)
+            .count();
+        let warnings = media_findings
+            .iter()
+            .filter(|finding| finding.severity == QCSeverity::Warning)
+            .count();
+        let summary = if errors == 0 && warnings == 0 {
+            "media probes clean".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if errors > 0 {
+                parts.push(format!("{errors} technical error(s)"));
+            }
+            if warnings > 0 {
+                parts.push(format!("{warnings} warning(s)"));
+            }
+            parts.join(", ")
+        };
+        messages.push(format!("Media: {summary}."));
+    }
     let check = DeliverableCheck {
         deliverable_id: deliverable.id,
         version_id,
-        passed: resolution_ok && aspect_ok && missing.is_empty(),
+        passed: resolution_ok && aspect_ok && missing.is_empty() && media_ok,
         resolution_ok,
         aspect_ok,
         missing_shots: missing,
         messages,
+        media_findings,
     };
     let scene = scene_mut(state, scene_id)?;
     scene.post.get_or_insert_with(ScenePost::default).last_check = Some(check.clone());
@@ -686,7 +736,7 @@ mod tests {
         assert_eq!(fs::read(dir.path().join("a.mp4")).unwrap(), b"take-a");
         assert_eq!(fs::read(dir.path().join("b.mp4")).unwrap(), b"take-b");
 
-        let check = check_deliverable(&mut state, 1, "del_scene").unwrap();
+        let check = check_deliverable(&mut state, 1, "del_scene", dir.path()).unwrap();
         assert!(check.passed, "{:?}", check.messages);
         assert!(check.resolution_ok);
         assert!(check.aspect_ok);
@@ -694,7 +744,7 @@ mod tests {
 
         state.profile.as_mut().unwrap().deliverables[0].aspect_ratio = Some("16:9".into());
         state.profile.as_mut().unwrap().deliverables[0].resolution = Some("1920x1080".into());
-        let mismatch = check_deliverable(&mut state, 1, "del_scene").unwrap();
+        let mismatch = check_deliverable(&mut state, 1, "del_scene", dir.path()).unwrap();
         assert!(!mismatch.resolution_ok);
         assert!(!mismatch.aspect_ok);
         assert!(!mismatch.passed);
@@ -703,7 +753,7 @@ mod tests {
         let mut third = CutRecord::new(CutId::new(1, 3));
         third.stable_id = "shot_c".into();
         scene.cuts.push(third);
-        let missing = check_deliverable(&mut state, 1, "del_scene").unwrap();
+        let missing = check_deliverable(&mut state, 1, "del_scene", dir.path()).unwrap();
         assert_eq!(missing.missing_shots.len(), 1);
         assert_eq!(missing.missing_shots[0].cut_label, 3);
         assert_eq!(

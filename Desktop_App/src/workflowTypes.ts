@@ -280,6 +280,16 @@ export type CutVersion = {
   editorial_path?: EditorialPath;
 };
 
+export type QCSeverity = "info" | "warning" | "error";
+
+export type QCFinding = {
+  id: string;
+  severity: QCSeverity;
+  check: string;
+  message: string;
+  artifact_id?: string | null;
+};
+
 export type DeliverableCheck = {
   deliverable_id: string;
   version_id?: string | null;
@@ -288,6 +298,7 @@ export type DeliverableCheck = {
   aspect_ok: boolean;
   missing_shots?: { shot_id: string; cut_label: number; reason: string }[];
   messages?: string[];
+  media_findings?: QCFinding[];
 };
 
 export type ScenePost = {

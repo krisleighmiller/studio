@@ -66,6 +66,7 @@ export function buildStudioView(input: {
       jobs,
       deliverables: input.state.profile?.deliverables ?? [],
       busyReason: input.busy,
+      state: input.state,
     }),
   };
 }

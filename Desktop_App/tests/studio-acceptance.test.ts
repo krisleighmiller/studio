@@ -364,6 +364,7 @@ describe("phase 5 shell selectors", () => {
       jobs: [],
       deliverables: [],
       busyReason: null,
+      state: null,
     });
     expect(model.headline).not.toBe("Complete");
     expect(model.items.some((item) => item.state === "complete")).toBe(false);

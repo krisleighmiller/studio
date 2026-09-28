@@ -1,4 +1,5 @@
-import type { DeliverableRecord, JobRecord, SceneRecord } from "../workflowTypes";
+import type { DeliverableRecord, JobRecord, ProjectState, SceneRecord } from "../workflowTypes";
+import { audioRoleLabel, buildAudioStatus } from "./selectors/audio";
 
 export type FinishState = "complete" | "pending" | "blocked" | "stale" | "awaiting";
 
@@ -43,6 +44,7 @@ export function buildFinishModel(input: {
   jobs: JobRecord[];
   deliverables: DeliverableRecord[];
   busyReason: string | null;
+  state: ProjectState | null;
 }): FinishModel {
   if (!input.scene) {
     return {
@@ -71,6 +73,7 @@ export function buildFinishModel(input: {
     assemblyItem(scene, reviewExportPath, latest?.label ?? null, latest?.stage ?? null),
     pictureItem(locked?.label ?? null, Boolean(locked)),
     postItem(scene),
+    audioItem(scene, input.state),
     qcItem(scene, input.deliverables),
   ];
   const gated = takesMissing
@@ -217,6 +220,27 @@ function postItem(scene: SceneRecord): FinishItemModel {
     .map((field) => `${field.label} ${POST_LABELS[postStatus(post, field.id)] ?? "not started"}`)
     .join(" · ");
   return item("post", "Post", awaiting ? "awaiting" : "pending", detail);
+}
+
+function audioItem(scene: SceneRecord, state: ProjectState | null): FinishItemModel {
+  if (!state) return item("audio", "Audio", "pending", "Not determined");
+  const status = buildAudioStatus(state, scene.id);
+  if (!status) return item("audio", "Audio", "pending", "Not determined");
+  if (status.required.length === 0 && status.roles.every((role) => !role.present)) {
+    return item("audio", "Audio", "complete", "No audio required");
+  }
+  if (status.blocksFinish) {
+    const parts: string[] = [];
+    if (status.missing.length) {
+      parts.push(`Missing ${status.missing.map(audioRoleLabel).join(", ")}`);
+    }
+    const unapproved = status.roles
+      .filter((role) => role.present && !role.approved)
+      .map((role) => audioRoleLabel(role.role));
+    if (unapproved.length) parts.push(`Unapproved ${unapproved.join(", ")}`);
+    return item("audio", "Audio", "blocked", parts.join(" · "));
+  }
+  return item("audio", "Audio", "complete", "Audio approved");
 }
 
 function qcItem(scene: SceneRecord, deliverables: DeliverableRecord[]): FinishItemModel {

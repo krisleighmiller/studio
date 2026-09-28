@@ -1810,6 +1810,7 @@ function renderFinishPanel(): HTMLElement {
       jobs: state?.jobs ?? [],
       deliverables: state?.profile?.deliverables ?? [],
       busyReason: busy,
+      state,
     }),
     (intent) => handleFinishIntent(intent),
   );

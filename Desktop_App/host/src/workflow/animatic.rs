@@ -14,7 +14,7 @@ use crate::scene_plan::timing::{normalized_words, round2};
 use crate::script::BeatKind;
 use crate::workflow::state::{
     AnimaticShot, CoverageWarning, CoverageWarningKind, ProjectState, SceneAnimatic, SceneRecord,
-    ShotRole,
+    SequenceTransition, ShotRole,
 };
 
 const MIN_DURATION: f64 = 0.4;
@@ -64,6 +64,9 @@ pub fn sync(state: &mut ProjectState) -> bool {
                 cut_id,
                 duration_seconds: duration,
                 scratch_audio_path: None,
+                trim_in_seconds: None,
+                trim_out_seconds: None,
+                transition: None,
             });
             next_shot += 1;
             changed = true;
@@ -102,6 +105,85 @@ pub fn set_duration(scene: &mut SceneRecord, shot_id: &str, seconds: f64) -> Res
     };
     mark_packages_from(scene, index);
     Ok(())
+}
+
+/// Set non-destructive trim points (seconds off the head/tail) on an animatic
+/// shot. Either may be `None` to leave that side untouched; pass `Some(0.0)` to
+/// clear. Trim points must leave a positive runtime. Marks later packages stale —
+/// no frames or takes are deleted.
+pub fn set_trim(
+    scene: &mut SceneRecord,
+    shot_id: &str,
+    trim_in: Option<f64>,
+    trim_out: Option<f64>,
+) -> Result<(), String> {
+    for value in [trim_in, trim_out].into_iter().flatten() {
+        if !value.is_finite() || value < 0.0 {
+            return Err("Trim must be a non-negative number of seconds.".into());
+        }
+    }
+    let head = trim_in.unwrap_or(0.0);
+    let tail = trim_out.unwrap_or(0.0);
+    let index = {
+        let animatic = scene
+            .animatic
+            .as_mut()
+            .ok_or_else(|| "This scene has no animatic.".to_string())?;
+        let index = animatic
+            .shots
+            .iter()
+            .position(|shot| shot.id == shot_id)
+            .ok_or_else(|| format!("animatic shot {shot_id} not found"))?;
+        let shot = &mut animatic.shots[index];
+        if head + tail >= shot.duration_seconds {
+            return Err("Trim points leave the shot with no runtime. Set a smaller trim.".into());
+        }
+        if shot.trim_in_seconds == trim_in && shot.trim_out_seconds == trim_out {
+            return Ok(());
+        }
+        shot.trim_in_seconds = trim_in;
+        shot.trim_out_seconds = trim_out;
+        animatic.approved = false;
+        index
+    };
+    mark_packages_from(scene, index);
+    Ok(())
+}
+
+/// Set the transition out of an animatic shot (`cut`, `dissolve`, or
+/// `fade_through_black`); `None`/empty clears it back to a plain cut. Returns
+/// the effective transition.
+pub fn set_transition(
+    scene: &mut SceneRecord,
+    shot_id: &str,
+    transition: Option<&str>,
+) -> Result<SequenceTransition, String> {
+    let parsed = match transition.map(str::trim) {
+        None | Some("") => None,
+        Some(value) => Some(
+            SequenceTransition::parse(value)
+                .ok_or_else(|| format!("unknown transition '{value}'"))?,
+        ),
+    };
+    let index = {
+        let animatic = scene
+            .animatic
+            .as_mut()
+            .ok_or_else(|| "This scene has no animatic.".to_string())?;
+        let index = animatic
+            .shots
+            .iter()
+            .position(|shot| shot.id == shot_id)
+            .ok_or_else(|| format!("animatic shot {shot_id} not found"))?;
+        if animatic.shots[index].transition == parsed {
+            return Ok(parsed.unwrap_or(SequenceTransition::Cut));
+        }
+        animatic.shots[index].transition = parsed;
+        animatic.approved = false;
+        index
+    };
+    mark_packages_from(scene, index);
+    Ok(parsed.unwrap_or(SequenceTransition::Cut))
 }
 
 pub fn reorder(scene: &mut SceneRecord, shot_ids: &[String]) -> Result<(), String> {
@@ -656,6 +738,9 @@ mod tests {
                 cut_id: CutId::new(1, 1),
                 duration_seconds: 2.0,
                 scratch_audio_path: Some(rel.into()),
+                trim_in_seconds: None,
+                trim_out_seconds: None,
+                transition: None,
             }],
             warnings: Vec::new(),
         });
@@ -724,5 +809,56 @@ mod tests {
         assert!(warnings
             .iter()
             .all(|warning| !warning.id.chars().all(|ch| ch.is_ascii_digit())));
+    }
+
+    #[test]
+    fn trims_and_transitions_are_non_destructive() {
+        let mut state = ProjectState::new();
+        let scene = state.scene_mut(1, "Scene");
+        scene.animatic = Some(SceneAnimatic {
+            id: "animatic_1".into(),
+            approved: true,
+            shots: vec![AnimaticShot {
+                id: "shot".into(),
+                cut_id: CutId::new(1, 1),
+                duration_seconds: 10.0,
+                scratch_audio_path: None,
+                trim_in_seconds: None,
+                trim_out_seconds: None,
+                transition: None,
+            }],
+            warnings: Vec::new(),
+        });
+        scene.cut_mut(1).prompt = Some("a close up".into());
+
+        // Trimming marks the animatic unapproved and the cut package stale,
+        // and leaves takes untouched (non-destructive).
+        set_trim(scene, "shot", Some(1.0), Some(2.0)).unwrap();
+        let shot = &scene.animatic.as_ref().unwrap().shots[0];
+        assert_eq!(shot.trim_in_seconds, Some(1.0));
+        assert_eq!(shot.trim_out_seconds, Some(2.0));
+        assert!(!scene.animatic.as_ref().unwrap().approved);
+        assert!(scene.cuts[0].package_needs_review);
+        assert!(scene.cuts[0].takes.is_empty());
+
+        // Transitions parse, store, clear back to a plain cut, and reject junk.
+        assert_eq!(
+            set_transition(scene, "shot", Some("dissolve")).unwrap(),
+            SequenceTransition::Dissolve
+        );
+        assert_eq!(
+            scene.animatic.as_ref().unwrap().shots[0].transition,
+            Some(SequenceTransition::Dissolve)
+        );
+        assert!(set_transition(scene, "shot", Some("whoosh")).is_err());
+        assert_eq!(
+            set_transition(scene, "shot", None).unwrap(),
+            SequenceTransition::Cut
+        );
+        assert_eq!(scene.animatic.as_ref().unwrap().shots[0].transition, None);
+
+        // A trim that consumes the whole shot is rejected.
+        assert!(set_trim(scene, "shot", Some(5.0), Some(5.0)).is_err());
+        assert!(set_trim(scene, "shot", Some(-1.0), None).is_err());
     }
 }

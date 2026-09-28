@@ -1078,6 +1078,40 @@ pub struct CoverageWarning {
     pub message: String,
 }
 
+/// Editorial transition between two shots in the assembled sequence (`cut` is
+/// the default no-effect handoff).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SequenceTransition {
+    Cut,
+    Dissolve,
+    FadeThroughBlack,
+}
+
+impl SequenceTransition {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' '], "_")
+            .as_str()
+        {
+            "cut" => Some(Self::Cut),
+            "dissolve" | "cross_dissolve" => Some(Self::Dissolve),
+            "fade_through_black" | "fade_to_black" | "fade" => Some(Self::FadeThroughBlack),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cut => "cut",
+            Self::Dissolve => "dissolve",
+            Self::FadeThroughBlack => "fade_through_black",
+        }
+    }
+}
+
 /// Timing and order for one cut sketch. The id is allocated once and is not
 /// the cut number or the position in the rough cut.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1087,6 +1121,14 @@ pub struct AnimaticShot {
     pub duration_seconds: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scratch_audio_path: Option<String>,
+    /// Seconds trimmed off the head (edit in-point).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_in_seconds: Option<f64>,
+    /// Seconds trimmed off the tail (edit out-point).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_out_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<SequenceTransition>,
 }
 
 /// Rough-cut timing laid over cut sketches. Not a second copy of the prompts.

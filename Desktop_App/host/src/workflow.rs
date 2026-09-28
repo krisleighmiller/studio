@@ -600,6 +600,46 @@ pub fn cmd_clear_scratch_audio(args: &Value) -> Result<Value, String> {
     result_with_note(imported, "Removed scratch audio.")
 }
 
+pub fn cmd_set_shot_trim(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let shot_id = opt_str(args, "shotId").ok_or_else(|| "Missing shot id".to_string())?;
+    let trim_in = opt_f64(args, "trimInSeconds")?;
+    let trim_out = opt_f64(args, "trimOutSeconds")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let scene = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .ok_or_else(|| format!("scene {scene_id} not found"))?;
+    crate::workflow::animatic::set_trim(scene, &shot_id, trim_in, trim_out)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        "Trim saved. Later shot packages need review. Renders were kept.",
+    )
+}
+
+pub fn cmd_set_shot_transition(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let scene_id = arg_u32(args, "sceneId")?;
+    let shot_id = opt_str(args, "shotId").ok_or_else(|| "Missing shot id".to_string())?;
+    let transition = opt_str(args, "transition");
+    let mut state = import::load_state(Path::new(&root))?;
+    let scene = state
+        .scenes
+        .iter_mut()
+        .find(|scene| scene.id == scene_id)
+        .ok_or_else(|| format!("scene {scene_id} not found"))?;
+    let effective =
+        crate::workflow::animatic::set_transition(scene, &shot_id, transition.as_deref())?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(
+        imported,
+        format!("Transition set to {}.", effective.label()),
+    )
+}
+
 pub fn cmd_clear_package_review(args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;

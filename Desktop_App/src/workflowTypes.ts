@@ -160,11 +160,16 @@ export type CutId = {
   cut: number;
 };
 
+export type SequenceTransition = "cut" | "dissolve" | "fade_through_black";
+
 export type AnimaticShot = {
   id: string;
   cut_id: CutId;
   duration_seconds: number;
   scratch_audio_path?: string | null;
+  trim_in_seconds?: number | null;
+  trim_out_seconds?: number | null;
+  transition?: SequenceTransition | null;
 };
 
 export type CoverageWarning = {

@@ -265,6 +265,8 @@ pub fn dispatch(
         "workflow_approve_animatic" => workflow::cmd_approve_animatic(args),
         "workflow_attach_scratch_audio" => workflow::cmd_attach_scratch_audio(args),
         "workflow_clear_scratch_audio" => workflow::cmd_clear_scratch_audio(args),
+        "workflow_set_shot_trim" => workflow::cmd_set_shot_trim(args),
+        "workflow_set_shot_transition" => workflow::cmd_set_shot_transition(args),
         "workflow_clear_package_review" => workflow::cmd_clear_package_review(args),
         "workflow_draft_look" => workflow::cmd_draft_look(app, args),
         "workflow_update_look_slot" => workflow::cmd_update_look_slot(args),

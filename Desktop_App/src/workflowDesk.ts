@@ -1402,6 +1402,21 @@ function handleSketchIntent(scene: SceneRecord, intent: SketchIntent): void {
         durationSeconds: intent.durationSeconds,
       });
       break;
+    case "set-shot-trim":
+      void runAction("Saving trim…", "workflow_set_shot_trim", {
+        sceneId: scene.id,
+        shotId: intent.shotId,
+        trimInSeconds: intent.trimInSeconds,
+        trimOutSeconds: intent.trimOutSeconds,
+      });
+      break;
+    case "set-shot-transition":
+      void runAction("Saving transition…", "workflow_set_shot_transition", {
+        sceneId: scene.id,
+        shotId: intent.shotId,
+        transition: intent.transition,
+      });
+      break;
     case "reorder-animatic":
       void runAction("Reordering animatic…", "workflow_reorder_animatic", {
         sceneId: scene.id,

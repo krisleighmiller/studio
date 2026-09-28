@@ -7,6 +7,8 @@ export type SketchIntent =
   | { type: "draft"; strategy: string }
   | { type: "approve-animatic" }
   | { type: "set-duration"; shotId: string; durationSeconds: number }
+  | { type: "set-shot-trim"; shotId: string; trimInSeconds: number | null; trimOutSeconds: number | null }
+  | { type: "set-shot-transition"; shotId: string; transition: string | null }
   | { type: "reorder-animatic"; shotIds: string[] }
   | { type: "attach-scratch"; shotId: string }
   | { type: "clear-scratch"; shotId: string }

@@ -7,6 +7,12 @@ import { cutForShot, editableSketch, formatSketchDialogue, nullable, parseSketch
 import { buildSketchModel } from "./surfaceModels";
 import type { SketchIntent, ReferenceIntent } from "./surfaceIntents";
 
+const TRANSITIONS: { value: string; label: string }[] = [
+  { value: "", label: "Cut" },
+  { value: "dissolve", label: "Dissolve" },
+  { value: "fade_through_black", label: "Fade through black" },
+];
+
 function paintSketchStage(
   scene: SceneRecord,
   sceneStatus: SceneReport | undefined,
@@ -276,7 +282,76 @@ function renderAnimatic(scene: SceneRecord, emit: (intent: SketchIntent) => void
         }),
       );
     }
-    item.append(label, duration, scratch, rowActions);
+    const takeInfo = document.createElement("span");
+    takeInfo.className = "workflow-animatic-take";
+    const selected = (cut?.takes ?? []).find(
+      (candidate) => candidate.id === cut?.selected_take || candidate.path === cut?.selected_take,
+    );
+    takeInfo.textContent = selected
+      ? `${selected.path.split("/").pop() ?? "take"} · ${selected.status.replace(/_/g, " ")}`
+      : "No take";
+
+    const trimIn = document.createElement("input");
+    trimIn.type = "number";
+    trimIn.min = "0";
+    trimIn.step = "0.1";
+    trimIn.placeholder = "in";
+    trimIn.value = shot.trim_in_seconds == null ? "" : String(shot.trim_in_seconds);
+    trimIn.setAttribute("aria-label", `Trim in (seconds) for cut ${shot.cut_id.cut}`);
+    trimIn.addEventListener("change", () => {
+      const parsed = trimIn.value.trim() === "" ? null : Number(trimIn.value);
+      if (parsed !== null && !Number.isFinite(parsed)) return;
+      emit({
+        type: "set-shot-trim",
+        shotId: shot.id,
+        trimInSeconds: parsed,
+        trimOutSeconds: shot.trim_out_seconds ?? null,
+      });
+    });
+
+    const trimOut = document.createElement("input");
+    trimOut.type = "number";
+    trimOut.min = "0";
+    trimOut.step = "0.1";
+    trimOut.placeholder = "out";
+    trimOut.value = shot.trim_out_seconds == null ? "" : String(shot.trim_out_seconds);
+    trimOut.setAttribute("aria-label", `Trim out (seconds) for cut ${shot.cut_id.cut}`);
+    trimOut.addEventListener("change", () => {
+      const parsed = trimOut.value.trim() === "" ? null : Number(trimOut.value);
+      if (parsed !== null && !Number.isFinite(parsed)) return;
+      emit({
+        type: "set-shot-trim",
+        shotId: shot.id,
+        trimInSeconds: shot.trim_in_seconds ?? null,
+        trimOutSeconds: parsed,
+      });
+    });
+
+    const transition = document.createElement("select");
+    transition.setAttribute("aria-label", `Transition out of cut ${shot.cut_id.cut}`);
+    for (const option of TRANSITIONS) {
+      const element = document.createElement("option");
+      element.value = option.value;
+      element.textContent = option.label;
+      transition.append(element);
+    }
+    transition.value = shot.transition ?? "";
+    transition.addEventListener("change", () => {
+      emit({
+        type: "set-shot-transition",
+        shotId: shot.id,
+        transition: transition.value === "" ? null : transition.value,
+      });
+    });
+
+    const flags: string[] = [];
+    if (cut?.dependency_state) flags.push(cut.dependency_state.replace(/_/g, " "));
+    if (cut?.package_needs_review) flags.push("needs review");
+    const flag = document.createElement("span");
+    flag.className = "workflow-animatic-flag";
+    flag.textContent = flags.length ? `⚠ ${flags.join(", ")}` : "";
+
+    item.append(label, takeInfo, trimIn, trimOut, transition, duration, scratch, flag, rowActions);
     list.append(item);
   });
   section.append(list);

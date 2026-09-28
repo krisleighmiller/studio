@@ -2814,28 +2814,55 @@ button {
 }
 
 .workflow-animatic-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 88px minmax(120px, 180px);
-  gap: 6px 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
   align-items: center;
   padding: 6px 0;
   border-top: 1px solid var(--border);
 }
 
 .workflow-animatic-label,
-.workflow-animatic-scratch {
+.workflow-animatic-scratch,
+.workflow-animatic-take {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
 }
 
+.workflow-animatic-label {
+  flex: 1 1 180px;
+  min-width: 140px;
+}
+
 .workflow-animatic-scratch {
   color: var(--text-muted);
 }
 
+.workflow-animatic-take {
+  color: var(--text-muted);
+}
+
+.workflow-animatic-flag {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.workflow-animatic-row input[type="number"] {
+  width: 62px;
+  padding: 3px 4px;
+  font-size: 12px;
+}
+
+.workflow-animatic-row select {
+  padding: 3px 4px;
+  font-size: 12px;
+}
+
 .workflow-animatic-actions {
-  grid-column: 1 / -1;
+  flex-basis: 100%;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;

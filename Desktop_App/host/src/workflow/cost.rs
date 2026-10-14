@@ -59,6 +59,11 @@ struct PriceEntry {
     capability: String,
     currency: String,
     price_minor: i64,
+    pricing_status: Option<String>,
+    source_url: Option<String>,
+    date_verified: Option<String>,
+    billing_unit: Option<String>,
+    notes: Option<String>,
 }
 
 fn registry() -> &'static [PriceEntry] {
@@ -75,6 +80,11 @@ fn registry() -> &'static [PriceEntry] {
                 capability: item["capability"].as_str().unwrap_or("").to_string(),
                 currency: item["currency"].as_str().unwrap_or("USD").to_string(),
                 price_minor: item["price_minor"].as_i64().unwrap_or(0),
+                pricing_status: item["pricing_status"].as_str().map(|s| s.to_string()),
+                source_url: item["source_url"].as_str().map(|s| s.to_string()),
+                date_verified: item["date_verified"].as_str().map(|s| s.to_string()),
+                billing_unit: item["billing_unit"].as_str().map(|s| s.to_string()),
+                notes: item["notes"].as_str().map(|s| s.to_string()),
             })
             .collect()
     })
@@ -89,11 +99,104 @@ pub fn resolve_price(kind: &str, capability: &str) -> Price {
     registry()
         .iter()
         .find(|entry| key(&entry.kind) == kind_key && key(&entry.capability) == capability_key)
-        .map(|entry| Price::Known {
-            currency: entry.currency.clone(),
-            minor: entry.price_minor,
+        .and_then(|entry| {
+            // Entries with unresolved or genuinely unknown pricing resolve to Unknown.
+            match entry.pricing_status.as_deref() {
+                Some("placeholder") | Some("unknown") => None,
+                _ => Some(Price::Known {
+                    currency: entry.currency.clone(),
+                    minor: entry.price_minor,
+                }),
+            }
         })
         .unwrap_or(Price::Unknown)
+}
+
+/// A pricing issue surfaced by `validate_pricing`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PricingWarning {
+    pub kind: String,
+    pub capability: String,
+    pub issue: String,
+}
+
+/// Check every registered price entry for unresolved placeholders, missing
+/// required metadata, or stale version markers. Returns warnings for each
+/// issue found — an empty vec means the registry is clean.
+pub fn validate_pricing() -> Vec<PricingWarning> {
+    let raw: serde_json::Value = serde_json::from_str(include_str!("providers.json"))
+        .expect("providers.json is invalid");
+    let mut warnings = Vec::new();
+
+    // Stale version marker.
+    if let Some(ver) = raw["pricing_version"].as_str() {
+        if ver.contains("placeholder") {
+            warnings.push(PricingWarning {
+                kind: "".to_string(),
+                capability: "".to_string(),
+                issue: format!(
+                    "pricing_version still contains 'placeholder': \"{}\"",
+                    ver
+                ),
+            });
+        }
+    }
+
+    // Check each entry.
+    for entry in raw["prices"].as_array().unwrap_or(&vec![]) {
+        let kind = entry["kind"].as_str().unwrap_or("").to_string();
+        let capability = entry["capability"].as_str().unwrap_or("").to_string();
+        let status = entry["pricing_status"].as_str();
+        let has_source = entry["source_url"].as_str().filter(|s| !s.is_empty());
+        let has_date = entry["date_verified"].as_str().filter(|s| !s.is_empty());
+
+        match status {
+            Some("placeholder") => {
+                warnings.push(PricingWarning {
+                    kind,
+                    capability,
+                    issue: "pricing_status is 'placeholder' — not yet researched".to_string(),
+                });
+            }
+            None => {
+                // No explicit status: legacy entry. Treat as "known" but check metadata.
+                if has_source.is_none() {
+                    warnings.push(PricingWarning {
+                        kind: kind.clone(),
+                        capability: capability.clone(),
+                        issue: "known-pricing entry missing source_url".to_string(),
+                    });
+                }
+                if has_date.is_none() {
+                    warnings.push(PricingWarning {
+                        kind: kind.clone(),
+                        capability: capability.clone(),
+                        issue: "known-pricing entry missing date_verified".to_string(),
+                    });
+                }
+            }
+            Some("known") => {
+                if has_source.is_none() {
+                    warnings.push(PricingWarning {
+                        kind: kind.clone(),
+                        capability: capability.clone(),
+                        issue: "known-pricing entry missing source_url".to_string(),
+                    });
+                }
+                if has_date.is_none() {
+                    warnings.push(PricingWarning {
+                        kind: kind.clone(),
+                        capability: capability.clone(),
+                        issue: "known-pricing entry missing date_verified".to_string(),
+                    });
+                }
+            }
+            // "unknown" — intentionally unresolved; no warning for missing metadata.
+            _ => {}
+        }
+    }
+
+    warnings
 }
 
 /// Map a Director specialist name to the capability key its paid work uses.
@@ -265,14 +368,14 @@ mod tests {
             resolve_price("ATLAS-CLOUD", " IMAGE.TEXT_TO_IMAGE "),
             Price::Known {
                 currency: "USD".to_string(),
-                minor: 5
+                minor: 7
             }
         );
         assert_eq!(
             resolve_price("atlas-cloud", "video.text_only"),
             Price::Known {
                 currency: "USD".to_string(),
-                minor: 40
+                minor: 37
             }
         );
     }
@@ -280,10 +383,7 @@ mod tests {
     #[test]
     fn registry_marks_unlisted_entries_unknown_not_zero() {
         assert_eq!(resolve_price("runway", "video.text_only"), Price::Unknown);
-        assert_eq!(
-            resolve_price("atlas-cloud", "audio.tts_clone"),
-            Price::Unknown
-        );
+        assert_eq!(resolve_price("atlas-cloud", "audio.tts_custom"), Price::Unknown);
         assert_eq!(resolve_price("", ""), Price::Unknown);
         assert_eq!(
             resolve_price("elevenlabs", "video.text_only"),
@@ -373,16 +473,18 @@ mod tests {
     fn known_price_label_resolves_known_and_unknown() {
         assert_eq!(
             known_price_label("atlas-cloud", "still_image"),
-            Some("0.05 USD".to_string())
+            Some("0.07 USD".to_string())
         );
         assert_eq!(
             known_price_label("atlas-cloud", "video"),
-            Some("0.40 USD".to_string())
+            Some("0.37 USD".to_string())
         );
         assert_eq!(
             known_price_label("elevenlabs", "voice_clone"),
-            Some("10.00 USD".to_string())
+            Some("0.00 USD".to_string())  // no per-clone API charge
         );
+        // TTS pricing is per-character — genuinely unknown per operation.
+        assert_eq!(known_price_label("elevenlabs", "tts"), None);
         // Unknown kind, unknown capability, non-provider specialist: unknown.
         assert_eq!(known_price_label("runway", "still_image"), None);
         assert_eq!(known_price_label("atlas-cloud", "assemble"), None);
@@ -391,9 +493,11 @@ mod tests {
 
     #[test]
     fn known_spend_minor_returns_minor_units_or_unknown() {
-        assert_eq!(known_spend_minor("atlas-cloud", "still_image"), Some(5));
-        assert_eq!(known_spend_minor("atlas-cloud", "video"), Some(40));
-        assert_eq!(known_spend_minor("elevenlabs", "voice_clone"), Some(1000));
+        assert_eq!(known_spend_minor("atlas-cloud", "still_image"), Some(7));
+        assert_eq!(known_spend_minor("atlas-cloud", "video"), Some(37));
+        assert_eq!(known_spend_minor("elevenlabs", "voice_clone"), Some(0));
+        // TTS is unknown per operation — None, never 0.
+        assert_eq!(known_spend_minor("elevenlabs", "tts"), None);
         // Unknown spend is None, never 0.
         assert_eq!(known_spend_minor("runway", "still_image"), None);
         assert_eq!(known_spend_minor("atlas-cloud", "assemble"), None);
@@ -404,17 +508,24 @@ mod tests {
         let state = ProjectState {
             budget: Some(ProjectBudget {
                 currency: "USD".into(),
-                limit_minor: Some(500),
+                limit_minor: Some(30),
                 warning_at_minor: None,
                 hard_stop: true,
             }),
             ..ProjectState::new()
         };
-        // Known spend (1000 minor) over a 500-minor hard-stop limit → vetoed.
-        let spend = known_spend_minor("elevenlabs", "voice_clone").unwrap();
-        assert_eq!(gate_spend(&state, spend), SpendGate::Blocked);
+        // Known video spend (37 minor) over a 30-minor hard-stop limit → vetoed.
+        let minor = known_spend_minor("atlas-cloud", "video").unwrap();
+        assert_eq!(gate_spend(&state, minor), SpendGate::Blocked);
+        // Under the limit with image spend (7 minor).
+        let minor2 = known_spend_minor("atlas-cloud", "still_image").unwrap();
+        assert_eq!(
+            gate_spend(&state, minor2),
+            SpendGate::Allow
+        );
         // Unknown spend has no minor value to compare, so it is not vetoed here;
         // the ledger flags it separately.
+        assert_eq!(known_spend_minor("elevenlabs", "tts"), None);
         assert_eq!(known_spend_minor("runway", "still_image"), None);
     }
 
@@ -468,5 +579,60 @@ mod tests {
         hard.jobs = vec![job("render", JobStatus::Completed, Some(12_000), None)];
         assert_eq!(gate_spend(&hard, 0), SpendGate::Blocked);
         assert_eq!(gate_spend(&hard, -5_000), SpendGate::Blocked);
+    }
+
+    #[test]
+    fn validate_pricing_reports_clean_on_current_registry() {
+        let warnings = validate_pricing();
+        assert!(
+            warnings.is_empty(),
+            "expected no pricing warnings but got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn pricing_status_unknown_returns_unknown_price() {
+        // ElevenLabs TTS: pricing_status = "unknown" → resolve_price returns Unknown
+        // even though the entry exists in the registry.
+        assert_eq!(
+            resolve_price("elevenlabs", "audio.tts_profile"),
+            Price::Unknown
+        );
+    }
+
+    #[test]
+    fn pricing_status_known_entry_returns_known_price() {
+        // Voice clone is Known(0) — the API has no per-clone charge.
+        assert_eq!(
+            resolve_price("elevenlabs", "audio.tts_clone"),
+            Price::Known {
+                currency: "USD".to_string(),
+                minor: 0
+            }
+        );
+    }
+
+    #[test]
+    fn video_capabilities_all_resolve_to_known_prices() {
+        for cap in &[
+            "video.text_only",
+            "video.start_frame",
+            "video.edit",
+            "video.character_reference",
+            "video.location_prop_other_reference",
+            "video.lip_sync_text_narration",
+            "video.lip_sync_audio_included",
+        ] {
+            let price = resolve_price("atlas-cloud", cap);
+            assert_eq!(
+                price,
+                Price::Known {
+                    currency: "USD".to_string(),
+                    minor: 37
+                },
+                "capability {cap} did not resolve to known price 37"
+            );
+        }
     }
 }

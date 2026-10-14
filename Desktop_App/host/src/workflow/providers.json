@@ -1,12 +1,128 @@
 {
   "version": 1,
-  "pricing_version": "2026-09-27-placeholder",
-  "note": "Representative pricing only. Keys are data strings, not enums: `kind` is an ApiEntry.kind (e.g. atlas-cloud, elevenlabs) and `capability` is a capabilityDefaults key (e.g. video.text_only, audio.tts_clone). Replace price_minor with current rate-card data and bump pricing_version before relying on totals. Unlisted kind/capability pairs resolve to Unknown, never zero.",
+  "pricing_version": "2026-10-14-researched",
+  "note": "Prices researched from official provider documentation. `pricing_status`: absent/known = verified rate; unknown = genuinely unavailable (incompatible billing units); placeholder = unresolved (needs human attention). Unlisted kind/capability pairs still resolve to Unknown, never zero.",
   "prices": [
-    { "kind": "atlas-cloud", "capability": "image.text_to_image", "currency": "USD", "price_minor": 5 },
-    { "kind": "atlas-cloud", "capability": "video.text_only", "currency": "USD", "price_minor": 40 },
-    { "kind": "atlas-cloud", "capability": "video.start_frame", "currency": "USD", "price_minor": 40 },
-    { "kind": "elevenlabs", "capability": "audio.tts_profile", "currency": "USD", "price_minor": 15 },
-    { "kind": "elevenlabs", "capability": "audio.tts_clone", "currency": "USD", "price_minor": 1000 }
+    {
+      "kind": "atlas-cloud",
+      "capability": "image.text_to_image",
+      "pricing_status": "known",
+      "currency": "USD",
+      "price_minor": 7,
+      "source_url": "https://atlas.nousresearch.com/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per image",
+      "notes": "Based on GPI Image 2.5 Sunburst (~$0.069/image). GPI Image2 is ~$0.01/image for budget workloads."
+    },
+    {
+      "kind": "atlas-cloud",
+      "capability": "image.image_to_image",
+      "pricing_status": "known",
+      "currency": "USD",
+      "price_minor": 7,
+      "source_url": "https://atlas.nousresearch.com/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per image",
+      "notes": "Same GPI Image 2.5 Sunburst rate as text_to_image. Image-to-image, inpainting, and model-sheet calls share pricing."
+    },
+    {
+      "kind": "atlas-cloud",
+      "capability": "video.text_only",
+      "pricing_status": "known",
+      "currency": "USD",
+      "price_minor": 37,
+      "source_url": "https://atlas.nousresearch.com/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per operation (5s default × per-second rate)",
+      "notes": "Seeance1.0pro at $0.073/sec × 5s default = $0.365/op. Model-dependent; Seeance1.0pro-fast is $0.025/sec, Sora2pro $0.073/sec, Kaling2.5pro $0.087/sec, Runway-gen4 turbo $0.112/sec."
+    },
+    {
+      "kind": "atlas-cloud",
+      "capability": "video.start_frame",
+      "pricing_status": "known",
+      "currency": "USD",
+      "price_minor": 37,
+      "source_url": "https://atlas.nousresearch.com/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per operation (5s default × per-second rate)",
+      "notes": "Same Seeance1.0pro rate as video.text_only ($0.073/sec × 5s). Start-frame generation is a video-generation variant."
+    },
+    {
+      "kind": "atlas-cloud",
+      "capability": "video.edit",
+      "pricing_status": "known",
+      "currency": "USD",
+      "price_minor": 37,
+      "source_url": "https://atlas.nousresearch.com/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per operation (5s default × per-second rate)",
+      "notes": "Same Seeance1.0pro rate. Focused edit handoff uses video-generation pricing."
+    },
+    {
+      "kind": "atlas-cloud",
+      "capability": "video.character_reference",
+      "pricing_status": "known",
+      "currency": "USD",
+      "price_minor": 37,
+      "source_url": "https://atlas.nousresearch.com/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per operation (5s default × per-second rate)",
+      "notes": "Same Seeance1.0pro rate. Character-reference routing shares video-generation pricing."
+    },
+    {
+      "kind": "atlas-cloud",
+      "capability": "video.location_prop_other_reference",
+      "pricing_status": "known",
+      "currency": "USD",
+      "price_minor": 37,
+      "source_url": "https://atlas.nousresearch.com/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per operation (5s default × per-second rate)",
+      "notes": "Same Seeance1.0pro rate. Location/prop-reference routing shares video-generation pricing."
+    },
+    {
+      "kind": "atlas-cloud",
+      "capability": "video.lip_sync_text_narration",
+      "pricing_status": "known",
+      "currency": "USD",
+      "price_minor": 37,
+      "source_url": "https://atlas.nousresearch.com/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per operation (5s default × per-second rate)",
+      "notes": "Same Seeance1.0pro rate. Lip-sync is a video-generation variant with audio-animated faces."
+    },
+    {
+      "kind": "atlas-cloud",
+      "capability": "video.lip_sync_audio_included",
+      "pricing_status": "known",
+      "currency": "USD",
+      "price_minor": 37,
+      "source_url": "https://atlas.nousresearch.com/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per operation (5s default × per-second rate)",
+      "notes": "Same Seeance1.0pro rate. No-voice-clone lip-sync shares video-generation pricing."
+    },
+    {
+      "kind": "elevenlabs",
+      "capability": "audio.tts_profile",
+      "pricing_status": "unknown",
+      "currency": "USD",
+      "price_minor": 0,
+      "source_url": "https://elevenlabs.io/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per 1,000 characters",
+      "notes": "Unknown per-operation because text length varies. Multilingual v2: $0.08/1K chars. Flash v2.5/Turbo v2.5: $0.04/1K chars. Rate dropped from $0.10→$0.08 on Oct 5 2026. Price unresolvable to a per-op unit without knowing the input text."
+    },
+    {
+      "kind": "elevenlabs",
+      "capability": "audio.tts_clone",
+      "pricing_status": "known",
+      "currency": "USD",
+      "price_minor": 0,
+      "source_url": "https://elevenlabs.io/pricing",
+      "date_verified": "2026-10-14",
+      "billing_unit": "per clone (no per-clone API charge)",
+      "notes": "Instant Voice Cloning is free. Professional Voice Cloning requires Creator+ ($22/mo). The API bills per-character for TTS generation — the clone operation itself costs $0.00."
+    }
   ]
 }

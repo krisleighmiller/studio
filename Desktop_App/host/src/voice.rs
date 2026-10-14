@@ -829,8 +829,8 @@ mod tests {
         assert_eq!(job.provider.as_deref(), Some("elevenlabs"));
         assert_eq!(job.raw_provider_id.as_deref(), Some("voice_abc"));
         assert_eq!(job.status, crate::workflow::state::JobStatus::Completed);
-        assert_eq!(job.estimated_cost_minor, Some(1000));
-        assert_eq!(job.cost_minor, Some(1000));
+        assert_eq!(job.estimated_cost_minor, Some(0));
+        assert_eq!(job.cost_minor, Some(0));
         assert_eq!(job.currency.as_deref(), Some("USD"));
     }
 

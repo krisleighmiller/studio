@@ -545,6 +545,40 @@ mod tests {
     }
 
     #[test]
+    fn failed_jobs_with_billable_cost_flow_into_ledger() {
+        let mut job = JobRecord::open("j", "render");
+        job.estimated_cost_minor = Some(500);
+        job.currency = Some("USD".to_string());
+        // Billable failure: provider charged despite the error.
+        job.fail(Some(350), "GPU preempted");
+        assert_eq!(job.cost_minor, Some(350));
+        assert_eq!(job.error.as_deref(), Some("GPU preempted"));
+
+        let mut state = ProjectState::new();
+        state.jobs = vec![job];
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.failed_minor, 350);
+        assert_eq!(ledger.completed_minor, 0);
+        assert_eq!(ledger.unknown_cost_jobs, 0);
+    }
+
+    #[test]
+    fn failed_jobs_without_billable_cost_are_unknown_cost() {
+        let mut job = JobRecord::open("j", "render");
+        job.estimated_cost_minor = Some(500);
+        job.currency = Some("USD".to_string());
+        // Non-billable failure: provider didn't charge for the failed attempt.
+        job.fail(None, "timeout");
+        assert!(job.cost_minor.is_none());
+
+        let mut state = ProjectState::new();
+        state.jobs = vec![job];
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.failed_minor, 0);
+        assert_eq!(ledger.unknown_cost_jobs, 1);
+    }
+
+    #[test]
     fn gate_spend_applies_warning_confirm_and_hard_stop() {
         let budgeted = |limit: i64, warning: i64, hard_stop: bool| ProjectState {
             budget: Some(ProjectBudget {

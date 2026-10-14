@@ -1388,6 +1388,26 @@ impl JobRecord {
         }
     }
 
+    pub fn fail(&mut self, billable_cost_minor: Option<i64>, error: impl Into<String>) {
+        self.status = JobStatus::Failed;
+        self.error = Some(error.into());
+        // When the provider bills even for failures, record the actual cost.
+        // When None, the ledger will count the failure as unknown-cost.
+        if let Some(cost) = billable_cost_minor {
+            self.cost_minor = Some(cost);
+        }
+        if self.completed_at.is_none() {
+            self.completed_at = Some(utc_now());
+        }
+        if let Some(attempt) = self.attempts.last_mut() {
+            attempt.status = JobStatus::Failed;
+            attempt.error = self.error.clone();
+            if attempt.completed_at.is_none() {
+                attempt.completed_at = self.completed_at.clone();
+            }
+        }
+    }
+
     /// Elapsed time from a real start timestamp to a real completion timestamp.
     /// Missing timestamps are unknown, not zero.
     pub fn elapsed_label(&self) -> String {
@@ -2150,5 +2170,28 @@ mod tests {
         assert_eq!(job.elapsed_label(), "1m 30s");
         job.started_at = Some("1970-01-01T00:01:00Z".into());
         assert_eq!(job.elapsed_label(), "30s");
+    }
+
+    #[test]
+    fn fail_records_billable_cost_and_error() {
+        let mut job = JobRecord::open("job_1", "render");
+        job.estimated_cost_minor = Some(500);
+        assert_eq!(job.status, JobStatus::Pending);
+        assert!(job.cost_minor.is_none());
+        assert!(job.error.is_none());
+
+        // No billable cost → unknown-cost failure
+        job.fail(None, "timeout");
+        assert_eq!(job.status, JobStatus::Failed);
+        assert!(job.cost_minor.is_none());
+        assert_eq!(job.error.as_deref(), Some("timeout"));
+        assert!(job.completed_at.is_some());
+        assert_eq!(job.attempts.last().unwrap().status, JobStatus::Failed);
+
+        // Billable failure → cost recorded
+        let mut job2 = JobRecord::open("job_2", "render");
+        job2.estimated_cost_minor = Some(500);
+        job2.fail(Some(350), "GPU preempted");
+        assert_eq!(job2.cost_minor, Some(350));
     }
 }

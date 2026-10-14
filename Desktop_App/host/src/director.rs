@@ -1280,6 +1280,27 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
         "Host executing approved action…".to_string(),
     );
 
+    // Emit current budget gate status so the frontend can display it.
+    if let Some(root) = project_root_ref {
+        if let Ok(state) = crate::workflow::import::load_state(std::path::Path::new(root)) {
+            let ledger = crate::workflow::cost::compute_ledger(&state);
+            app.emit(
+                "director-progress",
+                format!(
+                    "Budget status: {:?} — {}/{} spent",
+                    ledger.gate,
+                    ledger
+                        .committed_minor
+                        .saturating_add(ledger.completed_minor.saturating_add(ledger.failed_minor)),
+                    ledger
+                        .limit_minor
+                        .map(|l| l.to_string())
+                        .unwrap_or_else(|| "unlimited".into())
+                ),
+            );
+        }
+    }
+
     // Budget gate: veto a hard-stop over-limit spend before any paid provider
     // call. Unknown-cost operations are not vetoed here — the ledger flags them
     // once their cost is known. This is the one path the Director cannot bypass.
@@ -1296,13 +1317,27 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
                         if let Some(minor) =
                             crate::workflow::cost::known_spend_minor(kind, specialist)
                         {
-                            if crate::workflow::cost::gate_spend(&state, minor)
-                                == crate::workflow::cost::SpendGate::Blocked
-                            {
-                                return Err(
-                                    "Budget hard stop: this operation would exceed the project budget limit. Adjust the budget or the operation before retrying."
-                                        .into(),
-                                );
+                            let gate = crate::workflow::cost::gate_spend(&state, minor);
+                            match gate {
+                                crate::workflow::cost::SpendGate::Blocked => {
+                                    return Err(
+                                        "Budget hard stop: this operation would exceed the project budget limit. Adjust the budget or the operation before retrying."
+                                            .into(),
+                                    );
+                                }
+                                crate::workflow::cost::SpendGate::Confirm => {
+                                    app.emit(
+                                        "director-progress",
+                                        "⚠️ Budget warning: this operation pushes you near or over the monthly limit. Consider reviewing your budget.".to_string(),
+                                    );
+                                }
+                                crate::workflow::cost::SpendGate::Warn => {
+                                    app.emit(
+                                        "director-progress",
+                                        "ℹ️ Budget notice: your spend is approaching the warning threshold.".to_string(),
+                                    );
+                                }
+                                _ => {}
                             }
                         }
                     }

@@ -124,8 +124,8 @@ pub struct PricingWarning {
 /// required metadata, or stale version markers. Returns warnings for each
 /// issue found — an empty vec means the registry is clean.
 pub fn validate_pricing() -> Vec<PricingWarning> {
-    let raw: serde_json::Value = serde_json::from_str(include_str!("providers.json"))
-        .expect("providers.json is invalid");
+    let raw: serde_json::Value =
+        serde_json::from_str(include_str!("providers.json")).expect("providers.json is invalid");
     let mut warnings = Vec::new();
 
     // Stale version marker.
@@ -134,10 +134,7 @@ pub fn validate_pricing() -> Vec<PricingWarning> {
             warnings.push(PricingWarning {
                 kind: "".to_string(),
                 capability: "".to_string(),
-                issue: format!(
-                    "pricing_version still contains 'placeholder': \"{}\"",
-                    ver
-                ),
+                issue: format!("pricing_version still contains 'placeholder': \"{}\"", ver),
             });
         }
     }
@@ -408,7 +405,10 @@ mod tests {
     #[test]
     fn registry_marks_unlisted_entries_unknown_not_zero() {
         assert_eq!(resolve_price("runway", "video.text_only"), Price::Unknown);
-        assert_eq!(resolve_price("atlas-cloud", "audio.tts_custom"), Price::Unknown);
+        assert_eq!(
+            resolve_price("atlas-cloud", "audio.tts_custom"),
+            Price::Unknown
+        );
         assert_eq!(resolve_price("", ""), Price::Unknown);
         assert_eq!(
             resolve_price("elevenlabs", "video.text_only"),
@@ -506,7 +506,7 @@ mod tests {
         );
         assert_eq!(
             known_price_label("elevenlabs", "voice_clone"),
-            Some("0.00 USD".to_string())  // no per-clone API charge
+            Some("0.00 USD".to_string()) // no per-clone API charge
         );
         // TTS pricing is per-character — genuinely unknown per operation.
         assert_eq!(known_price_label("elevenlabs", "tts"), None);
@@ -544,10 +544,7 @@ mod tests {
         assert_eq!(gate_spend(&state, minor), SpendGate::Blocked);
         // Under the limit with image spend (7 minor).
         let minor2 = known_spend_minor("atlas-cloud", "still_image").unwrap();
-        assert_eq!(
-            gate_spend(&state, minor2),
-            SpendGate::Allow
-        );
+        assert_eq!(gate_spend(&state, minor2), SpendGate::Allow);
         // Unknown spend has no minor value to compare, so it is not vetoed here;
         // the ledger flags it separately.
         assert_eq!(known_spend_minor("elevenlabs", "tts"), None);

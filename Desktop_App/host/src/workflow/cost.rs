@@ -334,6 +334,19 @@ pub enum SpendGate {
     Blocked,
 }
 
+impl SpendGate {
+    /// Ordinal for worst-gate reduction.  Higher = more restrictive.
+    pub(crate) fn severity(self) -> u8 {
+        match self {
+            SpendGate::NoLimit => 0,
+            SpendGate::Allow => 1,
+            SpendGate::Warn => 2,
+            SpendGate::Confirm => 3,
+            SpendGate::Blocked => 4,
+        }
+    }
+}
+
 /// Decide whether `proposed_minor` of new spend is allowed given committed,
 /// completed, and failed spend already in the project. A hard-stop budget
 /// blocks spending over its limit; this is the mechanism the Director cannot

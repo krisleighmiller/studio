@@ -1083,6 +1083,31 @@ fn director_turn_inner(
                     // but still plan-gated.
                     let needs_approval = specialist_requires_approval(&specialist);
                     if needs_approval {
+                        // Budget gate: check before creating the approval card.
+                        // Blocked = hard stop (no card).  Confirm / Warn = add
+                        // banner to the card so the user sees the budget status
+                        // before approving.
+                        let mut budget_gate = crate::workflow::cost::SpendGate::NoLimit;
+                        if let Some(root) = project_root_ref {
+                            if let Ok(state) =
+                                crate::workflow::import::load_state(std::path::Path::new(root))
+                            {
+                                budget_gate = worst_gate_for_routes(
+                                    &state,
+                                    &validated,
+                                    &context,
+                                    project_root_ref,
+                                );
+                            }
+                        }
+                        if matches!(budget_gate, crate::workflow::cost::SpendGate::Blocked) {
+                            final_reply =
+                                "🚫 Budget hard stop: this operation would exceed the project budget limit. Adjust the budget or the operation before retrying."
+                                    .into();
+                            tool_events.push("budget_blocked".into());
+                            stop_after = true;
+                            break;
+                        }
                         let (provider, routed_model, cost) =
                             approval_route_details(&validated.action, &context, project_root_ref);
                         let mut approval = format_approval_request_with_context(
@@ -1093,6 +1118,9 @@ fn director_turn_inner(
                             &routed_model,
                             &cost,
                         );
+                        if let Some(banner) = budget_gate_banner(&budget_gate) {
+                            approval = format!("{banner}\n\n{approval}");
+                        }
                         if specialist == "model_sheet" {
                             approval.push_str("\n\n");
                             approval.push_str(&specialists::model_sheet_approval_notes(
@@ -1198,6 +1226,47 @@ pub fn director_turn(
 ) -> Result<DirectorTurnResponse, String> {
     app.emit("director-progress", "Director turn started…".to_string());
     finish_director_reply(app.clone(), director_turn_inner(app, request))
+}
+
+/// Compute the most restrictive SpendGate across all billable model routes in an
+/// action.  Unknown-cost routes are skipped (they cannot gate on price).
+fn worst_gate_for_routes(
+    state: &crate::workflow::state::ProjectState,
+    action: &crate::director_actions::ValidatedAction,
+    context: &DirectorContext,
+    project_root: Option<&str>,
+) -> crate::workflow::cost::SpendGate {
+    use crate::workflow::cost::SpendGate;
+
+    let routes = crate::specialists::approval_model_routes(&action.action, context, project_root);
+    let mut worst = SpendGate::NoLimit;
+    for (_slot, model) in routes {
+        if let Some(kind) = context.api_kinds.get(&model.api_id) {
+            let specialist = action.action.specialist.as_deref().unwrap_or("");
+            if let Some(minor) = crate::workflow::cost::known_spend_minor(kind, specialist) {
+                let g = crate::workflow::cost::gate_spend(state, minor);
+                if g.severity() > worst.severity() {
+                    worst = g;
+                }
+            }
+        }
+    }
+    worst
+}
+
+/// Format a budget-gate status banner for injection into the approval card text.
+fn budget_gate_banner(gate: &crate::workflow::cost::SpendGate) -> Option<&'static str> {
+    use crate::workflow::cost::SpendGate;
+    match gate {
+        SpendGate::NoLimit | SpendGate::Allow => None,
+        SpendGate::Warn => Some("💡 Budget: your spend is approaching the warning threshold. "),
+        SpendGate::Confirm => {
+            Some("⚠️  Budget: this operation pushes you near or over the monthly limit. ")
+        }
+        SpendGate::Blocked => {
+            Some("🚫 Budget: this operation would EXCEED the project budget limit. ")
+        }
+    }
 }
 
 pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse, String> {
@@ -1307,40 +1376,28 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
     if validated.action.action == ActionKind::RunSpecialist {
         if let Some(root) = project_root_ref {
             if let Ok(state) = crate::workflow::import::load_state(std::path::Path::new(root)) {
-                let routes = crate::specialists::approval_model_routes(
-                    &validated.action,
-                    &context,
-                    project_root_ref,
-                );
-                for (_slot, model) in routes {
-                    if let Some(kind) = context.api_kinds.get(&model.api_id) {
-                        if let Some(minor) =
-                            crate::workflow::cost::known_spend_minor(kind, specialist)
-                        {
-                            let gate = crate::workflow::cost::gate_spend(&state, minor);
-                            match gate {
-                                crate::workflow::cost::SpendGate::Blocked => {
-                                    return Err(
-                                        "Budget hard stop: this operation would exceed the project budget limit. Adjust the budget or the operation before retrying."
-                                            .into(),
-                                    );
-                                }
-                                crate::workflow::cost::SpendGate::Confirm => {
-                                    app.emit(
-                                        "director-progress",
-                                        "⚠️ Budget warning: this operation pushes you near or over the monthly limit. Consider reviewing your budget.".to_string(),
-                                    );
-                                }
-                                crate::workflow::cost::SpendGate::Warn => {
-                                    app.emit(
-                                        "director-progress",
-                                        "ℹ️ Budget notice: your spend is approaching the warning threshold.".to_string(),
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
+                let gate = worst_gate_for_routes(&state, &validated, &context, project_root_ref);
+                match gate {
+                    crate::workflow::cost::SpendGate::Blocked => {
+                        return Err(
+                               "Budget hard stop: this operation would exceed the project budget limit. Adjust the budget or the operation before retrying."
+                                   .into(),
+                           );
                     }
+                    crate::workflow::cost::SpendGate::Confirm => {
+                        app.emit(
+                               "director-progress",
+                               "⚠️ Budget warning: this operation pushes you near or over the monthly limit. You approved the approval card with this warning — proceeding.".to_string(),
+                           );
+                    }
+                    crate::workflow::cost::SpendGate::Warn => {
+                        app.emit(
+                            "director-progress",
+                            "ℹ️ Budget notice: your spend is approaching the warning threshold."
+                                .to_string(),
+                        );
+                    }
+                    _ => {}
                 }
             }
         }

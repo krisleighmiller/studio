@@ -17,7 +17,7 @@ use crate::workflow::state::{
 };
 use regex::Regex;
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -1320,6 +1320,7 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
         }
     }
     if let Some(prev) = previous {
+        state.state_revision = prev.state_revision;
         merge_preserved(prev, &mut state);
     }
     restore_wardrobe_plate_assets(project_root, &mut state);
@@ -1342,16 +1343,8 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
     }
 
     let persisted_path = if options.persist {
-        let path = resolve_project_path(
-            project_root,
-            STATE_REL,
-            crate::project_path::PathIntent::Write,
-        )?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
-        }
-        write_atomic(&path, state.to_json()?.as_bytes())?;
+        let path = persist_state(project_root, &state)?;
+        state.state_revision += 1;
         Some(path)
     } else {
         None
@@ -1412,6 +1405,7 @@ fn reject_unsafe_persisted_paths(value: &serde_json::Value) -> Result<(), String
 }
 
 pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
+    let _lock = lock_project(project_root)?;
     let path = resolve_project_path(
         project_root,
         STATE_REL,
@@ -1452,7 +1446,8 @@ pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
         repaired |= crate::workflow::animatic::sync(&mut state);
         refresh_stage_flags(&mut state);
         if repaired {
-            let _ = persist_state(project_root, &state);
+            persist_state_locked(project_root, &state)?;
+            state.state_revision += 1;
         }
         let report = project_report(&state);
         return Ok(ImportResult {
@@ -1464,7 +1459,34 @@ pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
     import_project(project_root, ImportOptions { persist: false })
 }
 
-pub fn persist_state(project_root: &Path, state: &ProjectState) -> Result<PathBuf, String> {
+/// One lock for every workflow-state writer, including spend reservations.
+/// Callers already holding it must use `persist_state_locked` to avoid re-locking.
+pub(crate) fn lock_project(project_root: &Path) -> Result<fs::File, String> {
+    let path = resolve_project_path(
+        project_root,
+        "Preproduction/.media-spend.lock",
+        crate::project_path::PathIntent::Write,
+    )?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("cannot prepare project lock: {e}"))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("cannot open project lock: {e}"))?;
+    file.lock()
+        .map_err(|e| format!("cannot acquire project lock: {e}"))?;
+    Ok(file)
+}
+
+/// Optimistic check is performed while holding the same lock as spend. No writer
+/// may replace a snapshot based on a prior budget, job or confirmation ledger.
+pub(crate) fn persist_state_locked(
+    project_root: &Path,
+    state: &ProjectState,
+) -> Result<PathBuf, String> {
     let path = resolve_project_path(
         project_root,
         STATE_REL,
@@ -1474,16 +1496,40 @@ pub fn persist_state(project_root: &Path, state: &ProjectState) -> Result<PathBu
         fs::create_dir_all(parent)
             .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
     }
-    write_atomic(&path, state.to_json()?.as_bytes())?;
+    let current_revision = if path.exists() {
+        let text = fs::read_to_string(&path)
+            .map_err(|e| format!("could not read current workflow state: {e}"))?;
+        ProjectState::from_json(&text)?.state_revision
+    } else {
+        0
+    };
+    if current_revision != state.state_revision {
+        return Err(format!(
+            "project state changed since load (revision {} -> {}); reload before saving",
+            state.state_revision, current_revision
+        ));
+    }
+    let mut next = state.clone();
+    next.state_revision = current_revision
+        .checked_add(1)
+        .ok_or("project state revision exhausted")?;
+    write_atomic(&path, next.to_json()?.as_bytes())?;
     Ok(path)
 }
 
+pub fn persist_state(project_root: &Path, state: &ProjectState) -> Result<PathBuf, String> {
+    let _lock = lock_project(project_root)?;
+    persist_state_locked(project_root, state)
+}
+
 pub fn save_project(project_root: &Path, mut state: ProjectState) -> Result<ImportResult, String> {
+    let _lock = lock_project(project_root)?;
     crate::workflow::identity::assign(&mut state);
     crate::workflow::animatic::sync(&mut state);
     refresh_stage_flags(&mut state);
     sort_state(&mut state);
-    let persisted_path = persist_state(project_root, &state)?;
+    let persisted_path = persist_state_locked(project_root, &state)?;
+    state.state_revision += 1;
     let report = project_report(&state);
     Ok(ImportResult {
         state,

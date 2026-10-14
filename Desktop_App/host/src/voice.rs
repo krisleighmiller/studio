@@ -692,6 +692,7 @@ pub struct SaveDesignedVoiceRequest {
     pub media_type: Option<String>,
     pub design_fields: Option<serde_json::Value>,
     pub project_root: Option<String>,
+    pub confirmation: Option<String>,
 }
 
 pub fn voice_save_designed_voice(
@@ -703,6 +704,14 @@ pub fn voice_save_designed_voice(
         request.character_name.clone(),
         request.voice_description.clone(),
         request.generated_voice_id.clone(),
+        request
+            .project_root
+            .clone()
+            .ok_or("Project root required for voice creation")?,
+        request
+            .confirmation
+            .clone()
+            .ok_or("One-use confirmation required for voice creation")?,
     )?;
     let character_directory = crate::session::authorize_user_path(
         &request.character_directory,

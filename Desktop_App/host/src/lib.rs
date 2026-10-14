@@ -34,6 +34,7 @@ pub mod stability;
 pub mod sync_labs;
 pub mod text_writes;
 pub mod voice;
+pub mod voice_spend;
 pub mod workflow;
 
 use crate::ctx::HostCtx;
@@ -176,6 +177,30 @@ pub fn dispatch(
                 next_page_token,
             ))
         }
+        "elevenlabs_confirm_voice_spend" => {
+            let project_root = arg_string(args, "projectRoot")?;
+            let operation = arg_string(args, "operation")?;
+            let model = arg_string(args, "model")?;
+            let input = arg_string(args, "input")?;
+            let ceiling_minor = args
+                .get("ceilingMinor")
+                .and_then(|v| v.as_i64())
+                .ok_or("Positive integer USD cents ceiling required")?;
+            let evidence = arg_string(args, "evidence")?;
+            let attested = args
+                .get("attested")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            to_value(elevenlabs::elevenlabs_confirm_voice_spend(
+                project_root,
+                operation,
+                model,
+                input,
+                ceiling_minor,
+                evidence,
+                attested,
+            ))
+        }
         "elevenlabs_tts_preview" => {
             let voice_id = arg_string(args, "voiceId")?;
             let text = arg_string(args, "text")?;
@@ -183,6 +208,8 @@ pub fn dispatch(
                 app.clone(),
                 voice_id,
                 text,
+                arg_string(args, "projectRoot")?,
+                arg_string(args, "confirmation")?,
             ))
         }
         "elevenlabs_design_voice" => {
@@ -192,6 +219,8 @@ pub fn dispatch(
                 app.clone(),
                 voice_description,
                 text,
+                arg_string(args, "projectRoot")?,
+                arg_string(args, "confirmation")?,
             ))
         }
         "elevenlabs_create_designed_voice" => {
@@ -203,6 +232,8 @@ pub fn dispatch(
                 voice_name,
                 voice_description,
                 generated_voice_id,
+                arg_string(args, "projectRoot")?,
+                arg_string(args, "confirmation")?,
             ))
         }
         "elevenlabs_download_preview_url" => {

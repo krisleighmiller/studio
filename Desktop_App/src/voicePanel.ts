@@ -812,6 +812,12 @@ async function loadLibrary(more: boolean): Promise<void> {
   }
 }
 
+async function authorizeVoiceSpend(_operation: string, _model: string, _input: string, _characters: number): Promise<{ projectRoot: string; confirmation: string }> {
+  // No provider-backed account-specific USD maximum is available. An invoice,
+  // checkbox or user-entered cap cannot enforce a project-wide hard spending bound.
+  throw new Error("Paid voice requests are blocked: no machine-verifiable account-specific USD upper bound is available. No provider request was sent.");
+}
+
 async function previewLibraryVoice(voiceId: string): Promise<void> {
   const voice = libraryVoices.find((item) => item.voiceId === voiceId);
   if (!voice) return;
@@ -827,6 +833,7 @@ async function previewLibraryVoice(voiceId: string): Promise<void> {
       payload = await invoke("elevenlabs_tts_preview", {
         voiceId,
         text: sampleText,
+        ...await authorizeVoiceSpend("elevenlabs_tts_preview", "eleven_multilingual_v2", JSON.stringify({ text: sampleText, voice_id: voiceId }), [...sampleText].length),
       });
     }
     if (selectedLibraryId !== voiceId) {
@@ -860,7 +867,7 @@ async function saveLibraryVoice(voiceId: string): Promise<void> {
     renderVoicePanel();
     const payload = await invoke<{ audioBase64: string; mediaType: string }>(
       "elevenlabs_tts_preview",
-      { voiceId, text: sampleText },
+      { voiceId, text: sampleText, ...await authorizeVoiceSpend("elevenlabs_tts_preview", "eleven_multilingual_v2", JSON.stringify({ text: sampleText, voice_id: voiceId }), [...sampleText].length) },
     );
     const saved = await invoke<SavedVoiceProfile>("voice_save_library_voice", {
       request: {
@@ -903,13 +910,16 @@ async function generateDesign(): Promise<void> {
     clearDesignPreview();
     busy = true;
     renderVoicePanel();
+    const description = buildDesignDescription();
+    const effectiveText = [...sampleText.trim()].slice(0, 1000).join("");
     const result = await invoke<{
       previews: DesignPreview[];
       text: string;
       voiceDescription: string;
     }>("elevenlabs_design_voice", {
-      voiceDescription: buildDesignDescription(),
+      voiceDescription: description,
       text: sampleText,
+      ...await authorizeVoiceSpend("elevenlabs_design_voice", "eleven_multilingual_ttv_v2", JSON.stringify({ text: effectiveText, voice_description: description.trim() }), [...effectiveText].length),
     });
     designPreviews = result.previews;
     setNotice(null, `${designPreviews.length} candidate(s) ready — listen, then choose.`);
@@ -943,13 +953,15 @@ async function saveDesign(generatedVoiceId: string): Promise<void> {
     selectedDesignId = generatedVoiceId;
     busy = true;
     renderVoicePanel();
+    const description = buildDesignDescription();
+    const { projectRoot, confirmation } = await authorizeVoiceSpend("elevenlabs_create_designed_voice", "text-to-voice/create", JSON.stringify({ generated_voice_id: preview.generatedVoiceId, voice_description: description.trim(), voice_name: characterName.trim() }), 0);
     const saved = await invoke<SavedVoiceProfile>("voice_save_designed_voice", {
       request: {
         characterDirectory,
         characterName,
         characterReferencePath: characterReferencePath.trim() || null,
         sampleText,
-        voiceDescription: buildDesignDescription(),
+        voiceDescription: description,
         generatedVoiceId: preview.generatedVoiceId,
         audioBase64: preview.audioBase64,
         mediaType: preview.mediaType,
@@ -963,7 +975,8 @@ async function saveDesign(generatedVoiceId: string): Promise<void> {
           accent: designAccent,
           note: designNote,
         },
-        projectRoot: hostProjectRoot(),
+        projectRoot,
+        confirmation,
       },
     });
     designPreviewUrl = audioUrlFromBase64(preview.audioBase64, preview.mediaType);

@@ -3,7 +3,7 @@ use crate::workflow::cost::{self, Price, SpendGate};
 use crate::workflow::import;
 use crate::workflow::state::{JobRecord, JobStatus, ProjectState, SpendConfirmation};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,21 +14,6 @@ const OPERATIONS: &[(&str, &str)] = &[
     ("atlas_generate_video", "video.text_only"),
     ("atlas_generate_audio", "audio.tts_profile"),
 ];
-
-fn lock_project(root: &Path) -> Result<std::fs::File, String> {
-    let path = root.join("Preproduction/.media-spend.lock");
-    fs::create_dir_all(path.parent().unwrap())
-        .map_err(|e| format!("cannot prepare spend lock: {e}"))?;
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("cannot open spend lock: {e}"))?;
-    file.lock()
-        .map_err(|e| format!("cannot acquire spend lock: {e}"))?;
-    Ok(file)
-}
 
 fn persisted(root: &Path) -> Result<ProjectState, String> {
     let path = root.join(crate::workflow::state::STATE_REL);
@@ -75,7 +60,7 @@ pub fn confirm_scoped(
 ) -> Result<String, String> {
     valid_scope(category, operation, model)?;
     let (currency, amount_minor) = price(provider, capability)?;
-    let _lock = lock_project(root)?;
+    let _lock = import::lock_project(root)?;
     let mut state = persisted(root)?;
     let ledger = cost::compute_ledger(&state);
     if ledger.unknown_cost_jobs != 0 || !ledger.currency.eq_ignore_ascii_case(&currency) {
@@ -99,7 +84,7 @@ pub fn confirm_scoped(
         amount_minor,
         ledger_revision: revision(&state)?,
     });
-    import::persist_state(root, &state)?;
+    import::persist_state_locked(root, &state)?;
     Ok(token)
 }
 
@@ -121,7 +106,7 @@ where
 {
     valid_scope(category, operation, model)?;
     let (currency, minor) = price(provider, capability)?;
-    let _lock = lock_project(root)?;
+    let _lock = import::lock_project(root)?;
     let mut state = persisted(root)?;
     let ledger = cost::compute_ledger(&state);
     if ledger.unknown_cost_jobs != 0 {
@@ -186,7 +171,7 @@ where
     job.retry_of = retry_of.map(str::to_string);
     job.status = JobStatus::Running;
     state.jobs.push(job);
-    import::persist_state(root, &state)?;
+    import::persist_state_locked(root, &state)?;
     let result = dispatch();
     // The request may have reached the provider even if the connection failed.
     // Never infer zero charge on failure or from a successful HTTP response.
@@ -204,7 +189,7 @@ where
         Ok(_) => job.finish(None, None),
         Err(error) => job.fail(None, error.clone()),
     }
-    import::persist_state(root, &state).map_err(|e| {
+    import::persist_state_locked(root, &state).map_err(|e| {
         format!("request dispatched but spend reconciliation failed: {e}; inspect job {id}")
     })?;
     result
@@ -241,7 +226,7 @@ pub fn reconcile_job(
     if actual_minor < 0 || currency.trim().is_empty() {
         return Err("reconciliation needs a nonnegative provider charge and currency".into());
     }
-    let _lock = lock_project(root)?;
+    let _lock = import::lock_project(root)?;
     let mut state = persisted(root)?;
     let budget_currency = state
         .budget
@@ -263,7 +248,7 @@ pub fn reconcile_job(
         return Err("job is not an unsettled billable attempt in this currency".into());
     }
     job.cost_minor = Some(actual_minor);
-    import::persist_state(root, &state).map(|_| ())
+    import::persist_state_locked(root, &state).map(|_| ())
 }
 
 #[cfg(test)]
@@ -411,6 +396,127 @@ mod tests {
             .contains("unknown price"));
         }
     }
+    #[test]
+    fn stale_ui_save_cannot_erase_reservation_or_confirmation() {
+        let dir = setup(100, true);
+        let stale = import::load_state(dir.path()).unwrap();
+        image(dir.path(), None, None, || Ok("sent".into())).unwrap();
+        let error = import::save_project(dir.path(), stale).unwrap_err();
+        assert!(error.contains("changed"), "{error}");
+        assert_eq!(persisted(dir.path()).unwrap().jobs.len(), 1);
+
+        let soft = setup(0, false);
+        let stale = import::load_state(soft.path()).unwrap();
+        confirm_scoped(
+            soft.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "image.text_to_image",
+            "model",
+        )
+        .unwrap();
+        assert!(import::save_project(soft.path(), stale)
+            .unwrap_err()
+            .contains("changed"));
+        assert_eq!(persisted(soft.path()).unwrap().spend_confirmations.len(), 1);
+    }
+
+    #[test]
+    fn stale_budget_edit_cannot_erase_failure_or_reconciliation() {
+        let dir = setup(100, true);
+        let mut stale = import::load_state(dir.path()).unwrap();
+        stale.budget.as_mut().unwrap().limit_minor = Some(25);
+        image(dir.path(), None, None, || Err("timeout".into())).unwrap_err();
+        assert!(import::save_project(dir.path(), stale.clone())
+            .unwrap_err()
+            .contains("changed"));
+        let failed = persisted(dir.path()).unwrap();
+        let id = failed.jobs[0].id.clone();
+        assert_eq!(failed.jobs[0].status, JobStatus::Failed);
+        assert_eq!(failed.jobs[0].cost_minor, None);
+        reconcile_job(dir.path(), &id, 7, "USD").unwrap();
+        assert!(import::save_project(dir.path(), stale)
+            .unwrap_err()
+            .contains("changed"));
+        let reconciled = persisted(dir.path()).unwrap();
+        assert_eq!(reconciled.jobs[0].cost_minor, Some(7));
+        assert_eq!(reconciled.budget.unwrap().limit_minor, Some(100));
+
+        // A fresh snapshot is a legitimate budget edit and must remain writable.
+        let mut fresh = import::load_state(dir.path()).unwrap();
+        fresh.budget.as_mut().unwrap().limit_minor = Some(25);
+        import::save_project(dir.path(), fresh).unwrap();
+        let saved = persisted(dir.path()).unwrap();
+        assert_eq!(saved.jobs[0].cost_minor, Some(7));
+        assert_eq!(saved.budget.unwrap().limit_minor, Some(25));
+    }
+
+    #[test]
+    fn save_waits_for_reserved_dispatch_and_cannot_erase_it() {
+        use std::sync::mpsc;
+        let dir = setup(7, true);
+        let stale = import::load_state(dir.path()).unwrap();
+        let (reserved_tx, reserved_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (save_tx, save_rx) = mpsc::channel();
+        let root = dir.path();
+        std::thread::scope(|scope| {
+            let dispatch = scope.spawn(move || {
+                image(root, None, None, || {
+                    reserved_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok("sent".into())
+                })
+            });
+            reserved_rx.recv().unwrap();
+            // The reservation is on disk while the provider is in flight.
+            assert_eq!(
+                persisted(dir.path()).unwrap().jobs[0].status,
+                JobStatus::Running
+            );
+            let save = scope.spawn(|| {
+                save_tx
+                    .send(import::save_project(dir.path(), stale))
+                    .unwrap();
+            });
+            // The save can only win after the dispatch releases the project lock.
+            release_tx.send(()).unwrap();
+            dispatch.join().unwrap().unwrap();
+            save.join().unwrap();
+            assert!(save_rx.recv().unwrap().unwrap_err().contains("changed"));
+        });
+        assert_eq!(
+            persisted(dir.path()).unwrap().jobs[0].status,
+            JobStatus::Completed
+        );
+    }
+
+    #[test]
+    fn stale_budget_edit_and_failure_reconciliation_cannot_clobber_ledger() {
+        let dir = setup(100, true);
+        let mut budget_edit = import::load_state(dir.path()).unwrap();
+        budget_edit.budget.as_mut().unwrap().limit_minor = Some(1);
+        image(dir.path(), None, None, || Err("timeout".into())).unwrap_err();
+        let failure = persisted(dir.path()).unwrap();
+        let id = failure.jobs[0].id.clone();
+        assert!(import::save_project(dir.path(), budget_edit)
+            .unwrap_err()
+            .contains("changed"));
+        reconcile_job(dir.path(), &id, 7, "USD").unwrap();
+        assert!(import::save_project(dir.path(), failure)
+            .unwrap_err()
+            .contains("changed"));
+        let fresh = import::load_state(dir.path()).unwrap();
+        let mut fresh_budget_edit = fresh.clone();
+        fresh_budget_edit.budget.as_mut().unwrap().limit_minor = Some(7);
+        import::save_project(dir.path(), fresh_budget_edit).unwrap();
+        assert_eq!(persisted(dir.path()).unwrap().jobs[0].cost_minor, Some(7));
+        assert!(image(dir.path(), None, None, || panic!("sent"))
+            .unwrap_err()
+            .contains("hard stop"));
+    }
+
     #[test]
     fn concurrent_requests_compete_for_one_slot() {
         use std::sync::{Arc, Barrier};

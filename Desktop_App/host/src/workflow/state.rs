@@ -1877,6 +1877,9 @@ pub struct SpendConfirmation {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectState {
     pub version: u32,
+    /// Monotonic persisted revision; old project files start at zero.
+    #[serde(default)]
+    pub state_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
     #[serde(default)]
@@ -1976,6 +1979,7 @@ impl ProjectState {
     pub fn new() -> Self {
         ProjectState {
             version: WORKFLOW_VERSION,
+            state_revision: 0,
             project_name: None,
             scripts: Vec::new(),
             characters: Vec::new(),

@@ -1,26 +1,25 @@
 import type { JobRecord, ProjectBudget, ProjectState } from "../../workflowTypes";
 import { minorToMoney } from "../money";
 
+export type GateStatus =
+  | "none" /* NoLimit — no budget configured, or Allow — under limit */
+  | "warn"
+  | "confirm"
+  | "blocked";
+
 export type BudgetModel = {
   currency: string;
-  /** A budget limit is configured (limit_minor is a finite number). */
   hasLimit: boolean;
-  /** The ceiling is non-bypassable for the Director. */
   hardStop: boolean;
-  /** Number of jobs recorded, so the UI can decide whether to render at all. */
   jobCount: number;
-  /** Formatted limit, or `null` when unbudgeted. */
   limit: string | null;
-  /** Formatted completed + failed (actually settled) spend. */
   spent: string;
-  /** Formatted pending/running estimated (committed but unsettled) spend. */
   committed: string;
-  /** Formatted headroom for new spend (`limit − spent − committed`), `null` when unbudgeted. */
   remaining: string | null;
-  /** Count of settled jobs whose real spend is unknown (never zero, flagged not gated). */
   unknownJobs: number;
-  /** Committed + settled already exceeds the limit, so the next proposal is gated. */
   overLimit: boolean;
+  /** Budget gate status for the next operation: none / warn / confirm / blocked. */
+  gate: GateStatus;
 };
 
 type Settled = {
@@ -44,6 +43,7 @@ export function buildBudgetModel(state: ProjectState | null): BudgetModel {
   const committed = settled.committed;
   const overLimit = hasLimit && committed + spentMinor > limitValue;
   const remaining = hasLimit ? limitValue - spentMinor - committed : null;
+  const gate = computeGate(budget, spentMinor, committed);
   return {
     currency: budget?.currency || "USD",
     hasLimit,
@@ -55,7 +55,29 @@ export function buildBudgetModel(state: ProjectState | null): BudgetModel {
     remaining: remaining == null ? null : minorToMoney(remaining),
     unknownJobs: settled.unknown,
     overLimit,
+    gate,
   };
+}
+
+/** Mirror of the host's `gate_spend` for the UI.  Returns the most restrictive
+ *  gate across the current on-the-hook spend. */
+function computeGate(
+  budget: ProjectBudget | null,
+  spentMinor: number,
+  committed: number,
+): GateStatus {
+  if (!budget) return "none";
+  const limit = budget.limit_minor;
+  if (typeof limit !== "number" || !Number.isFinite(limit)) return "none";
+  const onTheHook = spentMinor + committed;
+  const hardStop = budget.hard_stop ?? false;
+  if (hardStop && onTheHook >= limit) return "blocked";
+  const warningAt = budget.warning_at_minor;
+  if (typeof warningAt === "number" && Number.isFinite(warningAt) && onTheHook >= warningAt) {
+    return onTheHook < limit ? "warn" : "confirm";
+  }
+  if (onTheHook >= limit) return "confirm";
+  return "none";
 }
 
 function settle(jobs: JobRecord[]): Settled {

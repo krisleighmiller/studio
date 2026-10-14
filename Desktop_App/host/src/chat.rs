@@ -5,7 +5,65 @@
 use crate::settings::ApiEntry;
 use serde_json::{json, Value};
 
+/// Chat is a separate, currently unpriced and unrecorded spend category.
+pub const CHAT_SPEND_CATEGORY: &str = "llm.chat";
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ChatBudgetCoverage {
+    NotAccountedUnknownCost,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ChatDispatch<'a> {
+    pub category: &'static str,
+    pub provider_kind: &'a str,
+    pub model: &'a str,
+    pub budget_coverage: ChatBudgetCoverage,
+}
+
+/// Classify every supported protocol, including Ollama (which may point at a
+/// remote, billed endpoint). Never infer that a chat request is free.
+pub fn classify_chat_dispatch<'a>(api: &'a ApiEntry, model: &'a str) -> Option<ChatDispatch<'a>> {
+    if !matches!(
+        api.kind.as_str(),
+        "atlas-cloud" | "openai-chat" | "ollama" | "anthropic-messages" | "gemini"
+    ) {
+        return None;
+    }
+    Some(ChatDispatch {
+        category: CHAT_SPEND_CATEGORY,
+        provider_kind: &api.kind,
+        model,
+        budget_coverage: ChatBudgetCoverage::NotAccountedUnknownCost,
+    })
+}
+
+/// Existing callers do not pass project identity, so a hard stop cannot be
+/// checked. Fail closed rather than silently dispatch potentially paid chat.
+/// A future project-aware host authorization must reserve spend before invoking
+/// the private transport below and reconcile the actual charge afterward.
 pub fn chat_completion(
+    api: &ApiEntry,
+    _api_key: &str,
+    model: &str,
+    _messages: &[Value],
+) -> Result<String, String> {
+    let Some(dispatch) = classify_chat_dispatch(api, model) else {
+        return Err(format!(
+            "API “{}” uses protocol “{}”, which does not support Director chat. Pick a chat-capable API (Atlas, OpenAI-compatible, Anthropic, Gemini, or Ollama).",
+            api.name, api.kind
+        ));
+    };
+    Err(format!(
+        "{} request for {} / {} blocked: chat cost is unknown and project-budget enforcement is not wired to this route.",
+        dispatch.category, dispatch.provider_kind, dispatch.model
+    ))
+}
+
+// Keep wire-format implementations for a future, project-authorized dispatch.
+// This function must not be made public without a host-owned reservation gate.
+#[allow(dead_code)]
+fn dispatch_chat(
     api: &ApiEntry,
     api_key: &str,
     model: &str,
@@ -347,5 +405,65 @@ fn extract_gemini_text(parsed: &Value) -> Result<String, String> {
         ))
     } else {
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api(kind: &str) -> ApiEntry {
+        ApiEntry {
+            id: "test".into(),
+            name: "Test".into(),
+            kind: kind.into(),
+            base_url: "http://127.0.0.1:1".into(),
+            api_key: String::new(),
+            secret_key: String::new(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn every_chat_protocol_is_unknown_cost_and_blocked_before_network() {
+        for kind in [
+            "atlas-cloud",
+            "openai-chat",
+            "ollama",
+            "anthropic-messages",
+            "gemini",
+        ] {
+            let api = api(kind);
+            let dispatch = classify_chat_dispatch(&api, "test-model").unwrap();
+            assert_eq!(dispatch.category, "llm.chat");
+            assert_eq!(dispatch.provider_kind, kind);
+            assert_eq!(dispatch.model, "test-model");
+            assert_eq!(
+                dispatch.budget_coverage,
+                ChatBudgetCoverage::NotAccountedUnknownCost
+            );
+            // Port 1 is not a provider. This must return the budget guard error,
+            // not a connection refusal, even with a valid user message.
+            let error = chat_completion(
+                &api,
+                "key",
+                "test-model",
+                &[json!({"role":"user","content":"hi"})],
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("blocked: chat cost is unknown"),
+                "{kind}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_protocol_is_not_misclassified() {
+        let api = api("elevenlabs");
+        assert!(classify_chat_dispatch(&api, "model").is_none());
+        assert!(chat_completion(&api, "", "model", &[])
+            .unwrap_err()
+            .contains("does not support Director chat"));
     }
 }

@@ -144,6 +144,22 @@ pub fn dispatch(
             let id = arg_string(args, "id")?;
             to_value(director::director_approve(app.clone(), id))
         }
+        "confirm_spend" => {
+            let root = crate::session::command_root(opt_string(args, "projectRoot").as_deref())?;
+            let provider = arg_string(args, "provider")?;
+            let category = arg_string(args, "category")?;
+            let operation = arg_string(args, "operation")?;
+            let capability = arg_string(args, "capability")?;
+            let model = arg_string(args, "model")?;
+            to_value(crate::workflow::spend::confirm_scoped(
+                &root,
+                &provider,
+                &category,
+                &operation,
+                &capability,
+                &model,
+            ))
+        }
         "elevenlabs_list_voices" => {
             let search = opt_string(args, "search");
             let voice_type = opt_string(args, "voiceType");

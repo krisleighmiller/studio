@@ -158,19 +158,28 @@ fn generate(
     project_root: Option<&str>,
     app: &HostCtx,
 ) -> Result<String, String> {
-    let root =
-        project_root.ok_or("billable generation requires a project for spend reservation")?;
+    let root = crate::session::command_root(project_root)?;
     let model = arg_str(args, &["model"]).ok_or_else(|| "missing model".to_string())?;
     let api_id = arg_str(args, &["api_id", "apiId"]);
     let api = resolve_api_for_model(app, &model, api_id.as_deref())?;
     // The selected API kind, not a caller-supplied provider or display label,
     // determines the registry price. Reservation precedes every adapter call.
-    crate::workflow::spend::run_generation(
-        std::path::Path::new(root),
+    let capability = match name {
+        "atlas_generate_image" => "image.text_to_image",
+        "atlas_generate_video" => "video.text_only",
+        "atlas_generate_audio" => "audio.tts_profile",
+        _ => return Err(format!("unknown billable operation: {name}")),
+    };
+    crate::workflow::spend::run_scoped(
+        &root,
         &api.kind,
+        "media",
         name,
+        capability,
         &model,
-        || generate_unchecked(name, args, project_root, app, &api),
+        arg_str(args, &["spend_confirmation", "spendConfirmation"]).as_deref(),
+        arg_str(args, &["retry_of", "retryOf"]).as_deref(),
+        || generate_unchecked(name, args, root.to_str(), app, &api),
     )
 }
 

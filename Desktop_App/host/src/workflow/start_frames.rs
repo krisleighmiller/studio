@@ -1534,6 +1534,7 @@ mod tests {
             estimated_cost_minor: None,
             currency: None,
             retry_of: None,
+            spend_category: None,
         });
         assert_eq!(
             next_frame_rel(root, &state, 1, 1, "png"),

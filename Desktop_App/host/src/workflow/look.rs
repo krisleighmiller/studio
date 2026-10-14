@@ -1848,6 +1848,7 @@ mod tests {
             estimated_cost_minor: None,
             currency: None,
             retry_of: None,
+            spend_category: None,
         });
         let rel = next_look_rel_for_state(root, &state, 1, AssetRole::InteriorReference, "png");
         assert_eq!(rel, "Preproduction/Scene1/references/interior_2.png");
@@ -1886,6 +1887,7 @@ mod tests {
             estimated_cost_minor: None,
             currency: None,
             retry_of: None,
+            spend_category: None,
         });
         import::save_project(root, state).unwrap();
         let abs = root.join(rel);
@@ -1940,6 +1942,7 @@ mod tests {
             estimated_cost_minor: None,
             currency: None,
             retry_of: None,
+            spend_category: None,
         });
         import::save_project(root, state).unwrap();
         let actual = root.join("Preproduction/Scene1/references/interior_1.jpg");
@@ -2341,6 +2344,7 @@ mod tests {
             estimated_cost_minor: None,
             currency: None,
             retry_of: None,
+            spend_category: None,
         });
         let scene = state.scene_mut(1, "The last train");
         let mut board = LookBoard::default();

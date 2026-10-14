@@ -1292,6 +1292,9 @@ pub struct JobRecord {
     /// Job id this attempt retries. The previous job stays in the ledger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_of: Option<String>,
+    /// Budget category (e.g. media, voice). Missing on legacy jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_category: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1345,6 +1348,7 @@ impl JobRecord {
             estimated_cost_minor: None,
             currency: None,
             retry_of: None,
+            spend_category: None,
             attempts: vec![JobAttempt {
                 id: attempt_id,
                 status: JobStatus::Pending,
@@ -1857,6 +1861,19 @@ impl Default for ProjectBudget {
     }
 }
 
+/// A single-use approval tied to one quoted operation and ledger snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpendConfirmation {
+    pub token: String,
+    pub provider: String,
+    pub category: String,
+    pub operation: String,
+    pub model: String,
+    pub currency: String,
+    pub amount_minor: i64,
+    pub ledger_revision: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectState {
     pub version: u32,
@@ -1872,6 +1889,9 @@ pub struct ProjectState {
     pub assets: Vec<AssetRecord>,
     #[serde(default)]
     pub jobs: Vec<JobRecord>,
+    /// Single-use confirmations are project-persisted and consumed with reservation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spend_confirmations: Vec<SpendConfirmation>,
     #[serde(default)]
     pub settings: SettingsSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1962,6 +1982,7 @@ impl ProjectState {
             scenes: Vec::new(),
             assets: Vec::new(),
             jobs: Vec::new(),
+            spend_confirmations: Vec::new(),
             settings: SettingsSnapshot::default(),
             profile: None,
             budget: None,

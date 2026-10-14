@@ -267,6 +267,15 @@ pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
     let mut failed = 0i64;
     let mut unknown = 0usize;
     for job in &state.jobs {
+        // Local assembly/import jobs never call a paid provider. Do not let an
+        // unpriced local job veto unrelated paid work.
+        if job.provider.is_none()
+            && job.spend_category.is_none()
+            && job.cost_minor.is_none()
+            && job.estimated_cost_minor.is_none()
+        {
+            continue;
+        }
         // A numeric total in the budget currency cannot include an unconverted
         // charge. Legacy jobs without currency retain their historical assumption.
         if job
@@ -407,6 +416,7 @@ mod tests {
     ) -> JobRecord {
         let mut job = JobRecord::open("job", kind);
         job.status = status;
+        job.provider = Some("legacy-provider".into());
         job.cost_minor = cost_minor;
         job.estimated_cost_minor = estimated_minor;
         job
@@ -454,6 +464,20 @@ mod tests {
             resolve_price("elevenlabs", "video.text_only"),
             Price::Unknown
         );
+        // The clone operation is zero, not a zero-cost TTS generation.
+        assert_eq!(
+            resolve_price("elevenlabs", "audio.tts_clone"),
+            Price::Known {
+                currency: "USD".into(),
+                minor: 0
+            }
+        );
+        assert_eq!(
+            resolve_price("elevenlabs", "audio.tts_profile"),
+            Price::Unknown
+        );
+        assert_eq!(resolve_price("elevenlabs", "voice_design"), Price::Unknown);
+        assert_eq!(resolve_price("elevenlabs", "voice_clone"), Price::Unknown);
     }
 
     #[test]

@@ -43,7 +43,8 @@ fn auth_post_json(
     timeout_secs: u64,
 ) -> Result<Value, String> {
     let response =
-        crate::http_util::post_json_with_retry(&client(timeout_secs)?, url, api_key, body, 3)?;
+        // Billable POSTs must not retry invisibly inside one spend reservation.
+        crate::http_util::post_json_with_retry(&client(timeout_secs)?, url, api_key, body, 1)?;
     parse_json_response(response)
 }
 

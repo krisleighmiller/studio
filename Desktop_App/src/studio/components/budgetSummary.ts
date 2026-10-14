@@ -34,6 +34,7 @@ export function renderBudgetSummary(model: BudgetModel): HTMLElement {
   if (model.overLimit) {
     parts.push(model.hardStop ? "over hard-stop limit" : "over budget");
   }
+  parts.push("Accounted jobs only; LLM/chat costs are not included. Chat requests are blocked until budget enforcement is wired.");
   line.textContent = parts.join(" · ");
   if (model.overLimit) line.classList.add("studio-budget-over");
   return line;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildBudgetModel } from "../src/studio/selectors/budget";
+import { renderBudgetSummary } from "../src/studio/components/budgetSummary";
 import { minorToMoney, moneyToMinor } from "../src/studio/money";
 import type { JobRecord, ProjectBudget, ProjectState } from "../src/workflowTypes";
 
@@ -31,6 +32,19 @@ describe("buildBudgetModel mirrors the host ledger", () => {
     expect(model.remaining).toBeNull();
     expect(model.unknownJobs).toBe(0);
     expect(model.overLimit).toBe(false);
+    expect(model.chatCoverage).toBe("not-accounted");
+  });
+
+  it("never advertises the media-job ledger as a project-wide chat guarantee", () => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, hard_stop: true },
+      jobs: [job({ status: "completed", cost_minor: 100 })],
+    }));
+    expect(model.chatCoverage).toBe("not-accounted");
+    const text = renderBudgetSummary(model).textContent ?? "";
+    expect(text).toContain("Accounted jobs only");
+    expect(text).toContain("LLM/chat costs are not included");
+    expect(text).toContain("Chat requests are blocked");
   });
 
   it("sums settled and committed spend, leaving available headroom", () => {

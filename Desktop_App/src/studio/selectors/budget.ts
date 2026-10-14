@@ -8,6 +8,8 @@ export type GateStatus =
   | "blocked";
 
 export type BudgetModel = {
+  /** LLM/chat is not included in the accounted-job ledger or guaranteed by this budget. */
+  chatCoverage: "not-accounted";
   currency: string;
   hasLimit: boolean;
   hardStop: boolean;
@@ -30,8 +32,8 @@ type Settled = {
   unknown: number;
 };
 
-/** Mirror of the host's `compute_ledger` semantics, in the renderer, so the UI
- *  shows the same "known / unknown / whether budget allows" that the host gates on.
+/** Mirror of the host's accounted-job ledger semantics only. Chat is excluded;
+ *  this is not a project-wide spend or authorization total.
  *  Integer minor units summed as integers (safe below 2^53 cents). */
 export function buildBudgetModel(state: ProjectState | null): BudgetModel {
   const jobs: JobRecord[] = state?.jobs ?? [];
@@ -47,6 +49,7 @@ export function buildBudgetModel(state: ProjectState | null): BudgetModel {
   const remaining = hasLimit ? limitValue - onTheHook : null;
   const gate = computeGate(budget, spentMinor, committed);
   return {
+    chatCoverage: "not-accounted",
     currency: budget?.currency || "USD",
     hasLimit,
     hardStop: budget?.hard_stop ?? false,

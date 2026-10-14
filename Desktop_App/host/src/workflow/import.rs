@@ -1571,6 +1571,7 @@ mod tests {
             estimated_cost_minor: None,
             currency: None,
             retry_of: None,
+            spend_category: None,
         });
 
         assert!(uniquify_duplicate_asset_ids(&mut state));
@@ -1667,6 +1668,7 @@ mod tests {
             estimated_cost_minor: None,
             currency: None,
             retry_of: None,
+            spend_category: None,
         });
 
         assert!(restore_wardrobe_plate_assets(dir.path(), &mut state));
@@ -1724,6 +1726,7 @@ mod tests {
             estimated_cost_minor: None,
             currency: None,
             retry_of: None,
+            spend_category: None,
         });
 
         assert!(restore_render_jobs(dir.path(), &mut state));
@@ -1867,6 +1870,7 @@ mod tests {
             estimated_cost_minor: None,
             currency: None,
             retry_of: None,
+            spend_category: None,
         }
     }
 

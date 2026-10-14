@@ -228,11 +228,12 @@ function renderBudgetEditor(emit: (intent: ProfileIntent) => void): HTMLElement 
   hardStopInput.type = "checkbox";
   hardStopInput.checked = budget?.hard_stop ?? false;
   const hardStopText = document.createElement("span");
-  hardStopText.textContent = " Hard stop — the Director cannot exceed this limit";
+  hardStopText.textContent = " Hard stop for accounted provider jobs (not a project-wide guarantee)";
   hardStop.append(hardStopInput, hardStopText);
 
   const note = document.createElement("p");
   note.className = "workflow-budget-note";
+  note.textContent = "LLM/chat costs are not in this budget ledger. Chat requests are blocked until project-aware enforcement is available.";
 
   currency.append(currencyInput);
   limit.append(limitInput);

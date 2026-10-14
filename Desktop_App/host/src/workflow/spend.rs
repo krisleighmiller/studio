@@ -1,68 +1,128 @@
-//! Fail-closed billable media dispatch. Reservations are serialized across host processes.
+//! Shared fail-closed billable dispatch. A durable reservation precedes each request.
 use crate::workflow::cost::{self, Price, SpendGate};
 use crate::workflow::import;
-use crate::workflow::state::{JobRecord, JobStatus};
+use crate::workflow::state::{JobRecord, JobStatus, ProjectState, SpendConfirmation};
+use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-
-// Tool names are operation identifiers, not an enum of providers/capabilities.
-// Unlisted operations cannot be dispatched. Only fixed-price capabilities have a rate.
 const OPERATIONS: &[(&str, &str)] = &[
     ("atlas_generate_image", "image.text_to_image"),
     ("atlas_generate_video", "video.text_only"),
     ("atlas_generate_audio", "audio.tts_profile"),
 ];
 
-pub fn run_generation<F>(
+fn lock_project(root: &Path) -> Result<std::fs::File, String> {
+    let path = root.join("Preproduction/.media-spend.lock");
+    fs::create_dir_all(path.parent().unwrap())
+        .map_err(|e| format!("cannot prepare spend lock: {e}"))?;
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("cannot open spend lock: {e}"))?;
+    file.lock()
+        .map_err(|e| format!("cannot acquire spend lock: {e}"))?;
+    Ok(file)
+}
+
+fn persisted(root: &Path) -> Result<ProjectState, String> {
+    let path = root.join(crate::workflow::state::STATE_REL);
+    let text = fs::read_to_string(path)
+        .map_err(|_| "persisted project state is required before paid generation".to_string())?;
+    ProjectState::from_json(&text)
+}
+
+fn revision(state: &ProjectState) -> Result<String, String> {
+    let bytes = serde_json::to_vec(&(&state.budget, &state.jobs))
+        .map_err(|e| format!("cannot fingerprint ledger: {e}"))?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn price(kind: &str, capability: &str) -> Result<(String, i64), String> {
+    match cost::resolve_price(kind, capability) {
+        Price::Known { currency, minor } if minor > 0 => Ok((currency, minor)),
+        _ => Err(format!(
+            "unknown price for {kind}/{capability}; generation blocked"
+        )),
+    }
+}
+
+fn valid_scope(category: &str, operation: &str, model: &str) -> Result<(), String> {
+    if category.trim().is_empty() || operation.trim().is_empty() || model.trim().is_empty() {
+        Err("missing spend scope or model".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Called only following an explicit user gesture acknowledging this exact quote.
+/// A token is single-use and valid only until the ledger/budget changes.
+pub fn confirm_scoped(
     root: &Path,
-    provider_kind: &str,
+    provider: &str,
+    category: &str,
     operation: &str,
+    capability: &str,
     model: &str,
+) -> Result<String, String> {
+    valid_scope(category, operation, model)?;
+    let (currency, amount_minor) = price(provider, capability)?;
+    let _lock = lock_project(root)?;
+    let mut state = persisted(root)?;
+    let ledger = cost::compute_ledger(&state);
+    if ledger.unknown_cost_jobs != 0 || !ledger.currency.eq_ignore_ascii_case(&currency) {
+        return Err("unknown outstanding spend or currency mismatch".into());
+    }
+    if cost::gate_spend(&state, amount_minor) != SpendGate::Confirm {
+        return Err("quote does not require confirmation or hard stop blocks it".into());
+    }
+    let mut random = [0u8; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut random))
+        .map_err(|e| format!("cannot generate confirmation token: {e}"))?;
+    let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    state.spend_confirmations.push(SpendConfirmation {
+        token: token.clone(),
+        provider: provider.into(),
+        category: category.into(),
+        operation: operation.into(),
+        model: model.into(),
+        currency,
+        amount_minor,
+        ledger_revision: revision(&state)?,
+    });
+    import::persist_state(root, &state)?;
+    Ok(token)
+}
+
+/// Category is a data string; every attempt has an independent job and reservation.
+/// A retry requires a reconciled failed job of the same scope; the old cost remains in the ledger.
+pub fn run_scoped<F>(
+    root: &Path,
+    provider: &str,
+    category: &str,
+    operation: &str,
+    capability: &str,
+    model: &str,
+    confirmation: Option<&str>,
+    retry_of: Option<&str>,
     dispatch: F,
 ) -> Result<String, String>
 where
     F: FnOnce() -> Result<String, String>,
 {
-    let capability = OPERATIONS
-        .iter()
-        .find(|(name, _)| *name == operation)
-        .map(|(_, capability)| *capability)
-        .ok_or_else(|| format!("unknown billable operation: {operation}"))?;
-    let (currency, minor) = match cost::resolve_price(provider_kind, capability) {
-        Price::Known { currency, minor } if minor > 0 => (currency, minor),
-        _ => {
-            return Err(format!(
-                "unknown price for {provider_kind}/{capability}; generation blocked"
-            ))
-        }
-    };
-    if model.trim().is_empty() {
-        return Err("missing model".into());
-    }
-    let lock_path = root.join("Preproduction/.media-spend.lock");
-    fs::create_dir_all(lock_path.parent().expect("lock has parent"))
-        .map_err(|e| format!("cannot prepare spend lock: {e}"))?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|e| format!("cannot open spend lock: {e}"))?;
-    lock.lock()
-        .map_err(|e| format!("cannot acquire spend lock: {e}"))?;
-    // Hold the file lock across reservation, provider dispatch and reconciliation.
-    // Another media invocation cannot read stale spend or reserve the same funds.
-    // load_state imports a fresh project when the state file is absent. That is
-    // useful for browsing, but cannot authorize a paid request with an empty
-    // ledger and an absent budget.
-    let state_path = root.join(crate::workflow::state::STATE_REL);
-    if !state_path.is_file() {
-        return Err("persisted project state is required before paid generation".into());
-    }
-    let mut state = import::load_state(root)?;
+    valid_scope(category, operation, model)?;
+    let (currency, minor) = price(provider, capability)?;
+    let _lock = lock_project(root)?;
+    let mut state = persisted(root)?;
     let ledger = cost::compute_ledger(&state);
     if ledger.unknown_cost_jobs != 0 {
         return Err("unknown outstanding spend; generation blocked".into());
@@ -75,57 +135,145 @@ where
     }
     match cost::gate_spend(&state, minor) {
         SpendGate::Blocked => return Err("budget hard stop; generation blocked".into()),
-        SpendGate::Confirm => return Err("budget confirmation required; generation blocked".into()),
+        SpendGate::Confirm => {
+            let current = revision(&state)?;
+            let index = state
+                .spend_confirmations
+                .iter()
+                .position(|item| {
+                    Some(item.token.as_str()) == confirmation
+                        && item.provider == provider
+                        && item.category == category
+                        && item.operation == operation
+                        && item.model == model
+                        && item.currency == currency
+                        && item.amount_minor == minor
+                        && item.ledger_revision == current
+                })
+                .ok_or("budget confirmation required; generation blocked")?;
+            state.spend_confirmations.remove(index);
+        }
         SpendGate::NoLimit | SpendGate::Allow | SpendGate::Warn => {}
     }
+    if let Some(previous) = retry_of {
+        let old = state
+            .jobs
+            .iter()
+            .find(|job| job.id == previous)
+            .ok_or("retry source job not found")?;
+        if old.status != JobStatus::Failed
+            || old.cost_minor.is_none()
+            || old.provider.as_deref() != Some(provider)
+            || old.spend_category.as_deref() != Some(category)
+            || old.kind != operation
+            || old.model.as_deref() != Some(model)
+        {
+            return Err("retry requires a reconciled failed attempt with matching scope".into());
+        }
+    }
     let id = format!(
-        "media-{}-{}-{}",
+        "spend-{}-{}-{}",
         std::process::id(),
         crate::workflow::state::utc_now(),
         NEXT_ID.fetch_add(1, Ordering::Relaxed)
     );
     let mut job = JobRecord::open(id.clone(), operation);
-    job.provider = Some(provider_kind.into());
+    job.provider = Some(provider.into());
+    job.spend_category = Some(category.into());
     job.model = Some(model.into());
     job.currency = Some(currency);
     job.estimated_cost_minor = Some(minor);
+    job.retry_of = retry_of.map(str::to_string);
     job.status = JobStatus::Running;
     state.jobs.push(job);
     import::persist_state(root, &state)?;
-
     let result = dispatch();
-    // Reload under the lock to preserve any independent edits that occurred during
-    // a long-running provider request; never silently lose the reservation.
-    let mut state = import::load_state(root)?;
+    // The request may have reached the provider even if the connection failed.
+    // Never infer zero charge on failure or from a successful HTTP response.
+    let mut state = persisted(root).map_err(|e| {
+        format!("request dispatched; reconciliation needs manual review for job {id}: {e}")
+    })?;
     let job = state
         .jobs
         .iter_mut()
         .find(|job| job.id == id)
         .ok_or_else(|| {
-            "media spend reservation disappeared; outcome requires manual reconciliation"
-                .to_string()
+            format!("reservation disappeared; outcome requires manual reconciliation for job {id}")
         })?;
     match &result {
-        Ok(_) => {
-            job.finish(None, None);
-            // No provider invoice exists here: retain the estimate as committed
-            // unsettled spend, not a fabricated actual charge.
-        }
+        Ok(_) => job.finish(None, None),
         Err(error) => job.fail(None, error.clone()),
     }
-    import::persist_state(root, &state).map_err(|error| {
-        format!("media was dispatched but spend reconciliation failed: {error}; inspect job {id}")
+    import::persist_state(root, &state).map_err(|e| {
+        format!("request dispatched but spend reconciliation failed: {e}; inspect job {id}")
     })?;
     result
+}
+
+pub fn run_generation<F>(
+    root: &Path,
+    provider: &str,
+    operation: &str,
+    model: &str,
+    dispatch: F,
+) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String>,
+{
+    let capability = OPERATIONS
+        .iter()
+        .find(|(name, _)| *name == operation)
+        .map(|(_, capability)| *capability)
+        .ok_or_else(|| format!("unknown billable operation: {operation}"))?;
+    run_scoped(
+        root, provider, "media", operation, capability, model, None, None, dispatch,
+    )
+}
+
+/// Apply a verified provider charge to a completed/failed attempt. This is a
+/// manual accounting entry, not a prediction from the HTTP status.
+pub fn reconcile_job(
+    root: &Path,
+    id: &str,
+    actual_minor: i64,
+    currency: &str,
+) -> Result<(), String> {
+    if actual_minor < 0 || currency.trim().is_empty() {
+        return Err("reconciliation needs a nonnegative provider charge and currency".into());
+    }
+    let _lock = lock_project(root)?;
+    let mut state = persisted(root)?;
+    let budget_currency = state
+        .budget
+        .as_ref()
+        .map_or("USD", |budget| budget.currency.as_str());
+    if !budget_currency.eq_ignore_ascii_case(currency) {
+        return Err("reconciliation currency differs from project budget".into());
+    }
+    let job = state
+        .jobs
+        .iter_mut()
+        .find(|job| job.id == id)
+        .ok_or("reconciliation job not found")?;
+    if job.spend_category.is_none()
+        || !matches!(job.status, JobStatus::Completed | JobStatus::Failed)
+        || job.cost_minor.is_some()
+        || job.currency.as_deref() != Some(currency)
+    {
+        return Err("job is not an unsettled billable attempt in this currency".into());
+    }
+    job.cost_minor = Some(actual_minor);
+    import::persist_state(root, &state).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::state::{ProjectBudget, ProjectState};
-    use std::cell::Cell;
+    use crate::workflow::state::ProjectBudget;
+    use std::sync::atomic::AtomicUsize;
 
-    fn state_with_budget(root: &Path, limit: i64, hard_stop: bool) {
+    fn setup(limit: i64, hard_stop: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
         let mut state = ProjectState::new();
         state.budget = Some(ProjectBudget {
             currency: "USD".into(),
@@ -133,186 +281,166 @@ mod tests {
             warning_at_minor: None,
             hard_stop,
         });
-        import::persist_state(root, &state).unwrap();
+        import::persist_state(dir.path(), &state).unwrap();
+        dir
     }
-
-    fn rejected_without_dispatch(root: &Path, kind: &str, operation: &str, expected: &str) {
-        let calls = Cell::new(0);
-        let result = run_generation(root, kind, operation, "model", || {
-            calls.set(calls.get() + 1);
+    fn image(
+        root: &Path,
+        token: Option<&str>,
+        retry: Option<&str>,
+        dispatch: impl FnOnce() -> Result<String, String>,
+    ) -> Result<String, String> {
+        run_scoped(
+            root,
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "image.text_to_image",
+            "model",
+            token,
+            retry,
+            dispatch,
+        )
+    }
+    #[test]
+    fn rejects_before_dispatch_and_excludes_local_jobs() {
+        let dir = setup(0, true);
+        let mut state = persisted(dir.path()).unwrap();
+        state.jobs.push(JobRecord::open("local", "assembly"));
+        import::persist_state(dir.path(), &state).unwrap();
+        let calls = AtomicUsize::new(0);
+        let error = image(dir.path(), None, None, || {
+            calls.fetch_add(1, Ordering::SeqCst);
             Ok("sent".into())
-        });
-        assert!(result.unwrap_err().contains(expected));
-        assert_eq!(calls.get(), 0);
+        })
+        .unwrap_err();
+        assert!(error.contains("hard stop"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
-
     #[test]
-    fn hard_stop_rejection_does_not_dispatch_provider() {
-        let dir = tempfile::tempdir().unwrap();
-        state_with_budget(dir.path(), 0, true);
-        rejected_without_dispatch(
+    fn confirmation_binds_scope_and_is_consumed_once() {
+        let dir = setup(0, false);
+        let token = confirm_scoped(
             dir.path(),
             "atlas-cloud",
+            "media",
             "atlas_generate_image",
-            "hard stop",
-        );
-    }
-
-    #[test]
-    fn soft_limit_confirmation_does_not_dispatch_provider() {
-        let dir = tempfile::tempdir().unwrap();
-        state_with_budget(dir.path(), 0, false);
-        rejected_without_dispatch(
-            dir.path(),
-            "atlas-cloud",
-            "atlas_generate_image",
-            "confirmation required",
-        );
-    }
-
-    #[test]
-    fn unknown_operation_or_price_does_not_dispatch_provider() {
-        let dir = tempfile::tempdir().unwrap();
-        rejected_without_dispatch(
-            dir.path(),
-            "atlas-cloud",
-            "unregistered",
-            "unknown billable operation",
-        );
-        rejected_without_dispatch(dir.path(), "kling", "atlas_generate_image", "unknown price");
-        rejected_without_dispatch(
-            dir.path(),
-            "atlas-cloud",
-            "atlas_generate_video",
-            "unknown price",
-        );
-    }
-
-    #[test]
-    fn reservation_precedes_dispatch_and_result_remains_unsettled() {
-        let dir = tempfile::tempdir().unwrap();
-        state_with_budget(dir.path(), 7, true);
-        let output = run_generation(
-            dir.path(),
-            "atlas-cloud",
-            "atlas_generate_image",
+            "image.text_to_image",
             "model",
-            || {
-                let state = import::load_state(dir.path()).unwrap();
-                assert_eq!(cost::compute_ledger(&state).committed_minor, 7);
-                assert_eq!(state.jobs[0].status, JobStatus::Running);
-                Ok("submitted".into())
-            },
         )
         .unwrap();
-        assert_eq!(output, "submitted");
-        let state = import::load_state(dir.path()).unwrap();
-        assert_eq!(state.jobs[0].status, JobStatus::Completed);
-        assert_eq!(state.jobs[0].cost_minor, None);
-        assert_eq!(cost::compute_ledger(&state).unsettled_estimated_minor, 7);
-    }
-
-    #[test]
-    fn rejected_second_operation_never_dispatches() {
-        let dir = tempfile::tempdir().unwrap();
-        state_with_budget(dir.path(), 7, true);
-        run_generation(
+        assert!(image(dir.path(), Some("wrong"), None, || panic!("sent"))
+            .unwrap_err()
+            .contains("confirmation"));
+        assert!(run_scoped(
             dir.path(),
             "atlas-cloud",
+            "voice",
             "atlas_generate_image",
+            "image.text_to_image",
             "model",
-            || Ok("submitted".into()),
+            Some(&token),
+            None,
+            || panic!("sent")
+        )
+        .is_err());
+        image(dir.path(), Some(&token), None, || Ok("sent".into())).unwrap();
+        assert!(image(dir.path(), Some(&token), None, || panic!("sent")).is_err());
+    }
+    #[test]
+    fn stale_confirmation_is_rejected_without_dispatch() {
+        let dir = setup(0, false);
+        let token = confirm_scoped(
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "image.text_to_image",
+            "model",
         )
         .unwrap();
-        rejected_without_dispatch(
-            dir.path(),
-            "atlas-cloud",
-            "atlas_generate_image",
-            "unknown outstanding spend",
-        );
+        let mut state = persisted(dir.path()).unwrap();
+        state.budget.as_mut().unwrap().limit_minor = Some(1);
+        import::persist_state(dir.path(), &state).unwrap();
+        assert!(image(dir.path(), Some(&token), None, || panic!("sent")).is_err());
     }
-
     #[test]
-    fn unreadable_state_does_not_dispatch_provider() {
+    fn failure_is_unknown_and_retry_requires_reconciliation() {
+        let dir = setup(100, true);
+        assert_eq!(
+            image(dir.path(), None, None, || Err("timeout".into())).unwrap_err(),
+            "timeout"
+        );
+        let state = persisted(dir.path()).unwrap();
+        let failed = &state.jobs[0];
+        assert_eq!(failed.status, JobStatus::Failed);
+        assert_eq!(failed.cost_minor, None);
+        let id = failed.id.clone();
+        assert!(image(dir.path(), None, Some(&id), || panic!("sent")).is_err());
+        assert!(reconcile_job(dir.path(), &id, -1, "USD").is_err());
+        reconcile_job(dir.path(), &id, 7, "USD").unwrap();
+        assert!(reconcile_job(dir.path(), &id, 0, "USD").is_err());
+        image(dir.path(), None, Some(&id), || Ok("ok".into())).unwrap();
+        let state = persisted(dir.path()).unwrap();
+        assert_eq!(state.jobs[1].retry_of.as_deref(), Some(id.as_str()));
+        assert_eq!(cost::compute_ledger(&state).failed_minor, 7);
+    }
+    #[test]
+    fn unknown_price_and_missing_project_never_dispatch() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(crate::workflow::state::STATE_REL);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, "{not valid json").unwrap();
-        let calls = Cell::new(0);
-        let result = run_generation(
-            dir.path(),
-            "atlas-cloud",
-            "atlas_generate_image",
-            "model",
-            || {
-                calls.set(calls.get() + 1);
-                Ok("submitted".into())
-            },
-        );
-        assert!(result.is_err());
-        assert_eq!(calls.get(), 0);
+        assert!(image(dir.path(), None, None, || panic!("sent")).is_err());
+        let dir = setup(100, true);
+        for (operation, capability) in [
+            ("elevenlabs_design_voice", "voice_design"),
+            ("elevenlabs_create_designed_voice", "voice_clone"),
+            ("elevenlabs_tts_preview", "audio.tts_profile"),
+            ("elevenlabs_clone_voice", "audio.tts_clone"),
+        ] {
+            assert!(run_scoped(
+                dir.path(),
+                "elevenlabs",
+                "voice",
+                operation,
+                capability,
+                "model",
+                None,
+                None,
+                || panic!("sent")
+            )
+            .unwrap_err()
+            .contains("unknown price"));
+        }
     }
-
     #[test]
-    fn concurrent_requests_cannot_both_dispatch_against_one_remaining_slot() {
+    fn concurrent_requests_compete_for_one_slot() {
         use std::sync::{Arc, Barrier};
-        let dir = tempfile::tempdir().unwrap();
-        state_with_budget(dir.path(), 7, true);
+        let dir = setup(7, true);
         let start = Arc::new(Barrier::new(3));
-        let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = AtomicUsize::new(0);
         std::thread::scope(|scope| {
             let mut handles = Vec::new();
             for _ in 0..2 {
                 let start = start.clone();
-                let dispatches = dispatches.clone();
+                let calls = &calls;
                 let root = dir.path();
                 handles.push(scope.spawn(move || {
                     start.wait();
-                    run_generation(root, "atlas-cloud", "atlas_generate_image", "model", || {
-                        dispatches.fetch_add(1, Ordering::SeqCst);
-                        Ok("submitted".into())
+                    image(root, None, None, || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok("sent".into())
                     })
                 }));
             }
             start.wait();
-            let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+            assert_eq!(
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .filter(Result::is_ok)
+                    .count(),
+                1
+            );
         });
-        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn missing_persisted_project_state_never_authorizes_paid_dispatch() {
-        let dir = tempfile::tempdir().unwrap();
-        rejected_without_dispatch(
-            dir.path(),
-            "atlas-cloud",
-            "atlas_generate_image",
-            "persisted project state",
-        );
-    }
-
-    #[test]
-    fn provider_failure_stays_unknown_and_prevents_retry() {
-        let dir = tempfile::tempdir().unwrap();
-        state_with_budget(dir.path(), 100, true);
-        let error = run_generation(
-            dir.path(),
-            "atlas-cloud",
-            "atlas_generate_image",
-            "model",
-            || Err("provider failed".into()),
-        )
-        .unwrap_err();
-        assert_eq!(error, "provider failed");
-        let state = import::load_state(dir.path()).unwrap();
-        assert_eq!(state.jobs[0].status, JobStatus::Failed);
-        assert_eq!(state.jobs[0].cost_minor, None);
-        rejected_without_dispatch(
-            dir.path(),
-            "atlas-cloud",
-            "atlas_generate_image",
-            "unknown outstanding spend",
-        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

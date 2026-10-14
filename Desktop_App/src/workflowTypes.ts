@@ -406,6 +406,8 @@ export type JobRecord = {
   estimated_cost_minor?: number | null;
   currency?: string | null;
   retry_of?: string | null;
+  /** Host spend category; absent on legacy jobs. Not evidence of chat accounting. */
+  spend_category?: string | null;
 };
 
 /** Host registry id. A new recipe is valid once the host table accepts it. */
@@ -519,11 +521,11 @@ export type RequirementRecord = {
 export type ProjectBudget = {
   /** ISO 4217 code for every amount in this budget. */
   currency: string;
-  /** Hard ceiling in minor units (cents). Absent means no limit. */
+  /** Hard ceiling in minor units (cents) for accounted jobs only. Chat is not recorded here. Absent means no limit. */
   limit_minor?: number | null;
   /** Spend level that should surface a warning before the limit. */
   warning_at_minor?: number | null;
-  /** When true, the ceiling cannot be bypassed by the Director. */
+  /** Host-enforced for accounted jobs; does not imply project-wide chat coverage. */
   hard_stop?: boolean;
 };
 

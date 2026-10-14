@@ -15,6 +15,7 @@ export type BudgetModel = {
   limit: string | null;
   spent: string;
   committed: string;
+  /** Limit minus settled spend and outstanding estimated commitments. */
   remaining: string | null;
   unknownJobs: number;
   overLimit: boolean;
@@ -35,14 +36,15 @@ type Settled = {
 export function buildBudgetModel(state: ProjectState | null): BudgetModel {
   const jobs: JobRecord[] = state?.jobs ?? [];
   const budget: ProjectBudget | null = state?.budget ?? null;
-  const settled = settle(jobs);
+  const settled = settle(jobs, budget?.currency || "USD");
   const spentMinor = settled.completed + settled.failed;
   const limit = budget?.limit_minor ?? null;
   const hasLimit = typeof limit === "number" && Number.isFinite(limit);
   const limitValue = hasLimit ? (limit as number) : 0;
   const committed = settled.committed;
-  const overLimit = hasLimit && committed + spentMinor > limitValue;
-  const remaining = hasLimit ? limitValue - spentMinor - committed : null;
+  const onTheHook = committed + spentMinor;
+  const overLimit = hasLimit && onTheHook > limitValue;
+  const remaining = hasLimit ? limitValue - onTheHook : null;
   const gate = computeGate(budget, spentMinor, committed);
   return {
     currency: budget?.currency || "USD",
@@ -70,28 +72,34 @@ function computeGate(
   const limit = budget.limit_minor;
   if (typeof limit !== "number" || !Number.isFinite(limit)) return "none";
   const onTheHook = spentMinor + committed;
-  const hardStop = budget.hard_stop ?? false;
-  if (hardStop && onTheHook > limit) return "blocked";
+  if (onTheHook > limit) return budget.hard_stop ? "blocked" : "confirm";
   const warningAt = budget.warning_at_minor;
   if (typeof warningAt === "number" && Number.isFinite(warningAt) && onTheHook > warningAt) {
-    return onTheHook > limit ? "blocked" : "warn";
+    return "warn";
   }
-  if (onTheHook > limit) return "confirm";
   return "none";
 }
 
-function settle(jobs: JobRecord[]): Settled {
+function settle(jobs: JobRecord[], currency: string): Settled {
   let completed = 0;
   let failed = 0;
   let committed = 0;
   let unknown = 0;
   for (const job of jobs) {
+    if (job.currency != null && job.currency.trim().toUpperCase() !== currency.trim().toUpperCase()) {
+      unknown += 1;
+      continue;
+    }
     const status = job.status ?? "";
     if (status === "pending" || status === "running") {
-      if (isMinor(job.estimated_cost_minor)) committed += job.estimated_cost_minor as number;
+      if (isMinor(job.estimated_cost_minor)) committed += job.estimated_cost_minor;
+      else unknown += 1;
     } else if (status === "completed") {
       if (isMinor(job.cost_minor)) completed += job.cost_minor as number;
-      else unknown += 1;
+      else {
+        unknown += 1;
+        if (isMinor(job.estimated_cost_minor)) committed += job.estimated_cost_minor;
+      }
     } else if (status === "failed" || status === "cancelled") {
       if (isMinor(job.cost_minor)) failed += job.cost_minor as number;
       else unknown += 1;
@@ -101,5 +109,5 @@ function settle(jobs: JobRecord[]): Settled {
 }
 
 function isMinor(value: number | null | undefined): value is number {
-  return typeof value === "number" && Number.isFinite(value);
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }

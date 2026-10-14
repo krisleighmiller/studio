@@ -3337,7 +3337,8 @@ button {
 }
 
 .studio-job-meta,
-.studio-job-facts {
+.studio-job-facts,
+.studio-job-support {
   overflow: hidden;
   color: var(--text-muted);
   font-size: 11px;
@@ -3345,7 +3346,8 @@ button {
   white-space: nowrap;
 }
 
-.studio-job-facts {
+.studio-job-facts,
+.studio-job-support {
   white-space: normal;
 }
 

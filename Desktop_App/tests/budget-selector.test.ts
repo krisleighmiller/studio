@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildBudgetModel } from "../src/studio/selectors/budget";
-import { moneyToMinor } from "../src/studio/money";
+import { minorToMoney, moneyToMinor } from "../src/studio/money";
 import type { JobRecord, ProjectBudget, ProjectState } from "../src/workflowTypes";
 
 function job(partial: Record<string, unknown>): JobRecord {
@@ -33,7 +33,7 @@ describe("buildBudgetModel mirrors the host ledger", () => {
     expect(model.overLimit).toBe(false);
   });
 
-  it("sums settled and committed spend, leaving truthful headroom", () => {
+  it("sums settled and committed spend, leaving available headroom", () => {
     const model = buildBudgetModel(
       stateWith({
         budget: { currency: "USD", limit_minor: 5000, hard_stop: true },
@@ -51,6 +51,20 @@ describe("buildBudgetModel mirrors the host ledger", () => {
     expect(model.overLimit).toBe(false);
   });
 
+  it("reports host remaining after subtracting outstanding commitments", () => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, hard_stop: true },
+      jobs: [
+        job({ id: "a", status: "completed", cost_minor: 900 }),
+        job({ id: "b", status: "pending", estimated_cost_minor: 200 }),
+      ],
+    }));
+    expect(model.remaining).toBe("-1.00");
+    expect(model.committed).toBe("2.00");
+    expect(model.overLimit).toBe(true);
+    expect(model.gate).toBe("blocked");
+  });
+
   it("flags over-limit when committed plus settled exceed the ceiling", () => {
     const model = buildBudgetModel(
       stateWith({
@@ -63,6 +77,68 @@ describe("buildBudgetModel mirrors the host ledger", () => {
     );
     expect(model.overLimit).toBe(true);
     expect(model.remaining).toBe("-1.00");
+  });
+
+  it("requires confirmation rather than blocking beyond a soft limit with a warning", () => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, warning_at_minor: 800, hard_stop: false },
+      jobs: [job({ status: "completed", cost_minor: 1001 })],
+    }));
+    expect(model.gate).toBe("confirm");
+    expect(model.overLimit).toBe(true);
+  });
+
+  it.each([
+    { amount: 800, hardStop: true, gate: "none", overLimit: false },
+    { amount: 801, hardStop: true, gate: "warn", overLimit: false },
+    { amount: 1000, hardStop: true, gate: "warn", overLimit: false },
+    { amount: 1001, hardStop: true, gate: "blocked", overLimit: true },
+    { amount: 1000, hardStop: false, gate: "warn", overLimit: false },
+    { amount: 1001, hardStop: false, gate: "confirm", overLimit: true },
+  ] as const)("gates $amount minor at strict warning/limit boundaries (hard stop: $hardStop)", ({ amount, hardStop, gate, overLimit }) => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, warning_at_minor: 800, hard_stop: hardStop },
+      jobs: [job({ status: "pending", estimated_cost_minor: amount })],
+    }));
+    expect(model.gate).toBe(gate);
+    expect(model.overLimit).toBe(overLimit);
+    expect(model.remaining).toBe(minorToMoney(1000 - amount));
+  });
+
+  it("counts pending and running jobs without estimates as unknown", () => {
+    const model = buildBudgetModel(stateWith({
+      jobs: [
+        job({ id: "a", status: "pending", estimated_cost_minor: null }),
+        job({ id: "b", status: "running" }),
+        job({ id: "c", status: "running", estimated_cost_minor: 0 }),
+      ],
+    }));
+    expect(model.unknownJobs).toBe(2);
+    expect(model.committed).toBe("0.00");
+  });
+
+  it("holds a completed estimate without representing it as actual spend", () => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, hard_stop: true },
+      jobs: [job({ status: "completed", estimated_cost_minor: 700, cost_minor: null })],
+    }));
+    expect(model.spent).toBe("0.00");
+    expect(model.committed).toBe("7.00");
+    expect(model.remaining).toBe("3.00");
+    expect(model.unknownJobs).toBe(1);
+  });
+
+  it("does not combine foreign currency or negative costs into the budget", () => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, hard_stop: true },
+      jobs: [
+        job({ id: "a", status: "completed", currency: "EUR", cost_minor: 500 }),
+        job({ id: "b", status: "failed", currency: "USD", cost_minor: -200 }),
+      ],
+    }));
+    expect(model.spent).toBe("0.00");
+    expect(model.remaining).toBe("10.00");
+    expect(model.unknownJobs).toBe(2);
   });
 
   it("counts settled jobs with unknown cost, never as zero", () => {

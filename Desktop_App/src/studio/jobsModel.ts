@@ -20,6 +20,8 @@ export type JobRowModel = {
   actual: string;
   currency: string;
   retry: string;
+  cancellation: string;
+  resume: string;
   detail: string;
   outputPath: string | null;
   outputKind: JobOutputKind | null;
@@ -135,6 +137,11 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
     actual,
     currency,
     retry,
+    // No job-level provider cancel/resume command is wired to Studio. Do not infer
+    // support from a provider name, an ID, or a persisted cancelled status.
+    // Assembly is local work, not a provider prediction to resume or cancel.
+    cancellation: job.kind === "assemble" ? "Unsupported for local assembly" : "Provider support unknown · unavailable in Studio",
+    resume: job.kind === "assemble" ? "Unsupported for local assembly" : "Provider support unknown · unavailable in Studio",
     detail,
     outputPath,
     outputKind,

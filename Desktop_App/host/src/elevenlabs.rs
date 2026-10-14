@@ -21,6 +21,21 @@ fn api_key(app: &HostCtx) -> Result<String, String> {
     settings::elevenlabs_api_key(app)
 }
 
+/// Direct Voice-tab commands have no project root, reservation, or approval token.
+/// The media spend boundary cannot safely reserve these variable/unknown prices.
+/// Keep the provider request in the closure so a rejected preflight cannot send it.
+fn dispatch_billable<T>(
+    operation: &str,
+    capability: &str,
+    dispatch: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _ = dispatch;
+    let price = crate::workflow::cost::resolve_price("elevenlabs", capability);
+    Err(format!(
+        "{operation} blocked before provider dispatch: {capability} price {price:?}; direct voice calls lack a project-backed spend reservation and explicit approval"
+    ))
+}
+
 fn error_body(status: reqwest::StatusCode, body: &str) -> String {
     let detail = serde_json::from_str::<Value>(body)
         .ok()
@@ -198,16 +213,18 @@ pub fn elevenlabs_tts_preview(
         return Err("Sample text is required.".into());
     }
     let client = client()?;
-    let response = client
-        .post(format!("{API_BASE}/v1/text-to-speech/{voice_id}"))
-        .header("xi-api-key", &key)
-        .header("Accept", "audio/mpeg")
-        .json(&json!({
-            "text": text,
-            "model_id": "eleven_multilingual_v2",
-        }))
-        .send()
-        .map_err(|error| format!("TTS preview failed: {error}"))?;
+    let response = dispatch_billable("elevenlabs_tts_preview", "audio.tts_profile", || {
+        client
+            .post(format!("{API_BASE}/v1/text-to-speech/{voice_id}"))
+            .header("xi-api-key", &key)
+            .header("Accept", "audio/mpeg")
+            .json(&json!({
+                "text": text,
+                "model_id": "eleven_multilingual_v2",
+            }))
+            .send()
+            .map_err(|error| format!("TTS preview failed: {error}"))
+    })?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().unwrap_or_default();
@@ -260,17 +277,19 @@ pub fn elevenlabs_design_voice(
         sample = sample.chars().take(1000).collect();
     }
     let client = client()?;
-    let response = client
-        .post(format!("{API_BASE}/v1/text-to-voice/design"))
-        .header("xi-api-key", &key)
-        .json(&json!({
-            "voice_description": description,
-            "text": sample,
-            "model_id": "eleven_multilingual_ttv_v2",
-            "auto_generate_text": false,
-        }))
-        .send()
-        .map_err(|error| format!("Voice design request failed: {error}"))?;
+    let response = dispatch_billable("elevenlabs_design_voice", "voice_design", || {
+        client
+            .post(format!("{API_BASE}/v1/text-to-voice/design"))
+            .header("xi-api-key", &key)
+            .json(&json!({
+                "voice_description": description,
+                "text": sample,
+                "model_id": "eleven_multilingual_ttv_v2",
+                "auto_generate_text": false,
+            }))
+            .send()
+            .map_err(|error| format!("Voice design request failed: {error}"))
+    })?;
     let status = response.status();
     let body = response
         .text()
@@ -343,16 +362,18 @@ pub fn elevenlabs_create_designed_voice(
         return Err("voice_name, voice_description, and generated_voice_id are required.".into());
     }
     let client = client()?;
-    let response = client
-        .post(format!("{API_BASE}/v1/text-to-voice"))
-        .header("xi-api-key", &key)
-        .json(&json!({
-            "voice_name": voice_name,
-            "voice_description": voice_description,
-            "generated_voice_id": generated_voice_id,
-        }))
-        .send()
-        .map_err(|error| format!("Create designed voice failed: {error}"))?;
+    let response = dispatch_billable("elevenlabs_create_designed_voice", "voice_clone", || {
+        client
+            .post(format!("{API_BASE}/v1/text-to-voice"))
+            .header("xi-api-key", &key)
+            .json(&json!({
+                "voice_name": voice_name,
+                "voice_description": voice_description,
+                "generated_voice_id": generated_voice_id,
+            }))
+            .send()
+            .map_err(|error| format!("Create designed voice failed: {error}"))
+    })?;
     let status = response.status();
     let body = response
         .text()
@@ -412,4 +433,27 @@ pub fn elevenlabs_download_preview_url(url: String) -> Result<AudioPayload, Stri
         audio_base64: B64.encode(bytes),
         media_type,
     })
+}
+
+#[cfg(test)]
+mod spend_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn billable_direct_operations_reject_before_mock_provider_dispatch() {
+        for (operation, capability) in [
+            ("elevenlabs_tts_preview", "audio.tts_profile"),
+            ("elevenlabs_design_voice", "voice_design"),
+            ("elevenlabs_create_designed_voice", "voice_clone"),
+        ] {
+            let calls = Cell::new(0);
+            let result = dispatch_billable(operation, capability, || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            });
+            assert!(result.unwrap_err().contains("blocked"), "{operation}");
+            assert_eq!(calls.get(), 0, "{operation} reached provider");
+        }
+    }
 }

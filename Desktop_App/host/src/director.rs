@@ -1238,30 +1238,38 @@ pub fn director_turn(
     finish_director_reply(app.clone(), director_turn_inner(app, request))
 }
 
-/// Compute the most restrictive SpendGate across all billable model routes in an
-/// action.  Unknown-cost routes are skipped (they cannot gate on price).
+/// Gate the aggregate known estimate across all billable routes in an action.
+/// Unknown-cost routes remain unresolved and require separate preflight policy.
 fn worst_gate_for_routes(
     state: &crate::workflow::state::ProjectState,
     action: &crate::director_actions::ValidatedAction,
     context: &DirectorContext,
     project_root: Option<&str>,
 ) -> crate::workflow::cost::SpendGate {
-    use crate::workflow::cost::SpendGate;
-
     let routes = crate::specialists::approval_model_routes(&action.action, context, project_root);
-    let mut worst = SpendGate::NoLimit;
-    for (_slot, model) in routes {
-        if let Some(kind) = context.api_kinds.get(&model.api_id) {
-            let specialist = action.action.specialist.as_deref().unwrap_or("");
-            if let Some(minor) = crate::workflow::cost::known_spend_minor(kind, specialist) {
-                let g = crate::workflow::cost::gate_spend(state, minor);
-                if g.severity() > worst.severity() {
-                    worst = g;
-                }
-            }
+    let specialist = action.action.specialist.as_deref().unwrap_or("");
+    aggregate_route_gate(
+        state,
+        routes.into_iter().filter_map(|(_slot, model)| {
+            let kind = context.api_kinds.get(&model.api_id)?;
+            crate::workflow::cost::known_spend_minor(kind, specialist)
+        }),
+    )
+}
+
+fn aggregate_route_gate(
+    state: &crate::workflow::state::ProjectState,
+    estimates: impl IntoIterator<Item = i64>,
+) -> crate::workflow::cost::SpendGate {
+    use crate::workflow::cost::SpendGate;
+    let mut total = 0i64;
+    for minor in estimates {
+        match total.checked_add(minor) {
+            Some(sum) if minor >= 0 => total = sum,
+            _ => return SpendGate::Blocked,
         }
     }
-    worst
+    crate::workflow::cost::gate_spend(state, total)
 }
 
 /// Format a budget-gate status banner for injection into the approval card text.
@@ -1827,6 +1835,27 @@ Here is the action:
         assert!(provider.contains("Image Provider"), "{provider}");
         assert!(model.contains("host-image-model"), "{model}");
         assert!(cost.contains("Unknown"), "{cost}");
+    }
+
+    #[test]
+    fn aggregate_budget_gate_blocks_routes_individually_affordable_but_jointly_over_limit() {
+        use crate::workflow::cost::SpendGate;
+        use crate::workflow::state::{ProjectBudget, ProjectState};
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            currency: "USD".into(),
+            limit_minor: Some(10),
+            warning_at_minor: None,
+            hard_stop: true,
+        });
+        assert_eq!(aggregate_route_gate(&state, [6]), SpendGate::Allow);
+        assert_eq!(aggregate_route_gate(&state, [6, 5]), SpendGate::Blocked);
+        assert_eq!(aggregate_route_gate(&state, [10]), SpendGate::Allow);
+        assert_eq!(aggregate_route_gate(&state, [10, 1]), SpendGate::Blocked);
+        assert_eq!(
+            aggregate_route_gate(&state, [i64::MAX, 1]),
+            SpendGate::Blocked
+        );
     }
 
     #[test]

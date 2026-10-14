@@ -788,10 +788,9 @@ updated_at: {}\n",
     Ok(saved)
 }
 
-/// Record the paid voice clone as a completed ledger entry so the budget gate
-/// and spend ledger see it. Only attempted when a project root is known — a
-/// voice can be cloned outside any open project, in which case there is no
-/// ledger to write.
+/// Record a voice clone as a completed job with unknown actual cost.
+/// This post-dispatch record does not enforce budget policy; the call site
+/// must preflight before issuing a billable provider request.
 fn record_voice_clone_job(project_root: &str, voice_id: &str) -> Result<(), String> {
     let mut state = crate::workflow::import::load_state(Path::new(project_root))?;
     let job_id = state.next_job_id();
@@ -830,7 +829,7 @@ mod tests {
         assert_eq!(job.raw_provider_id.as_deref(), Some("voice_abc"));
         assert_eq!(job.status, crate::workflow::state::JobStatus::Completed);
         assert_eq!(job.estimated_cost_minor, Some(0));
-        assert_eq!(job.cost_minor, Some(0));
+        assert_eq!(job.cost_minor, None);
         assert_eq!(job.currency.as_deref(), Some("USD"));
     }
 

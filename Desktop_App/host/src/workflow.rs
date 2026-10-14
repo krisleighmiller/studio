@@ -19,6 +19,7 @@ pub mod route;
 pub mod scope;
 pub mod sketches;
 pub mod sources;
+pub mod spend;
 pub mod start_frames;
 pub mod state;
 pub mod validate;

@@ -244,48 +244,73 @@ pub struct BudgetLedger {
     pub hard_stop: bool,
     /// Sum of known estimates for pending/running (committed but unsettled) jobs.
     pub committed_minor: i64,
+    /// Completed jobs with an estimate but no reported actual; reservation, not spend.
+    pub unsettled_estimated_minor: i64,
     /// Sum of actual cost for completed jobs.
     pub completed_minor: i64,
     /// Sum of billable cost for failed/cancelled jobs (retried spend is still spend).
     pub failed_minor: i64,
-    /// `limit - (completed + failed)`. `None` when there is no budget limit.
+    /// `limit - (committed + unsettled estimates + actual spend)`; no limit → `None`.
     pub remaining_minor: Option<i64>,
-    /// Count of jobs whose spend is real but whose cost is unknown.
+    /// Count of jobs without a usable actual or estimate in the ledger currency.
+    /// Includes pending/running jobs without estimates and completed jobs without actuals.
     pub unknown_cost_jobs: usize,
-    /// Budget gate derived from committed+completed+failed spend vs thresholds.
+    /// Budget gate derived from reservations plus actual spend vs thresholds.
     pub gate: SpendGate,
 }
 
 pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
     let budget = state.budget.clone().unwrap_or_default();
     let mut committed = 0i64;
+    let mut unsettled = 0i64;
     let mut completed = 0i64;
     let mut failed = 0i64;
     let mut unknown = 0usize;
     for job in &state.jobs {
+        // A numeric total in the budget currency cannot include an unconverted
+        // charge. Legacy jobs without currency retain their historical assumption.
+        if job
+            .currency
+            .as_deref()
+            .is_some_and(|currency| !currency.trim().eq_ignore_ascii_case(&budget.currency))
+        {
+            unknown += 1;
+            continue;
+        }
         match job.status {
             JobStatus::Pending | JobStatus::Running => {
-                if let Some(estimate) = job.estimated_cost_minor {
+                if let Some(estimate) = job.estimated_cost_minor.filter(|amount| *amount >= 0) {
                     committed = committed.saturating_add(estimate);
+                } else {
+                    unknown += 1;
                 }
             }
-            JobStatus::Completed => match job.cost_minor {
+            JobStatus::Completed => match job.cost_minor.filter(|amount| *amount >= 0) {
                 Some(cost) => completed = completed.saturating_add(cost),
-                None => unknown += 1,
+                None => {
+                    unknown += 1;
+                    if let Some(estimate) = job.estimated_cost_minor.filter(|amount| *amount >= 0) {
+                        unsettled = unsettled.saturating_add(estimate);
+                    }
+                }
             },
-            JobStatus::Failed | JobStatus::Cancelled => match job.cost_minor {
-                Some(cost) => failed = failed.saturating_add(cost),
-                None => unknown += 1,
-            },
+            JobStatus::Failed | JobStatus::Cancelled => {
+                match job.cost_minor.filter(|amount| *amount >= 0) {
+                    Some(cost) => failed = failed.saturating_add(cost),
+                    None => unknown += 1,
+                }
+            }
         }
     }
     let spent = completed.saturating_add(failed);
-    let remaining = budget.limit_minor.map(|limit| limit.saturating_sub(spent));
+    let on_the_hook = spent.saturating_add(committed).saturating_add(unsettled);
+    let remaining = budget
+        .limit_minor
+        .map(|limit| limit.saturating_sub(on_the_hook));
     // Compute gate inline to avoid infinite recursion (gate_spend calls compute_ledger).
     let gate = match budget.limit_minor {
         None => SpendGate::NoLimit,
         Some(limit) => {
-            let on_the_hook = committed.saturating_add(spent);
             if on_the_hook > limit {
                 if budget.hard_stop {
                     SpendGate::Blocked
@@ -309,6 +334,7 @@ pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
         warning_at_minor: budget.warning_at_minor,
         hard_stop: budget.hard_stop,
         committed_minor: committed,
+        unsettled_estimated_minor: unsettled,
         completed_minor: completed,
         failed_minor: failed,
         remaining_minor: remaining,
@@ -334,19 +360,6 @@ pub enum SpendGate {
     Blocked,
 }
 
-impl SpendGate {
-    /// Ordinal for worst-gate reduction.  Higher = more restrictive.
-    pub(crate) fn severity(self) -> u8 {
-        match self {
-            SpendGate::NoLimit => 0,
-            SpendGate::Allow => 1,
-            SpendGate::Warn => 2,
-            SpendGate::Confirm => 3,
-            SpendGate::Blocked => 4,
-        }
-    }
-}
-
 /// Decide whether `proposed_minor` of new spend is allowed given committed,
 /// completed, and failed spend already in the project. A hard-stop budget
 /// blocks spending over its limit; this is the mechanism the Director cannot
@@ -359,12 +372,14 @@ pub fn gate_spend(state: &ProjectState, proposed_minor: i64) -> SpendGate {
         return SpendGate::NoLimit;
     };
     let ledger = compute_ledger(state);
-    let on_the_hook = ledger
-        .committed_minor
-        .saturating_add(ledger.completed_minor)
-        .saturating_add(ledger.failed_minor);
-    let total = on_the_hook.saturating_add(proposed_minor.max(0));
-    if total > limit {
+    // Use a wider intermediate: saturating i64 addition could turn
+    // MAX + one minor unit into MAX, incorrectly approving a hard-stop call.
+    let on_the_hook = i128::from(ledger.committed_minor)
+        + i128::from(ledger.unsettled_estimated_minor)
+        + i128::from(ledger.completed_minor)
+        + i128::from(ledger.failed_minor);
+    let total = on_the_hook + i128::from(proposed_minor.max(0));
+    if total > i128::from(limit) {
         return if budget.hard_stop {
             SpendGate::Blocked
         } else {
@@ -372,7 +387,7 @@ pub fn gate_spend(state: &ProjectState, proposed_minor: i64) -> SpendGate {
         };
     }
     if let Some(warning) = budget.warning_at_minor {
-        if total > warning {
+        if total > i128::from(warning) {
             return SpendGate::Warn;
         }
     }
@@ -395,6 +410,21 @@ mod tests {
         job.cost_minor = cost_minor;
         job.estimated_cost_minor = estimated_minor;
         job
+    }
+
+    #[test]
+    fn gate_does_not_allow_a_positive_charge_when_minor_units_overflow_i64() {
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            currency: "USD".into(),
+            limit_minor: Some(i64::MAX),
+            warning_at_minor: None,
+            hard_stop: true,
+        });
+        state
+            .jobs
+            .push(job("image", JobStatus::Completed, Some(i64::MAX), None));
+        assert_eq!(gate_spend(&state, 1), SpendGate::Blocked);
     }
 
     #[test]
@@ -456,9 +486,100 @@ mod tests {
         assert_eq!(ledger.committed_minor, 1_000);
         assert_eq!(ledger.completed_minor, 2_000);
         assert_eq!(ledger.failed_minor, 800);
-        assert_eq!(ledger.remaining_minor, Some(7_200));
+        assert_eq!(ledger.remaining_minor, Some(6_200));
         assert_eq!(ledger.unknown_cost_jobs, 1);
         assert!(ledger.hard_stop);
+    }
+
+    #[test]
+    fn ledger_tracks_unsettled_completed_estimates_without_reporting_them_as_actual() {
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            limit_minor: Some(1_000),
+            hard_stop: true,
+            ..Default::default()
+        });
+        state.jobs = vec![
+            job("render", JobStatus::Pending, None, Some(100)),
+            job("render", JobStatus::Completed, None, Some(400)),
+            job("render", JobStatus::Completed, Some(200), Some(900)),
+        ];
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.committed_minor, 100);
+        assert_eq!(ledger.unsettled_estimated_minor, 400);
+        assert_eq!(ledger.completed_minor, 200);
+        assert_eq!(ledger.unknown_cost_jobs, 1);
+        assert_eq!(ledger.remaining_minor, Some(300));
+        assert_eq!(gate_spend(&state, 301), SpendGate::Blocked);
+    }
+
+    #[test]
+    fn ledger_does_not_add_foreign_currency_to_budget_totals() {
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            currency: "USD".into(),
+            limit_minor: Some(100),
+            hard_stop: true,
+            ..Default::default()
+        });
+        let mut foreign = job("render", JobStatus::Completed, Some(999), Some(999));
+        foreign.currency = Some("EUR".into());
+        state.jobs = vec![foreign];
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.completed_minor, 0);
+        assert_eq!(ledger.unsettled_estimated_minor, 0);
+        assert_eq!(ledger.remaining_minor, Some(100));
+        assert_eq!(ledger.unknown_cost_jobs, 1);
+        assert_eq!(gate_spend(&state, 100), SpendGate::Allow);
+    }
+
+    #[test]
+    fn ledger_counts_unpriced_inflight_jobs_and_does_not_reserve_negative_estimates() {
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            limit_minor: Some(100),
+            hard_stop: true,
+            ..Default::default()
+        });
+        state.jobs = vec![
+            job("render", JobStatus::Pending, None, None),
+            job("render", JobStatus::Running, None, Some(-300)),
+        ];
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.committed_minor, 0);
+        assert_eq!(ledger.unknown_cost_jobs, 2);
+        assert_eq!(ledger.remaining_minor, Some(100));
+        assert_eq!(gate_spend(&state, 101), SpendGate::Blocked);
+    }
+
+    #[test]
+    fn ledger_treats_negative_actual_cost_as_unknown_not_a_credit() {
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            limit_minor: Some(100),
+            hard_stop: true,
+            ..Default::default()
+        });
+        state.jobs = vec![job("render", JobStatus::Completed, Some(-50), Some(80))];
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.completed_minor, 0);
+        assert_eq!(ledger.unsettled_estimated_minor, 80);
+        assert_eq!(ledger.unknown_cost_jobs, 1);
+        assert_eq!(ledger.remaining_minor, Some(20));
+    }
+
+    #[test]
+    fn ledger_treats_negative_failed_cost_as_unknown_not_a_credit() {
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            limit_minor: Some(100),
+            ..Default::default()
+        });
+        state.jobs = vec![job("render", JobStatus::Failed, Some(-50), Some(80))];
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.failed_minor, 0);
+        assert_eq!(ledger.unknown_cost_jobs, 1);
+        assert_eq!(ledger.remaining_minor, Some(100));
     }
 
     #[test]
@@ -570,18 +691,19 @@ mod tests {
     }
 
     #[test]
-    fn a_completed_job_defaults_actual_cost_to_its_known_estimate() {
+    fn a_completed_job_keeps_its_estimate_separate_from_actual_cost() {
         let mut job = JobRecord::open("j", "scene_look");
         job.estimated_cost_minor = Some(40);
         job.currency = Some("USD".to_string());
         job.finish(Some("out.png"), None);
-        assert_eq!(job.cost_minor, Some(40));
+        assert_eq!(job.cost_minor, None);
+        assert_eq!(job.estimated_cost_minor, Some(40));
 
         let mut state = ProjectState::new();
         state.jobs = vec![job];
         let ledger = compute_ledger(&state);
-        assert_eq!(ledger.completed_minor, 40);
-        assert_eq!(ledger.unknown_cost_jobs, 0);
+        assert_eq!(ledger.completed_minor, 0);
+        assert_eq!(ledger.unknown_cost_jobs, 1);
     }
 
     #[test]

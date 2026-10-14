@@ -1,7 +1,7 @@
 {
   "version": 1,
   "pricing_version": "2026-10-14-researched",
-  "note": "Prices researched from official provider documentation. `pricing_status`: absent/known = verified rate; unknown = genuinely unavailable (incompatible billing units); placeholder = unresolved (needs human attention). Unlisted kind/capability pairs still resolve to Unknown, never zero.",
+  "note": "Prices researched from official provider documentation. `pricing_status`: absent/known = verified rate; unknown = genuinely unavailable (incompatible billing units); placeholder = unresolved (needs human attention). Unlisted kind/capability pairs still resolve to Unknown, never zero. Operation support, duration buckets and input limits below report unknown/unverified when not backed by a model-specific contract; they are not enforcement claims.",
   "prices": [
     {
       "kind": "atlas-cloud",
@@ -12,7 +12,14 @@
       "source_url": "https://atlas.nousresearch.com/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per image",
-      "notes": "Based on GPI Image 2.5 Sunburst (~$0.069/image). GPI Image2 is ~$0.01/image for budget workloads."
+      "notes": "Based on GPI Image 2.5 Sunburst (~$0.069/image). GPI Image2 is ~$0.01/image for budget workloads.",
+      "operation_support": "supported",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "not_applicable"
+      }
     },
     {
       "kind": "atlas-cloud",
@@ -23,7 +30,14 @@
       "source_url": "https://atlas.nousresearch.com/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per image",
-      "notes": "Same GPI Image 2.5 Sunburst rate as text_to_image. Image-to-image, inpainting, and model-sheet calls share pricing."
+      "notes": "Same GPI Image 2.5 Sunburst rate as text_to_image. Image-to-image, inpainting, and model-sheet calls share pricing.",
+      "operation_support": "unverified",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "not_applicable"
+      }
     },
     {
       "kind": "atlas-cloud",
@@ -34,7 +48,14 @@
       "source_url": "https://atlas.nousresearch.com/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per operation (5s default × per-second rate)",
-      "notes": "Seeance1.0pro at $0.073/sec × 5s default = $0.365/op. Model-dependent; Seeance1.0pro-fast is $0.025/sec, Sora2pro $0.073/sec, Kaling2.5pro $0.087/sec, Runway-gen4 turbo $0.112/sec."
+      "notes": "Seeance1.0pro at $0.073/sec × 5s default = $0.365/op. Model-dependent; Seeance1.0pro-fast is $0.025/sec, Sora2pro $0.073/sec, Kaling2.5pro $0.087/sec, Runway-gen4 turbo $0.112/sec.",
+      "operation_support": "unverified",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "unknown"
+      }
     },
     {
       "kind": "atlas-cloud",
@@ -45,7 +66,14 @@
       "source_url": "https://atlas.nousresearch.com/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per operation (5s default × per-second rate)",
-      "notes": "Same Seeance1.0pro rate as video.text_only ($0.073/sec × 5s). Start-frame generation is a video-generation variant."
+      "notes": "Same Seeance1.0pro rate as video.text_only ($0.073/sec × 5s). Start-frame generation is a video-generation variant.",
+      "operation_support": "unverified",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "unknown"
+      }
     },
     {
       "kind": "atlas-cloud",
@@ -56,7 +84,14 @@
       "source_url": "https://atlas.nousresearch.com/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per operation (5s default × per-second rate)",
-      "notes": "Same Seeance1.0pro rate. Focused edit handoff uses video-generation pricing."
+      "notes": "Same Seeance1.0pro rate. Focused edit handoff uses video-generation pricing.",
+      "operation_support": "unverified",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "unknown"
+      }
     },
     {
       "kind": "atlas-cloud",
@@ -67,7 +102,14 @@
       "source_url": "https://atlas.nousresearch.com/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per operation (5s default × per-second rate)",
-      "notes": "Same Seeance1.0pro rate. Character-reference routing shares video-generation pricing."
+      "notes": "Same Seeance1.0pro rate. Character-reference routing shares video-generation pricing.",
+      "operation_support": "unverified",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "unknown"
+      }
     },
     {
       "kind": "atlas-cloud",
@@ -78,7 +120,14 @@
       "source_url": "https://atlas.nousresearch.com/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per operation (5s default × per-second rate)",
-      "notes": "Same Seeance1.0pro rate. Location/prop-reference routing shares video-generation pricing."
+      "notes": "Same Seeance1.0pro rate. Location/prop-reference routing shares video-generation pricing.",
+      "operation_support": "unverified",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "unknown"
+      }
     },
     {
       "kind": "atlas-cloud",
@@ -89,7 +138,14 @@
       "source_url": "https://atlas.nousresearch.com/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per operation (5s default × per-second rate)",
-      "notes": "Same Seeance1.0pro rate. Lip-sync is a video-generation variant with audio-animated faces."
+      "notes": "Same Seeance1.0pro rate. Lip-sync is a video-generation variant with audio-animated faces.",
+      "operation_support": "unverified",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "unknown"
+      }
     },
     {
       "kind": "atlas-cloud",
@@ -100,7 +156,14 @@
       "source_url": "https://atlas.nousresearch.com/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per operation (5s default × per-second rate)",
-      "notes": "Same Seeance1.0pro rate. No-voice-clone lip-sync shares video-generation pricing."
+      "notes": "Same Seeance1.0pro rate. No-voice-clone lip-sync shares video-generation pricing.",
+      "operation_support": "unverified",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "unknown"
+      }
     },
     {
       "kind": "elevenlabs",
@@ -111,7 +174,14 @@
       "source_url": "https://elevenlabs.io/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per 1,000 characters",
-      "notes": "Unknown per-operation because text length varies. Multilingual v2: $0.08/1K chars. Flash v2.5/Turbo v2.5: $0.04/1K chars. Rate dropped from $0.10→$0.08 on Oct 5 2026. Price unresolvable to a per-op unit without knowing the input text."
+      "notes": "Unknown per-operation because text length varies. Multilingual v2: $0.08/1K chars. Flash v2.5/Turbo v2.5: $0.04/1K chars. Rate dropped from $0.10→$0.08 on Oct 5 2026. Price unresolvable to a per-op unit without knowing the input text.",
+      "operation_support": "supported",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "not_applicable"
+      }
     },
     {
       "kind": "elevenlabs",
@@ -122,7 +192,14 @@
       "source_url": "https://elevenlabs.io/pricing",
       "date_verified": "2026-10-14",
       "billing_unit": "per clone (no per-clone API charge)",
-      "notes": "Instant Voice Cloning is free. Professional Voice Cloning requires Creator+ ($22/mo). The API bills per-character for TTS generation — the clone operation itself costs $0.00."
+      "notes": "Instant Voice Cloning is free. Professional Voice Cloning requires Creator+ ($22/mo). The API bills per-character for TTS generation — the clone operation itself costs $0.00.",
+      "operation_support": "unverified",
+      "input_limits": {
+        "status": "unknown"
+      },
+      "duration_buckets": {
+        "status": "not_applicable"
+      }
     }
   ]
 }

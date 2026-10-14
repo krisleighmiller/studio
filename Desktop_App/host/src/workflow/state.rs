@@ -1358,12 +1358,6 @@ impl JobRecord {
 
     pub fn finish(&mut self, path: Option<&str>, asset_id: Option<&str>) {
         self.status = JobStatus::Completed;
-        // Providers here do not report a precise actual cost, so a completed job's
-        // actual cost defaults to its known estimate. A caller can still overwrite
-        // `cost_minor` afterward when a precise figure is available.
-        if self.cost_minor.is_none() {
-            self.cost_minor = self.estimated_cost_minor;
-        }
         if self.completed_at.is_none() {
             self.completed_at = Some(utc_now());
         }

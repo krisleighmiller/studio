@@ -255,6 +255,8 @@ pub struct BudgetLedger {
     pub remaining_minor: Option<i64>,
     /// Count of jobs whose spend is real but whose cost is unknown.
     pub unknown_cost_jobs: usize,
+    /// Budget gate derived from committed+completed+failed spend vs thresholds.
+    pub gate: SpendGate,
 }
 
 pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
@@ -282,6 +284,28 @@ pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
     }
     let spent = completed.saturating_add(failed);
     let remaining = budget.limit_minor.map(|limit| limit.saturating_sub(spent));
+    // Compute gate inline to avoid infinite recursion (gate_spend calls compute_ledger).
+    let gate = match budget.limit_minor {
+        None => SpendGate::NoLimit,
+        Some(limit) => {
+            let on_the_hook = committed.saturating_add(spent);
+            if on_the_hook > limit {
+                if budget.hard_stop {
+                    SpendGate::Blocked
+                } else {
+                    SpendGate::Confirm
+                }
+            } else if let Some(warn_at) = budget.warning_at_minor {
+                if on_the_hook > warn_at {
+                    SpendGate::Warn
+                } else {
+                    SpendGate::Allow
+                }
+            } else {
+                SpendGate::Allow
+            }
+        }
+    };
     BudgetLedger {
         currency: budget.currency,
         limit_minor: budget.limit_minor,
@@ -292,6 +316,7 @@ pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
         failed_minor: failed,
         remaining_minor: remaining,
         unknown_cost_jobs: unknown,
+        gate,
     }
 }
 
@@ -576,6 +601,100 @@ mod tests {
         let ledger = compute_ledger(&state);
         assert_eq!(ledger.failed_minor, 0);
         assert_eq!(ledger.unknown_cost_jobs, 1);
+    }
+
+    #[test]
+    fn ledger_gate_reports_budget_status_at_all_thresholds() {
+        // ---- No limit ----
+        let state = ProjectState {
+            budget: None,
+            ..ProjectState::new()
+        };
+        assert_eq!(compute_ledger(&state).gate, SpendGate::NoLimit);
+
+        // ---- Under warn threshold, under limit ----
+        let state = ProjectState {
+            budget: Some(ProjectBudget {
+                currency: "USD".into(),
+                limit_minor: Some(10_000),
+                warning_at_minor: Some(7_000),
+                hard_stop: true,
+            }),
+            // committed 500 + completed 1_000 = on_the_hook = 1_500 → under warn (7_000)
+            jobs: vec![
+                job("r1", JobStatus::Pending, None, Some(500)),
+                job("r2", JobStatus::Completed, Some(1_000), None),
+            ],
+            ..ProjectState::new()
+        };
+        assert_eq!(compute_ledger(&state).gate, SpendGate::Allow);
+
+        // ---- Over warn, under limit ----
+        let state = ProjectState {
+            budget: Some(ProjectBudget {
+                currency: "USD".into(),
+                limit_minor: Some(10_000),
+                warning_at_minor: Some(2_000),
+                hard_stop: true,
+            }),
+            // committed 500 + completed 2_000 = 2_500 → over warn (2_000), under limit
+            jobs: vec![
+                job("r1", JobStatus::Pending, None, Some(500)),
+                job("r2", JobStatus::Completed, Some(2_000), None),
+            ],
+            ..ProjectState::new()
+        };
+        assert_eq!(compute_ledger(&state).gate, SpendGate::Warn);
+
+        // ---- Over limit, soft stop → Confirm ----
+        let state = ProjectState {
+            budget: Some(ProjectBudget {
+                currency: "USD".into(),
+                limit_minor: Some(2_000),
+                warning_at_minor: None,
+                hard_stop: false,
+            }),
+            // committed 500 + completed 2_000 = 2_500 → over limit (2_000), soft
+            jobs: vec![
+                job("r1", JobStatus::Pending, None, Some(500)),
+                job("r2", JobStatus::Completed, Some(2_000), None),
+            ],
+            ..ProjectState::new()
+        };
+        assert_eq!(compute_ledger(&state).gate, SpendGate::Confirm);
+
+        // ---- Over limit, hard stop → Blocked ----
+        let state = ProjectState {
+            budget: Some(ProjectBudget {
+                currency: "USD".into(),
+                limit_minor: Some(2_000),
+                warning_at_minor: None,
+                hard_stop: true,
+            }),
+            jobs: vec![
+                job("r1", JobStatus::Pending, None, Some(500)),
+                job("r2", JobStatus::Completed, Some(2_000), None),
+            ],
+            ..ProjectState::new()
+        };
+        assert_eq!(compute_ledger(&state).gate, SpendGate::Blocked);
+
+        // ---- No warning configured, under limit → Allow ----
+        let state = ProjectState {
+            budget: Some(ProjectBudget {
+                currency: "USD".into(),
+                limit_minor: Some(10_000),
+                warning_at_minor: None,
+                hard_stop: true,
+            }),
+            // committed 500 + completed 1_000 = 1_500 → under limit (10_000), no warn
+            jobs: vec![
+                job("r1", JobStatus::Pending, None, Some(500)),
+                job("r2", JobStatus::Completed, Some(1_000), None),
+            ],
+            ..ProjectState::new()
+        };
+        assert_eq!(compute_ledger(&state).gate, SpendGate::Allow);
     }
 
     #[test]

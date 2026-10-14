@@ -1087,17 +1087,27 @@ fn director_turn_inner(
                         // Blocked = hard stop (no card).  Confirm / Warn = add
                         // banner to the card so the user sees the budget status
                         // before approving.
+                        //
+                        // FAIL CLOSED: if project state cannot be loaded and
+                        // routes are payable, treat as Blocked.  Paid operations
+                        // must never proceed when budget state is unverifiable.
                         let mut budget_gate = crate::workflow::cost::SpendGate::NoLimit;
                         if let Some(root) = project_root_ref {
-                            if let Ok(state) =
-                                crate::workflow::import::load_state(std::path::Path::new(root))
-                            {
-                                budget_gate = worst_gate_for_routes(
-                                    &state,
-                                    &validated,
-                                    &context,
-                                    project_root_ref,
-                                );
+                            match crate::workflow::import::load_state(std::path::Path::new(root)) {
+                                Ok(state) => {
+                                    budget_gate = worst_gate_for_routes(
+                                        &state,
+                                        &validated,
+                                        &context,
+                                        project_root_ref,
+                                    );
+                                }
+                                Err(_) => {
+                                    // State unreadable — fail closed.
+                                    // We cannot verify whether the
+                                    // operation is payable, so block.
+                                    budget_gate = crate::workflow::cost::SpendGate::Blocked;
+                                }
                             }
                         }
                         if matches!(budget_gate, crate::workflow::cost::SpendGate::Blocked) {
@@ -1373,33 +1383,39 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
     // Budget gate: veto a hard-stop over-limit spend before any paid provider
     // call. Unknown-cost operations are not vetoed here — the ledger flags them
     // once their cost is known. This is the one path the Director cannot bypass.
+    //
+    // FAIL CLOSED: if project state cannot be loaded, paid operations are
+    // blocked — we must be able to verify budget state before spending money.
     if validated.action.action == ActionKind::RunSpecialist {
-        if let Some(root) = project_root_ref {
-            if let Ok(state) = crate::workflow::import::load_state(std::path::Path::new(root)) {
-                let gate = worst_gate_for_routes(&state, &validated, &context, project_root_ref);
-                match gate {
-                    crate::workflow::cost::SpendGate::Blocked => {
-                        return Err(
-                               "Budget hard stop: this operation would exceed the project budget limit. Adjust the budget or the operation before retrying."
-                                   .into(),
-                           );
-                    }
-                    crate::workflow::cost::SpendGate::Confirm => {
-                        app.emit(
-                               "director-progress",
-                               "⚠️ Budget warning: this operation pushes you near or over the monthly limit. You approved the approval card with this warning — proceeding.".to_string(),
-                           );
-                    }
-                    crate::workflow::cost::SpendGate::Warn => {
-                        app.emit(
-                            "director-progress",
-                            "ℹ️ Budget notice: your spend is approaching the warning threshold."
-                                .to_string(),
-                        );
-                    }
-                    _ => {}
-                }
+        let gate = if let Some(root) = project_root_ref {
+            match crate::workflow::import::load_state(std::path::Path::new(root)) {
+                Ok(state) => worst_gate_for_routes(&state, &validated, &context, project_root_ref),
+                Err(_) => crate::workflow::cost::SpendGate::Blocked,
             }
+        } else {
+            crate::workflow::cost::SpendGate::Blocked
+        };
+        match gate {
+            crate::workflow::cost::SpendGate::Blocked => {
+                return Err(
+                    "Budget hard stop: this operation would exceed the project budget limit. Adjust the budget or the operation before retrying."
+                        .into(),
+                );
+            }
+            crate::workflow::cost::SpendGate::Confirm => {
+                app.emit(
+                    "director-progress",
+                    "⚠️ Budget warning: this operation pushes you near or over the monthly limit. You approved the approval card with this warning — proceeding.".to_string(),
+                );
+            }
+            crate::workflow::cost::SpendGate::Warn => {
+                app.emit(
+                    "director-progress",
+                    "ℹ️ Budget notice: your spend is approaching the warning threshold."
+                        .to_string(),
+                );
+            }
+            _ => {}
         }
     }
 

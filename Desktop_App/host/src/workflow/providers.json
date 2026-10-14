@@ -28,7 +28,7 @@
     {
       "kind": "atlas-cloud",
       "capability": "video.text_only",
-      "pricing_status": "known",
+      "pricing_status": "placeholder",
       "currency": "USD",
       "price_minor": 37,
       "source_url": "https://atlas.nousresearch.com/pricing",
@@ -39,7 +39,7 @@
     {
       "kind": "atlas-cloud",
       "capability": "video.start_frame",
-      "pricing_status": "known",
+      "pricing_status": "placeholder",
       "currency": "USD",
       "price_minor": 37,
       "source_url": "https://atlas.nousresearch.com/pricing",
@@ -50,7 +50,7 @@
     {
       "kind": "atlas-cloud",
       "capability": "video.edit",
-      "pricing_status": "known",
+      "pricing_status": "placeholder",
       "currency": "USD",
       "price_minor": 37,
       "source_url": "https://atlas.nousresearch.com/pricing",
@@ -61,7 +61,7 @@
     {
       "kind": "atlas-cloud",
       "capability": "video.character_reference",
-      "pricing_status": "known",
+      "pricing_status": "placeholder",
       "currency": "USD",
       "price_minor": 37,
       "source_url": "https://atlas.nousresearch.com/pricing",
@@ -72,7 +72,7 @@
     {
       "kind": "atlas-cloud",
       "capability": "video.location_prop_other_reference",
-      "pricing_status": "known",
+      "pricing_status": "placeholder",
       "currency": "USD",
       "price_minor": 37,
       "source_url": "https://atlas.nousresearch.com/pricing",
@@ -83,7 +83,7 @@
     {
       "kind": "atlas-cloud",
       "capability": "video.lip_sync_text_narration",
-      "pricing_status": "known",
+      "pricing_status": "placeholder",
       "currency": "USD",
       "price_minor": 37,
       "source_url": "https://atlas.nousresearch.com/pricing",
@@ -94,7 +94,7 @@
     {
       "kind": "atlas-cloud",
       "capability": "video.lip_sync_audio_included",
-      "pricing_status": "known",
+      "pricing_status": "placeholder",
       "currency": "USD",
       "price_minor": 37,
       "source_url": "https://atlas.nousresearch.com/pricing",

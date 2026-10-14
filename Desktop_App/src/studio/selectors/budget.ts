@@ -71,12 +71,12 @@ function computeGate(
   if (typeof limit !== "number" || !Number.isFinite(limit)) return "none";
   const onTheHook = spentMinor + committed;
   const hardStop = budget.hard_stop ?? false;
-  if (hardStop && onTheHook >= limit) return "blocked";
+  if (hardStop && onTheHook > limit) return "blocked";
   const warningAt = budget.warning_at_minor;
-  if (typeof warningAt === "number" && Number.isFinite(warningAt) && onTheHook >= warningAt) {
-    return onTheHook < limit ? "warn" : "confirm";
+  if (typeof warningAt === "number" && Number.isFinite(warningAt) && onTheHook > warningAt) {
+    return onTheHook > limit ? "blocked" : "warn";
   }
-  if (onTheHook >= limit) return "confirm";
+  if (onTheHook > limit) return "confirm";
   return "none";
 }
 

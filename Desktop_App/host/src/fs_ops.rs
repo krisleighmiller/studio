@@ -21,6 +21,91 @@ fn path_from_str(path: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Generic file commands cannot bypass revision-locked workflow persistence.
+/// Check the spelling (even when missing) and the resolved path (symlink aliases).
+fn normalized_path(path: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return Err("path escapes filesystem root".into());
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Ok(out)
+}
+
+fn resolved_path(path: &Path) -> Result<PathBuf, String> {
+    let path = normalized_path(path)?;
+    let mut ancestor = path.as_path();
+    let mut missing = Vec::new();
+    while fs::symlink_metadata(ancestor).is_err() {
+        missing.push(ancestor.file_name().ok_or("invalid path")?.to_os_string());
+        ancestor = ancestor.parent().ok_or("invalid path")?;
+    }
+    let mut result = ancestor
+        .canonicalize()
+        .map_err(|e| format!("path error: {e}"))?;
+    for part in missing.into_iter().rev() {
+        result.push(part);
+    }
+    Ok(result)
+}
+
+/// Reject the protected files or a directory operation carrying either file.
+pub(crate) fn reject_workflow_mutation(path: &Path, recursive: bool) -> Result<(), String> {
+    let Some(root) = crate::session::root() else {
+        return Ok(());
+    };
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("project root: {e}"))?;
+    let lexical = normalized_path(path)?;
+    let resolved = resolved_path(path)?;
+    for candidate in [&lexical, &resolved] {
+        for protected in [
+            root.join(crate::workflow::state::STATE_REL),
+            root.join("Preproduction/.media-spend.lock"),
+        ] {
+            if candidate == &protected || (recursive && protected.starts_with(candidate)) {
+                return Err(
+                    "workflow state and its lock are managed by revision-locked persistence".into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recursive copy dereferences symlinked files, including nested aliases.
+pub(crate) fn reject_workflow_copy_source(path: &Path) -> Result<(), String> {
+    reject_workflow_mutation(path, path.is_dir())?;
+    if path.is_dir()
+        && !fs::symlink_metadata(path)
+            .map_err(|e| format!("Could not inspect copy source: {e}"))?
+            .file_type()
+            .is_symlink()
+    {
+        for entry in fs::read_dir(path).map_err(|e| format!("Could not read directory: {e}"))? {
+            let entry = entry.map_err(|e| format!("Could not read directory entry: {e}"))?;
+            reject_workflow_copy_source(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 pub fn list_dir(path: String) -> Result<Vec<DirEntryInfo>, String> {
     let root = path_from_str(&path)?;
     if !root.is_dir() {

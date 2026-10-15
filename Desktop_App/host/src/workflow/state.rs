@@ -1295,6 +1295,18 @@ pub struct JobRecord {
     /// Budget category (e.g. media, voice). Missing on legacy jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend_category: Option<String>,
+    /// Manual evidence review, not a provider-verified charge. Never infer verification from cost_minor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<SpendReconciliation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpendReconciliation {
+    pub source: String,
+    pub evidence_reference: String,
+    pub review_note: String,
+    pub provider_outcome: String,
+    pub reviewed_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1349,6 +1361,7 @@ impl JobRecord {
             currency: None,
             retry_of: None,
             spend_category: None,
+            reconciliation: None,
             attempts: vec![JobAttempt {
                 id: attempt_id,
                 status: JobStatus::Pending,

@@ -71,13 +71,18 @@ export function onDirectorProgress(
 export async function bindHostEvents(handlers: {
   onMenu: (id: string) => void;
   onDirectorProgress: (message: string) => void;
+  onSpendConfirmationRequired?: (payload: unknown) => void;
 }): Promise<() => void> {
   const wb = bridge();
   const offMenu = wb.onMenu(handlers.onMenu);
   const offProgress = wb.onDirectorProgress(handlers.onDirectorProgress);
+  const offSpend = handlers.onSpendConfirmationRequired
+    ? wb.onSpendConfirmationRequired(handlers.onSpendConfirmationRequired)
+    : () => {};
   return () => {
     offMenu();
     offProgress();
+    offSpend();
   };
 }
 

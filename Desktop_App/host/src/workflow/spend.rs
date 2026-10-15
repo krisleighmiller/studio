@@ -1,7 +1,10 @@
 //! Shared fail-closed billable dispatch. A durable reservation precedes each request.
 use crate::workflow::cost::{self, Price, SpendGate};
 use crate::workflow::import;
-use crate::workflow::state::{JobRecord, JobStatus, ProjectState, SpendConfirmation};
+use crate::workflow::state::{
+    JobRecord, JobStatus, ProjectState, SpendConfirmation, SpendReconciliation,
+};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -48,6 +51,51 @@ fn valid_scope(category: &str, operation: &str, model: &str) -> Result<(), Strin
     }
 }
 
+/// Read-only host quote; neither this nor renderer input authorizes dispatch.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpendQuote {
+    pub provider: String,
+    pub category: String,
+    pub operation: String,
+    pub capability: String,
+    pub model: String,
+    pub currency: String,
+    pub amount_minor: i64,
+    pub ledger_revision: String,
+}
+
+pub fn quote_scoped(
+    root: &Path,
+    provider: &str,
+    category: &str,
+    operation: &str,
+    capability: &str,
+    model: &str,
+) -> Result<SpendQuote, String> {
+    valid_scope(category, operation, model)?;
+    let (currency, amount_minor) = price(provider, capability)?;
+    let _lock = import::lock_project(root)?;
+    let state = persisted(root)?;
+    let ledger = cost::compute_ledger(&state);
+    if ledger.unknown_cost_jobs != 0 || !ledger.currency.eq_ignore_ascii_case(&currency) {
+        return Err("unknown outstanding spend or currency mismatch".into());
+    }
+    if cost::gate_spend(&state, amount_minor) != SpendGate::Confirm {
+        return Err("quote does not require confirmation or hard stop blocks it".into());
+    }
+    Ok(SpendQuote {
+        provider: provider.into(),
+        category: category.into(),
+        operation: operation.into(),
+        capability: capability.into(),
+        model: model.into(),
+        currency,
+        amount_minor,
+        ledger_revision: revision(&state)?,
+    })
+}
+
 /// Called only following an explicit user gesture acknowledging this exact quote.
 /// A token is single-use and valid only until the ledger/budget changes.
 pub fn confirm_scoped(
@@ -57,6 +105,40 @@ pub fn confirm_scoped(
     operation: &str,
     capability: &str,
     model: &str,
+) -> Result<String, String> {
+    confirm_with_quote(root, provider, category, operation, capability, model, None)
+}
+
+/// A UI gesture must bind to the host quote the user actually saw.
+pub fn confirm_quoted(
+    root: &Path,
+    provider: &str,
+    category: &str,
+    operation: &str,
+    capability: &str,
+    model: &str,
+    revision: &str,
+    amount_minor: i64,
+) -> Result<String, String> {
+    confirm_with_quote(
+        root,
+        provider,
+        category,
+        operation,
+        capability,
+        model,
+        Some((revision, amount_minor)),
+    )
+}
+
+fn confirm_with_quote(
+    root: &Path,
+    provider: &str,
+    category: &str,
+    operation: &str,
+    capability: &str,
+    model: &str,
+    expected: Option<(&str, i64)>,
 ) -> Result<String, String> {
     valid_scope(category, operation, model)?;
     let (currency, amount_minor) = price(provider, capability)?;
@@ -68,6 +150,11 @@ pub fn confirm_scoped(
     }
     if cost::gate_spend(&state, amount_minor) != SpendGate::Confirm {
         return Err("quote does not require confirmation or hard stop blocks it".into());
+    }
+    if let Some((shown_revision, shown_amount)) = expected {
+        if shown_amount != amount_minor || shown_revision != revision(&state)? {
+            return Err("spend quote is stale; request a new quote".into());
+        }
     }
     let mut random = [0u8; 32];
     fs::File::open("/dev/urandom")
@@ -148,6 +235,7 @@ where
             .ok_or("retry source job not found")?;
         if old.status != JobStatus::Failed
             || old.cost_minor.is_none()
+            || old.reconciliation.is_none()
             || old.provider.as_deref() != Some(provider)
             || old.spend_category.as_deref() != Some(category)
             || old.kind != operation
@@ -215,19 +303,60 @@ where
     )
 }
 
-/// Apply a verified provider charge to a completed/failed attempt. This is a
-/// manual accounting entry, not a prediction from the HTTP status.
+/// Reviewable list of unsettled attempts. The revision binds a manual decision to
+/// the exact ledger shown to the reviewer; it is not provider verification.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsettledJobs {
+    pub ledger_revision: String,
+    pub jobs: Vec<JobRecord>,
+}
+
+pub fn unsettled_jobs(root: &Path) -> Result<UnsettledJobs, String> {
+    let _lock = import::lock_project(root)?;
+    let state = persisted(root)?;
+    Ok(UnsettledJobs {
+        ledger_revision: revision(&state)?,
+        jobs: state
+            .jobs
+            .iter()
+            .filter(|job| job.spend_category.is_some() && job.cost_minor.is_none())
+            .cloned()
+            .collect(),
+    })
+}
+
+/// Manual evidence review; the provider is NOT queried or verified by this path.
+/// No cost is authoritative without an attributable reference and explicit review.
 pub fn reconcile_job(
     root: &Path,
     id: &str,
     actual_minor: i64,
     currency: &str,
+    expected_revision: &str,
+    outcome: &str,
+    evidence_reference: &str,
+    review_note: &str,
+    acknowledgment: &str,
 ) -> Result<(), String> {
     if actual_minor < 0 || currency.trim().is_empty() {
         return Err("reconciliation needs a nonnegative provider charge and currency".into());
     }
+    if acknowledgment != "I reviewed the provider evidence and accept this manual accounting entry"
+        || evidence_reference.trim().len() < 8
+        || review_note.trim().len() < 8
+        || !matches!(
+            (outcome, actual_minor),
+            ("charged", 1..) | ("not_charged", 0)
+        )
+    {
+        return Err("manual evidence review requires an attributable reference, note, explicit acknowledgment, and a matching provider outcome (zero requires not_charged)".into());
+    }
     let _lock = import::lock_project(root)?;
     let mut state = persisted(root)?;
+    if revision(&state)? != expected_revision {
+        return Err("reconciliation view is stale; refresh unsettled jobs".into());
+    }
     let budget_currency = state
         .budget
         .as_ref()
@@ -248,6 +377,13 @@ pub fn reconcile_job(
         return Err("job is not an unsettled billable attempt in this currency".into());
     }
     job.cost_minor = Some(actual_minor);
+    job.reconciliation = Some(SpendReconciliation {
+        source: "manual_evidence_review".into(),
+        evidence_reference: evidence_reference.trim().into(),
+        review_note: review_note.trim().into(),
+        provider_outcome: outcome.into(),
+        reviewed_at: crate::workflow::state::utc_now(),
+    });
     import::persist_state_locked(root, &state).map(|_| ())
 }
 
@@ -287,6 +423,24 @@ mod tests {
             dispatch,
         )
     }
+    fn reviewed(root: &Path, id: &str, amount: i64) -> Result<(), String> {
+        let revision = unsettled_jobs(root)?.ledger_revision;
+        reconcile_job(
+            root,
+            id,
+            amount,
+            "USD",
+            &revision,
+            if amount == 0 {
+                "not_charged"
+            } else {
+                "charged"
+            },
+            "provider-history-request-123",
+            "Reviewed billing history for this attempt",
+            "I reviewed the provider evidence and accept this manual accounting entry",
+        )
+    }
     #[test]
     fn rejects_before_dispatch_and_excludes_local_jobs() {
         let dir = setup(0, true);
@@ -301,6 +455,41 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("hard stop"));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn quoted_confirmation_requires_exact_amount_and_live_ledger_revision() {
+        let dir = setup(0, false);
+        let quote = quote_scoped(
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "image.text_to_image",
+            "model",
+        )
+        .unwrap();
+        let confirm = |revision: &str, amount| {
+            confirm_quoted(
+                dir.path(),
+                &quote.provider,
+                &quote.category,
+                &quote.operation,
+                &quote.capability,
+                &quote.model,
+                revision,
+                amount,
+            )
+        };
+        assert!(confirm(&quote.ledger_revision, quote.amount_minor + 1).is_err());
+        assert!(confirm("stale", quote.amount_minor).is_err());
+        let mut state = persisted(dir.path()).unwrap();
+        state.budget.as_mut().unwrap().limit_minor = Some(1);
+        import::persist_state(dir.path(), &state).unwrap();
+        assert!(confirm(&quote.ledger_revision, quote.amount_minor).is_err());
+        assert!(persisted(dir.path())
+            .unwrap()
+            .spend_confirmations
+            .is_empty());
     }
     #[test]
     fn confirmation_binds_scope_and_is_consumed_once() {
@@ -362,13 +551,62 @@ mod tests {
         assert_eq!(failed.cost_minor, None);
         let id = failed.id.clone();
         assert!(image(dir.path(), None, Some(&id), || panic!("sent")).is_err());
-        assert!(reconcile_job(dir.path(), &id, -1, "USD").is_err());
-        reconcile_job(dir.path(), &id, 7, "USD").unwrap();
-        assert!(reconcile_job(dir.path(), &id, 0, "USD").is_err());
+        assert!(reviewed(dir.path(), &id, -1).is_err());
+        reviewed(dir.path(), &id, 7).unwrap();
+        assert!(reviewed(dir.path(), &id, 0).is_err());
         image(dir.path(), None, Some(&id), || Ok("ok".into())).unwrap();
         let state = persisted(dir.path()).unwrap();
         assert_eq!(state.jobs[1].retry_of.as_deref(), Some(id.as_str()));
         assert_eq!(cost::compute_ledger(&state).failed_minor, 7);
+    }
+    #[test]
+    fn stale_revision_and_missing_evidence_cannot_reconcile_or_retry() {
+        let dir = setup(100, true);
+        image(dir.path(), None, None, || Err("timeout".into())).unwrap_err();
+        let snapshot = unsettled_jobs(dir.path()).unwrap();
+        let id = snapshot.jobs[0].id.clone();
+        assert!(reconcile_job(
+            dir.path(),
+            &id,
+            0,
+            "USD",
+            &snapshot.ledger_revision,
+            "not_charged",
+            "",
+            "",
+            "I reviewed the provider evidence and accept this manual accounting entry"
+        )
+        .is_err());
+        assert!(image(dir.path(), None, Some(&id), || panic!("sent")).is_err());
+        let mut state = persisted(dir.path()).unwrap();
+        state.budget.as_mut().unwrap().limit_minor = Some(101);
+        import::persist_state(dir.path(), &state).unwrap();
+        assert!(reconcile_job(
+            dir.path(),
+            &id,
+            0,
+            "USD",
+            &snapshot.ledger_revision,
+            "not_charged",
+            "provider-record-001",
+            "Checked provider history",
+            "I reviewed the provider evidence and accept this manual accounting entry"
+        )
+        .unwrap_err()
+        .contains("stale"));
+        assert_eq!(persisted(dir.path()).unwrap().jobs[0].cost_minor, None);
+        reviewed(dir.path(), &id, 0).unwrap();
+        let job = &persisted(dir.path()).unwrap().jobs[0];
+        assert_eq!(job.cost_minor, Some(0));
+        assert_eq!(
+            job.reconciliation.as_ref().unwrap().source,
+            "manual_evidence_review"
+        );
+        image(dir.path(), None, Some(&id), || Ok("sent".into())).unwrap();
+        assert_eq!(
+            persisted(dir.path()).unwrap().jobs[1].retry_of.as_deref(),
+            Some(id.as_str())
+        );
     }
     #[test]
     fn unknown_price_and_missing_project_never_dispatch() {
@@ -435,7 +673,7 @@ mod tests {
         let id = failed.jobs[0].id.clone();
         assert_eq!(failed.jobs[0].status, JobStatus::Failed);
         assert_eq!(failed.jobs[0].cost_minor, None);
-        reconcile_job(dir.path(), &id, 7, "USD").unwrap();
+        reviewed(dir.path(), &id, 7).unwrap();
         assert!(import::save_project(dir.path(), stale)
             .unwrap_err()
             .contains("changed"));
@@ -503,7 +741,7 @@ mod tests {
         assert!(import::save_project(dir.path(), budget_edit)
             .unwrap_err()
             .contains("changed"));
-        reconcile_job(dir.path(), &id, 7, "USD").unwrap();
+        reviewed(dir.path(), &id, 7).unwrap();
         assert!(import::save_project(dir.path(), failure)
             .unwrap_err()
             .contains("changed"));

@@ -9,6 +9,7 @@ interface WorkbenchBridge {
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
   onMenu: (handler: (id: string) => void) => () => void;
   onDirectorProgress: (handler: (message: string) => void) => () => void;
+  onSpendConfirmationRequired: (handler: (payload: unknown) => void) => () => void;
   toMediaUrl: (path: string) => string;
   openProject?: () => Promise<string | null>;
   useProject?: (projectPath: string) => Promise<string | null>;

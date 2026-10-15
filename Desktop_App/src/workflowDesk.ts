@@ -44,6 +44,7 @@ import { renderAssetsView } from "./studio/assetsView";
 import { buildStudioView } from "./studio/viewModel";
 import { renderProjectSummary } from "./studio/components/projectSummary";
 import { renderBudgetSummary } from "./studio/components/budgetSummary";
+import { renderSpendReview, type SpendReviewList, type SpendReviewIntent } from "./studio/components/spendReview";
 import { buildBudgetModel } from "./studio/selectors/budget";
 import { renderWorkspaceStatus } from "./studio/components/workspaceStatus";
 import { mouthLabel, roleLabel, speechLabel } from "./studio/labels";
@@ -111,6 +112,8 @@ let selectedSurface: SurfaceId = "production_notes";
 let detailsOpen = false;
 let jobsOpen = false;
 let jobsFilter: JobFilter | "all" = "all";
+let spendReview: SpendReviewList | null = null;
+let spendReviewError: string | null = null;
 let busy: string | null = null;
 let actionNote: string | null = null;
 
@@ -246,6 +249,8 @@ export function workflowStatusLine(): string {
 
 export function clearWorkflowDesk(): void {
   state = null;
+  spendReview = null;
+  spendReviewError = null;
   report = null;
   loadError = null;
   selectedSceneId = null;
@@ -268,6 +273,8 @@ export function clearWorkflowDesk(): void {
 
 export async function loadWorkflowDesk(projectRoot: string): Promise<void> {
   loadError = null;
+  spendReview = null;
+  spendReviewError = null;
   try {
     const result = await invoke<WorkflowImportResult>("workflow_import", {
       projectRoot,
@@ -1839,7 +1846,48 @@ function renderJobsPanel(): HTMLElement {
       handleJobsIntent,
     ),
   );
+  panel.append(renderSpendReview(spendReview, () => { void loadSpendReview(); }, (intent) => { void submitSpendReview(intent); }));
+  if (spendReviewError) {
+    const error = document.createElement("p");
+    error.setAttribute("role", "alert");
+    error.textContent = spendReviewError;
+    panel.append(error);
+  }
   return panel;
+}
+
+async function loadSpendReview(): Promise<void> {
+  const root = hooks?.projectRoot();
+  if (!root) return;
+  try {
+    spendReview = await invoke<SpendReviewList>("workflow_unsettled_spend", { projectRoot: root });
+    spendReviewError = null;
+  } catch (error) {
+    spendReview = null;
+    spendReviewError = error instanceof Error ? error.message : String(error);
+  }
+  renderWorkflowDesk();
+}
+
+async function submitSpendReview(intent: SpendReviewIntent): Promise<void> {
+  const root = hooks?.projectRoot();
+  if (!root || busy) return;
+  busy = "Recording manual review";
+  renderWorkflowDesk();
+  try {
+    await invoke("workflow_reconcile_spend", { projectRoot: root, ...intent });
+    spendReview = null;
+    spendReviewError = null;
+    await refreshWorkflowDesk();
+    await loadSpendReview();
+    actionNote = "Manual evidence review recorded; provider verification was not performed.";
+  } catch (error) {
+    spendReview = null; // A failed/stale decision must not remain submit-ready.
+    spendReviewError = error instanceof Error ? error.message : String(error);
+  } finally {
+    busy = null;
+    renderWorkflowDesk();
+  }
 }
 
 function handleJobsIntent(intent: JobsIntent): void {

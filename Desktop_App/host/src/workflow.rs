@@ -154,6 +154,36 @@ pub fn cmd_status(args: &Value) -> Result<Value, String> {
     result_json(imported)
 }
 
+pub fn cmd_unsettled_spend(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    serde_json::to_value(spend::unsettled_jobs(Path::new(&root))?)
+        .map_err(|error| error.to_string())
+}
+
+pub fn cmd_reconcile_spend(args: &Value) -> Result<Value, String> {
+    let root = arg_path(args, "projectRoot")?;
+    let required = |key| opt_str(args, key).ok_or_else(|| format!("Missing {key}"));
+    let actual = args
+        .get("actualMinor")
+        .and_then(Value::as_i64)
+        .ok_or("actualMinor must be integer minor units")?;
+    spend::reconcile_job(
+        Path::new(&root),
+        &required("jobId")?,
+        actual,
+        &required("currency")?,
+        &required("ledgerRevision")?,
+        &required("providerOutcome")?,
+        &required("evidenceReference")?,
+        &required("reviewNote")?,
+        &required("acknowledgment")?,
+    )?;
+    let state = import::load_state(Path::new(&root))?;
+    Ok(
+        json!({ "state": state, "note": "Manual evidence review recorded; provider verification was not performed." }),
+    )
+}
+
 pub fn cmd_save_character(args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let existing_id = opt_str(args, "characterId");

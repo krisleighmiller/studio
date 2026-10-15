@@ -20,6 +20,7 @@ export type JobRowModel = {
   actual: string;
   currency: string;
   retry: string;
+  reconciliation: string;
   cancellation: string;
   resume: string;
   detail: string;
@@ -120,7 +121,10 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
   const estimate = money(job.estimated_cost_minor);
   const actual = money(job.cost_minor);
   const currency = knownText(job.currency);
-  const retry = knownText(job.retry_of);
+  const retry = job.retry_of ? `of ${job.retry_of}` : "unknown";
+  const reconciliation = job.reconciliation
+    ? `Manual evidence review (${job.reconciliation.provider_outcome}; ref ${job.reconciliation.evidence_reference}; ${job.reconciliation.reviewed_at}) — not independently provider-verified`
+    : "No recorded reconciliation";
   const cost = `estimate ${estimate} · actual ${actual} · currency ${currency}`;
   return {
     id: job.id,
@@ -137,6 +141,7 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
     actual,
     currency,
     retry,
+    reconciliation,
     // No job-level provider cancel/resume command is wired to Studio. Do not infer
     // support from a provider name, an ID, or a persisted cancelled status.
     // Assembly is local work, not a provider prediction to resume or cancel.

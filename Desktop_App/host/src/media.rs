@@ -170,17 +170,37 @@ fn generate(
         "atlas_generate_audio" => "audio.tts_profile",
         _ => return Err(format!("unknown billable operation: {name}")),
     };
-    crate::workflow::spend::run_scoped(
+    let confirmation = arg_str(args, &["spend_confirmation", "spendConfirmation"]);
+    let result = crate::workflow::spend::run_scoped(
         &root,
         &api.kind,
         "media",
         name,
         capability,
         &model,
-        arg_str(args, &["spend_confirmation", "spendConfirmation"]).as_deref(),
+        confirmation.as_deref(),
         arg_str(args, &["retry_of", "retryOf"]).as_deref(),
         || generate_unchecked(name, args, root.to_str(), app, &api),
-    )
+    );
+    // Only a host-confirmed soft-limit gate exposes a quote. A failed replay
+    // must not open another prompt or mint another token automatically.
+    if matches!(&result, Err(error) if error == "budget confirmation required; generation blocked")
+        && confirmation.is_none()
+    {
+        if let Ok(quote) = crate::workflow::spend::quote_scoped(
+            &root, &api.kind, "media", name, capability, &model,
+        ) {
+            app.emit(
+                "spend-confirmation-required",
+                json!({
+                    "quote": quote,
+                    "projectRoot": root,
+                    "args": args,
+                }),
+            );
+        }
+    }
+    result
 }
 
 fn generate_unchecked(

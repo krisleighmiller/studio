@@ -737,6 +737,8 @@ app.whenReady().then(() => {
   sidecar.onEvent((event, payload) => {
     if (event === "director-progress") {
       mainWindow?.webContents.send("director-progress", payload);
+    } else if (event === "spend-confirmation-required") {
+      mainWindow?.webContents.send("spend-confirmation-required", payload);
     }
   });
 

@@ -105,12 +105,14 @@ function jobRow(row: JobRowModel, onIntent: (intent: JobsIntent) => void): HTMLE
     `Actual ${row.actual}`,
     `Currency ${row.currency}`,
     `Retry ${row.retry}`,
+    row.reconciliation,
   ].join(" · ");
   copy.append(title, meta, facts);
   const support = document.createElement("span");
   support.className = "studio-job-support";
   support.textContent = `Cancel: ${row.cancellation} · Resume: ${row.resume}`;
   copy.append(support);
+
   button.append(dot, copy);
   if (row.actionLabel) {
     button.addEventListener("click", () => onIntent({ type: "open", jobId: row.id }));

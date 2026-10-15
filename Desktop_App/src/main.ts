@@ -12,6 +12,7 @@ import {
   saveDialog,
   toMediaUrlAsync,
 } from "./host";
+import { createSpendConfirmationHandler } from "./spendConfirmation";
 import { isMarkdownPath, renderMarkdown } from "./markdown";
 import workbenchGuideMd from "./docs/workbench-guide.md?raw";
 import {
@@ -4623,8 +4624,12 @@ function bindUi(): void {
 }
 
 async function bindMenuAndProgress(): Promise<void> {
+  const confirmMediaSpend = createSpendConfirmationHandler({
+    invoke, ask, projectRoot: () => projectRoot, status: setStatus,
+  });
   await bindHostEvents({
     onMenu: (id) => handleMenuAction(id),
+    onSpendConfirmationRequired: (payload) => { void confirmMediaSpend(payload); },
     onDirectorProgress: (message) => {
       const text = (message || "").trim();
       if (!text) return;

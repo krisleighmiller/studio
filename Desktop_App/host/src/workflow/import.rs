@@ -1618,6 +1618,7 @@ mod tests {
             currency: None,
             retry_of: None,
             spend_category: None,
+            reconciliation: None,
         });
 
         assert!(uniquify_duplicate_asset_ids(&mut state));
@@ -1715,6 +1716,7 @@ mod tests {
             currency: None,
             retry_of: None,
             spend_category: None,
+            reconciliation: None,
         });
 
         assert!(restore_wardrobe_plate_assets(dir.path(), &mut state));
@@ -1773,6 +1775,7 @@ mod tests {
             currency: None,
             retry_of: None,
             spend_category: None,
+            reconciliation: None,
         });
 
         assert!(restore_render_jobs(dir.path(), &mut state));
@@ -1917,6 +1920,7 @@ mod tests {
             currency: None,
             retry_of: None,
             spend_category: None,
+            reconciliation: None,
         }
     }
 

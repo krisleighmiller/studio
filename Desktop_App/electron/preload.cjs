@@ -24,6 +24,11 @@ if (bridgeAllowed()) contextBridge.exposeInMainWorld("workbench", {
     ipcRenderer.on("director-progress", listener);
     return () => ipcRenderer.removeListener("director-progress", listener);
   },
+  onSpendConfirmationRequired: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("spend-confirmation-required", listener);
+    return () => ipcRenderer.removeListener("spend-confirmation-required", listener);
+  },
   toMediaUrl: (filePath) =>
     ipcRenderer.sendSync("host:toMediaUrlSync", filePath),
   openProject: () => ipcRenderer.invoke("project:open"),

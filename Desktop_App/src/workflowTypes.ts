@@ -408,6 +408,14 @@ export type JobRecord = {
   retry_of?: string | null;
   /** Host spend category; absent on legacy jobs. Not evidence of chat accounting. */
   spend_category?: string | null;
+  /** Human-reviewed provider evidence; not independently provider-verified. */
+  reconciliation?: {
+    source: "manual_evidence_review";
+    evidence_reference: string;
+    review_note: string;
+    provider_outcome: "charged" | "not_charged";
+    reviewed_at: string;
+  } | null;
 };
 
 /** Host registry id. A new recipe is valid once the host table accepts it. */

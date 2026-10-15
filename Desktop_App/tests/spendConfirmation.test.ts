@@ -24,6 +24,26 @@ function setup(accept = true) {
 }
 
 describe("paid media confirmation handoff (host mocked; no provider calls)", () => {
+  it("notifies the application after confirmed dispatch so Jobs can refresh", async () => {
+    const invoke = vi.fn(async (command: string): Promise<string> => {
+      if (command === "confirm_spend") return "one-use-token";
+      if (command === "media_generate_confirmed") return "saved";
+      throw Error("unexpected command");
+    });
+    const onSubmitted = vi.fn(async () => undefined);
+    const handle = createSpendConfirmationHandler({
+      invoke,
+      ask: vi.fn(async () => true),
+      status: vi.fn(),
+      projectRoot: () => "/project",
+      onSubmitted,
+    });
+
+    await handle(payload());
+
+    expect(onSubmitted).toHaveBeenCalledWith("saved");
+  });
+
   it("shows the host quote and replays once with exact scope and token", async () => {
     const { handle, invoke, ask, status } = setup();
     await handle(payload());
@@ -41,10 +61,11 @@ describe("paid media confirmation handoff (host mocked; no provider calls)", () 
     expect(status).toHaveBeenCalledWith("Media generation submitted: saved");
   });
 
-  it("does not call the host after rejection or on an untrusted/mismatched quote", async () => {
+  it("reports rejection and does not call the host after rejection or on an untrusted/mismatched quote", async () => {
     const rejected = setup(false);
     await rejected.handle(payload());
     expect(rejected.invoke).not.toHaveBeenCalled();
+    expect(rejected.status).toHaveBeenCalledWith("Paid generation was not authorized; no provider request was sent.");
     const invalid = setup();
     await invalid.handle({ ...payload(), quote: { ...payload().quote, amountMinor: undefined } });
     await invalid.handle({ ...payload(), args: { model: "different" } });
@@ -60,7 +81,7 @@ describe("paid media confirmation handoff (host mocked; no provider calls)", () 
     });
     await handle(payload());
     expect(invoke).toHaveBeenCalledTimes(1);
-    expect(status).toHaveBeenCalledWith("Paid generation blocked: stale ledger revision");
+    expect(status).toHaveBeenCalledWith("Paid generation blocked before dispatch: stale ledger revision");
 
     invoke.mockClear();
     invoke.mockImplementation(async (command: string) => {
@@ -69,7 +90,8 @@ describe("paid media confirmation handoff (host mocked; no provider calls)", () 
     });
     await handle(payload());
     expect(invoke).toHaveBeenCalledTimes(2);
-    expect(status).toHaveBeenCalledWith("Paid generation blocked: stale confirmation token");
+    expect(status).toHaveBeenCalledWith(expect.stringContaining("Paid generation outcome is uncertain"));
+    expect(status).toHaveBeenCalledWith(expect.stringContaining("Do not retry automatically"));
   });
 
   it("drops a quote when the project changes during the confirmation dialog", async () => {
@@ -82,6 +104,41 @@ describe("paid media confirmation handoff (host mocked; no provider calls)", () 
     await handle(payload());
     expect(invoke).not.toHaveBeenCalled();
   });
+  it("requires a fresh one-use authorization for two consecutive paid operations", async () => {
+    let issued = 0;
+    const invoke = vi.fn(async (command: string): Promise<string> => {
+      if (command === "confirm_unbounded_spend") return `token-${++issued}`;
+      if (command === "media_generate_confirmed") return "saved";
+      throw Error("unexpected command");
+    });
+    const handle = createSpendConfirmationHandler({
+      invoke,
+      ask: vi.fn(async () => true),
+      status: vi.fn(),
+      projectRoot: () => "/project",
+    });
+    const unbounded = (hash: string) => ({
+      ...payload(),
+      provider: "atlas-cloud",
+      category: "media",
+      operation: "atlas_generate_image",
+      model: "image-model",
+      quote: {
+        currency: "USD",
+        requestHash: hash.repeat(64),
+        ledgerRevision: `revision-${hash}`,
+        disclosure: "No verified maximum exists for this request; charge may exceed budget.",
+      },
+    });
+
+    await handle(unbounded("a"));
+    await handle(unbounded("b"));
+
+    expect(invoke).toHaveBeenCalledTimes(4);
+    expect(invoke).toHaveBeenNthCalledWith(2, "media_generate_confirmed", expect.objectContaining({ token: "token-1" }));
+    expect(invoke).toHaveBeenNthCalledWith(4, "media_generate_confirmed", expect.objectContaining({ token: "token-2" }));
+  });
+
   it("discloses unknown maximum and binds approval to the exact request hash", async () => {
     const { handle, invoke, ask } = setup();
     invoke.mockImplementation(async (command: string) =>

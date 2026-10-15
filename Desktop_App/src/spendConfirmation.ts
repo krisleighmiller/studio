@@ -44,6 +44,7 @@ export function createSpendConfirmationHandler(deps: {
   ask: (message: string, options: { title: string; kind: "warning" }) => Promise<boolean>;
   projectRoot: () => string | null;
   status: (message: string) => void;
+  onSubmitted?: (result: unknown) => void | Promise<void>;
 }): (payload: unknown) => Promise<void> {
   let pending = false;
   return async (payload) => {
@@ -52,6 +53,7 @@ export function createSpendConfirmationHandler(deps: {
     pending = true;
     const { quote, projectRoot, args, provider, operation, model } = request;
     const unbounded = "requestHash" in quote;
+    let dispatchAttempted = false;
     try {
       const accepted = await deps.ask(
         `${operation} · ${model}\n` +
@@ -60,7 +62,10 @@ export function createSpendConfirmationHandler(deps: {
         `Ledger revision: ${quote.ledgerRevision}\n\nAuthorize this single media generation?`,
         { title: "Confirm paid generation", kind: "warning" },
       );
-      if (!accepted || deps.projectRoot() !== projectRoot) return;
+      if (!accepted || deps.projectRoot() !== projectRoot) {
+        if (!accepted) deps.status("Paid generation was not authorized; no provider request was sent.");
+        return;
+      }
       const token = unbounded ?
         await deps.invoke("confirm_unbounded_spend", {
           projectRoot, provider, category: "media", operation, model,
@@ -73,12 +78,23 @@ export function createSpendConfirmationHandler(deps: {
         });
       if (typeof token !== "string" || !token) throw new Error("Host did not issue a spend token");
       // Never retry this call: even if the response fails, the host may have consumed the token.
+      dispatchAttempted = true;
       const result = await deps.invoke("media_generate_confirmed", {
         projectRoot, operation, mediaArgs: args, token,
       });
       deps.status(`Media generation submitted: ${String(result)}`);
+      if (deps.onSubmitted) {
+        try {
+          await deps.onSubmitted(result);
+        } catch {
+          deps.status(`Media generation submitted: ${String(result)} (Jobs refresh failed)`);
+        }
+      }
     } catch (error) {
-      deps.status(`Paid generation blocked: ${error instanceof Error ? error.message : String(error)}`);
+      const detail = error instanceof Error ? error.message : String(error);
+      deps.status(dispatchAttempted
+        ? `Paid generation outcome is uncertain: ${detail}. Do not retry automatically; inspect Jobs and check provider status when a prediction ID is available.`
+        : `Paid generation blocked before dispatch: ${detail}`);
     } finally {
       pending = false;
     }

@@ -227,9 +227,9 @@ function renderBudgetEditor(emit: (intent: ProfileIntent) => void): HTMLElement 
   const policySelect = document.createElement("select");
   policySelect.name = "budget_policy";
   for (const [value, label] of [
-    ["strict_hard_stop", "Strict hard stop — only source-backed maximum charges"],
-    ["approval_required", "Approval required — disclose unknown exposure per request"],
-    ["warn_only", "Warn only — unknown exposure is not capped"],
+    ["strict_hard_stop", "Strict block for v1 — paid generation unavailable without verified maxima"],
+    ["approval_required", "Approval required — authorize each paid request after unknown-cost disclosure"],
+    ["warn_only", "Warn policy — v1 still requires authorization for each paid request"],
   ]) {
     const option = document.createElement("option");
     option.value = value;
@@ -241,7 +241,7 @@ function renderBudgetEditor(emit: (intent: ProfileIntent) => void): HTMLElement 
 
   const note = document.createElement("p");
   note.className = "workflow-budget-note";
-  note.textContent = "Only strict hard stop with verified maximum charges enforces a ceiling on accounted jobs. Approval-required and warn-only may incur unbounded charges. LLM/chat requests remain blocked and are not covered by this budget.";
+  note.textContent = "Studio v1 does not guarantee or verify provider charges. Strict policy remains fail-closed and blocks paid generation until the user explicitly changes it; Approval Required and Warn policies require per-request authorization after unknown-cost disclosure. LLM/chat requests remain blocked and are not covered by this budget.";
 
   currency.append(currencyInput);
   limit.append(limitInput);

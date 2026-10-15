@@ -1287,6 +1287,46 @@ fn budget_gate_banner(gate: &crate::workflow::cost::SpendGate) -> Option<&'stati
     }
 }
 
+fn director_budget_status(ledger: &crate::workflow::cost::BudgetLedger) -> String {
+    let accounted = ledger
+        .committed_minor
+        .saturating_add(ledger.unsettled_estimated_minor)
+        .saturating_add(ledger.completed_minor)
+        .saturating_add(ledger.failed_minor);
+    let limit = ledger
+        .limit_minor
+        .map(|value| {
+            format!(
+                "Configured project limit: {}.",
+                crate::workflow::cost::format_minor(value, &ledger.currency)
+            )
+        })
+        .unwrap_or_else(|| "No configured project limit.".into());
+    format!(
+        "Budget status: {:?} — {} accounted exposure. {limit} {} job(s) have unknown cost; {} job(s) have unverified maximum exposure. Provider charges are not verified.",
+        ledger.gate,
+        crate::workflow::cost::format_minor(accounted, &ledger.currency),
+        ledger.unknown_cost_jobs,
+        ledger.unknown_exposure_jobs,
+    )
+}
+
+fn approved_action_error_reply(error: &str) -> (String, &'static str) {
+    if matches!(
+        error,
+        "unbounded request approval required" | "budget confirmation required; generation blocked"
+    ) {
+        return (
+            "Paid media is awaiting spend authorization. Approve or decline the separate confirmation prompt. If authorized, the submitted operation and recovery status will appear in Jobs; the Director will not automatically retry it.".into(),
+            "approve:awaiting-spend-authorization",
+        );
+    }
+    (
+        format!("Host could not execute the approved action: {error}"),
+        "approve:error",
+    )
+}
+
 pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse, String> {
     use crate::director_actions::{validate_action, ActionKind};
     use crate::specialists::{self, SpecialistLlm};
@@ -1371,26 +1411,14 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
     if let Some(root) = project_root_ref {
         if let Ok(state) = crate::workflow::import::load_state(std::path::Path::new(root)) {
             let ledger = crate::workflow::cost::compute_ledger(&state);
-            app.emit(
-                "director-progress",
-                format!(
-                    "Budget status: {:?} — {}/{} spent",
-                    ledger.gate,
-                    ledger
-                        .committed_minor
-                        .saturating_add(ledger.completed_minor.saturating_add(ledger.failed_minor)),
-                    ledger
-                        .limit_minor
-                        .map(|l| l.to_string())
-                        .unwrap_or_else(|| "unlimited".into())
-                ),
-            );
+            app.emit("director-progress", director_budget_status(&ledger));
         }
     }
 
-    // Budget gate: veto a hard-stop over-limit spend before any paid provider
-    // call. Unknown-cost operations are not vetoed here — the ledger flags them
-    // once their cost is known. This is the one path the Director cannot bypass.
+    // Budget gate: veto a strict hard-stop request before any paid provider
+    // call. Unknown-cost operations are also vetoed under strict policy because
+    // v1 cannot prove a provider-backed maximum. This is the one path the
+    // Director cannot bypass.
     //
     // FAIL CLOSED: if project state cannot be loaded, paid operations are
     // blocked — we must be able to verify budget state before spending money.
@@ -1457,12 +1485,13 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
     let result = match outcome {
         Ok(result) => result,
         Err(error) => {
+            let (reply, event) = approved_action_error_reply(&error);
             return finish_director_reply(
                 app,
                 Ok(DirectorTurnResponse {
-                    reply: format!("Host could not execute the approved action: {error}"),
+                    reply,
                     model: response_model,
-                    tool_events: vec!["approve:error".into()],
+                    tool_events: vec![event.into()],
                     continue_suggested: false,
                 }),
             );
@@ -1500,6 +1529,58 @@ fn finish_director_reply(
 mod tests {
     use super::*;
     use crate::director_actions::{parse_actions, validate_action, ActionKind};
+
+    #[test]
+    fn deferred_paid_media_is_reported_as_awaiting_authorization_not_failure() {
+        for error in [
+            "unbounded request approval required",
+            "budget confirmation required; generation blocked",
+        ] {
+            let (reply, event) = approved_action_error_reply(error);
+            assert!(reply.contains("awaiting spend authorization"), "{reply}");
+            assert!(reply.contains("Jobs"), "{reply}");
+            assert!(!reply.contains("could not execute"), "{reply}");
+            assert_eq!(event, "approve:awaiting-spend-authorization");
+        }
+    }
+
+    #[test]
+    fn budget_status_describes_accounted_exposure_without_claiming_verified_spend() {
+        let ledger = crate::workflow::cost::BudgetLedger {
+            currency: "USD".into(),
+            limit_minor: None,
+            warning_at_minor: None,
+            hard_stop: false,
+            committed_minor: 10,
+            unsettled_estimated_minor: 20,
+            completed_minor: 30,
+            failed_minor: 40,
+            remaining_minor: None,
+            unknown_cost_jobs: 2,
+            unknown_exposure_jobs: 3,
+            gate: crate::workflow::cost::SpendGate::NoLimit,
+        };
+        let message = director_budget_status(&ledger);
+        assert!(message.contains("1.00 USD accounted exposure"), "{message}");
+        assert!(message.contains("No configured project limit"), "{message}");
+        assert!(message.contains("2 job(s) have unknown cost"), "{message}");
+        assert!(
+            message.contains("3 job(s) have unverified maximum exposure"),
+            "{message}"
+        );
+        assert!(
+            message.contains("Provider charges are not verified"),
+            "{message}"
+        );
+        assert!(
+            !message.to_ascii_lowercase().contains(" spent"),
+            "{message}"
+        );
+        assert!(
+            !message.to_ascii_lowercase().contains("unlimited"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn parses_director_action_block() {

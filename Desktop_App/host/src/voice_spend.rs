@@ -198,14 +198,28 @@ pub fn quote(root: &Path, operation: &str, model: &str, input: &str) -> Result<V
         });
     drop(_lock);
     match policy {
-        BudgetPolicy::StrictHardStop => Err("strict hard stop requires an adapter-verified request maximum; voice request blocked".into()),
+        BudgetPolicy::StrictHardStop => Err(
+            "strict hard stop requires an adapter-verified request maximum; voice request blocked"
+                .into(),
+        ),
         BudgetPolicy::ApprovalRequired => {
             let shared = spend::quote_unbounded_scoped(root, &request_hash)?;
-            Ok(VoiceQuote { policy: "approval_required", request_hash: shared.request_hash,
-                ledger_revision: Some(shared.ledger_revision), disclosure: shared.disclosure })
+            Ok(VoiceQuote {
+                policy: "approval_required",
+                request_hash: shared.request_hash,
+                ledger_revision: Some(shared.ledger_revision),
+                disclosure: shared.disclosure,
+            })
         }
-        BudgetPolicy::WarnOnly => Ok(VoiceQuote { policy: "warn_only", request_hash,
-            ledger_revision: None, disclosure: "No verified maximum exists for this voice request. The charge may exceed your budget; warn-only policy does not enforce a hard stop.".into() }),
+        BudgetPolicy::WarnOnly => {
+            let shared = spend::quote_unbounded_scoped(root, &request_hash)?;
+            Ok(VoiceQuote {
+                policy: "warn_only",
+                request_hash: shared.request_hash,
+                ledger_revision: Some(shared.ledger_revision),
+                disclosure: "No verified maximum exists for this voice request. The charge may exceed your budget; warn-only policy does not enforce a hard stop. Explicit authorization is still required for this paid request.".into(),
+            })
+        }
     }
 }
 
@@ -581,7 +595,7 @@ mod tests {
         assert_eq!(state.jobs[0].estimated_cost_minor, None);
     }
     #[test]
-    fn strict_blocks_quote_warn_only_discloses_unknown_exposure() {
+    fn strict_blocks_quote_and_warn_only_still_requires_bound_authorization() {
         let root = setup();
         let op = "elevenlabs_design_voice";
         let model = "eleven_multilingual_ttv_v2";
@@ -593,9 +607,31 @@ mod tests {
         let quote = quote(root.path(), op, model, input).unwrap();
         assert_eq!(quote.policy, "warn_only");
         assert!(quote.disclosure.contains("verified maximum"));
+        assert!(quote.ledger_revision.is_some());
+        let calls = Cell::new(0);
+        assert!(run(root.path(), op, model, input, None, || {
+            calls.set(calls.get() + 1);
+            Ok("sent".into())
+        })
+        .is_err());
+        assert_eq!(calls.get(), 0);
+        let token = confirm_unbounded(
+            root.path(),
+            op,
+            model,
+            input,
+            &quote.request_hash,
+            quote.ledger_revision.as_deref().unwrap(),
+        )
+        .unwrap();
         assert_eq!(
-            run(root.path(), op, model, input, None, || Ok("sent".into())).unwrap(),
+            run(root.path(), op, model, input, Some(&token), || {
+                calls.set(calls.get() + 1);
+                Ok("sent".into())
+            })
+            .unwrap(),
             "sent"
         );
+        assert_eq!(calls.get(), 1);
     }
 }

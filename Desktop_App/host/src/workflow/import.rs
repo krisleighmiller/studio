@@ -633,9 +633,12 @@ fn merge_preserved(previous: ProjectState, state: &mut ProjectState) {
             scene.post = old_scene.post;
         }
     }
-    if state.jobs.is_empty() {
-        state.jobs = previous.jobs;
+    for old_job in previous.jobs {
+        if !state.jobs.iter().any(|job| job.id == old_job.id) {
+            state.jobs.push(old_job);
+        }
     }
+    state.budget = previous.budget;
     if previous.assets.iter().any(|asset| {
         asset.role.is_scene_look()
             || asset.role.is_cut_image()
@@ -1546,9 +1549,100 @@ pub fn load_state(project_root: &Path) -> Result<ProjectState, String> {
 mod tests {
     use super::*;
     use crate::workflow::state::{
-        AssetRecord, AssetRole, AssetStatus, CharacterRecord, JobRecord, JobStatus, LookBoard,
-        LookSlot,
+        AssetRecord, AssetRole, AssetStatus, BudgetPolicy, CharacterRecord, JobRecord, JobStatus,
+        LookBoard, LookSlot, ProjectBudget, SpendRequestMetadata,
     };
+
+    #[test]
+    fn reimport_merges_jobs_and_preserves_existing_budget_policy() {
+        let mut previous = ProjectState::new();
+        previous.budget = Some(ProjectBudget {
+            currency: "USD".into(),
+            limit_minor: Some(5_000),
+            warning_at_minor: Some(4_000),
+            hard_stop: true,
+            policy: Some(BudgetPolicy::StrictHardStop),
+        });
+        let mut old_job = JobRecord::open("spend-old", "atlas_generate_video");
+        old_job.provider = Some("atlas-cloud".into());
+        old_job.status = JobStatus::Failed;
+        old_job.retry_of = Some("spend-earlier".into());
+        old_job.request_metadata = Some(SpendRequestMetadata {
+            request_hash: "a".repeat(64),
+            disclosure: Some("unknown exposure".into()),
+            duration_seconds: Some(5),
+            width: Some(1920),
+            height: Some(1080),
+            prediction_id: Some("prediction-existing".into()),
+        });
+        previous.jobs.push(old_job);
+
+        let mut imported = ProjectState::new();
+        imported.jobs.push(JobRecord::open("job-new", "render"));
+        merge_preserved(previous, &mut imported);
+
+        assert_eq!(imported.jobs.len(), 2);
+        let preserved = imported
+            .jobs
+            .iter()
+            .find(|job| job.id == "spend-old")
+            .unwrap();
+        assert_eq!(preserved.retry_of.as_deref(), Some("spend-earlier"));
+        assert_eq!(
+            preserved
+                .request_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.prediction_id.as_deref()),
+            Some("prediction-existing")
+        );
+        assert_eq!(
+            imported.budget.as_ref().and_then(|budget| budget.policy),
+            Some(BudgetPolicy::StrictHardStop)
+        );
+    }
+
+    #[test]
+    fn reopening_preserves_jobs_recovery_metadata_and_existing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let media = root.path().join("Scenes/Scene1/Cut1/existing.mp4");
+        fs::create_dir_all(media.parent().unwrap()).unwrap();
+        fs::write(&media, b"existing-media").unwrap();
+
+        let mut state = ProjectState::new();
+        let mut job = JobRecord::open("spend-reopen", "atlas_generate_video");
+        job.provider = Some("atlas-cloud".into());
+        job.status = JobStatus::Failed;
+        job.output_path = Some("Scenes/Scene1/Cut1/existing.mp4".into());
+        job.retry_of = Some("spend-original".into());
+        job.request_metadata = Some(SpendRequestMetadata {
+            request_hash: "b".repeat(64),
+            disclosure: Some("unknown exposure".into()),
+            duration_seconds: Some(5),
+            width: Some(1920),
+            height: Some(1080),
+            prediction_id: Some("prediction-reopen".into()),
+        });
+        state.jobs.push(job);
+        persist_state(root.path(), &state).unwrap();
+
+        let first = load_or_import(root.path()).unwrap().state;
+        let second = load_or_import(root.path()).unwrap().state;
+        for reopened in [&first, &second] {
+            let job = reopened
+                .jobs
+                .iter()
+                .find(|job| job.id == "spend-reopen")
+                .unwrap();
+            assert_eq!(job.retry_of.as_deref(), Some("spend-original"));
+            assert_eq!(
+                job.request_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.prediction_id.as_deref()),
+                Some("prediction-reopen")
+            );
+        }
+        assert_eq!(fs::read(&media).unwrap(), b"existing-media");
+    }
 
     #[test]
     fn duplicate_look_id_stays_on_the_character_and_the_still_gets_a_new_id() {

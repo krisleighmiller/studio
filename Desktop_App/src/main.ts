@@ -4625,7 +4625,15 @@ function bindUi(): void {
 
 async function bindMenuAndProgress(): Promise<void> {
   const confirmMediaSpend = createSpendConfirmationHandler({
-    invoke, ask, projectRoot: () => projectRoot, status: setStatus,
+    invoke,
+    ask,
+    projectRoot: () => projectRoot,
+    status: setStatus,
+    onSubmitted: async () => {
+      if (!projectRoot) return;
+      await renderExplorer();
+      await refreshWorkflowDesk();
+    },
   });
   await bindHostEvents({
     onMenu: (id) => handleMenuAction(id),

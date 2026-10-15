@@ -817,13 +817,99 @@ A new recipe can be added by data and host validation logic, not by editing ever
 
 # 12. Phase 8 - Cost, Jobs, And Production Governance
 
-## Goal
+**Status: PARTIAL / DEFERRED FOR V1**
 
-Make generation spending visible before it becomes surprising.
+Advanced spending governance stopped at checkpoint `e7d8b8e` on the recoverable
+`phase8-advanced-governance-checkpoint` branch. The v1 baseline is being prepared
+separately on `v1-baseline-phase8-deferred`; it must not be merged to `main`
+without explicit authorization.
 
-## Foundation
+This is a product-scope decision. Phase 8 is not complete, and Phase 9 remains
+gated on the v1 regression baseline.
 
-Pull forward a minimal provider registry:
+## V1 Goal
+
+Keep paid generation usable and honest without claiming enforcement Studio cannot
+provide. Studio v1 must disclose known estimates and unknown exposure, require
+explicit authorization for each paid operation, retain job/recovery metadata, and
+preserve existing project files. It does not guarantee project budgets or verify
+provider charges.
+
+## Implemented And Retained For V1
+
+- integer-minor-unit cost fields and truthful `unknown` values rather than zero;
+- provider/model/operation job metadata, timestamps, retry lineage, request
+  fingerprints, prediction IDs where providers return them, and read-only status
+  recovery where the adapter supports it;
+- registry estimates kept separate from verified maxima and actual charges;
+- explicit, one-use, request-bound authorization before paid media and direct voice
+  operations, including projects using the warn policy;
+- strict-policy projects remain fail-closed when no adapter-verified request maximum
+  exists; Studio does not silently convert them to a permissive policy;
+- no automatic paid retry after an uncertain provider outcome; identical unresolved
+  requests remain blocked while status recovery uses the original prediction ID;
+- project-state compatibility through additive defaults, preserved budget policy,
+  and job merging by stable job ID during re-import;
+- existing filesystem, navigation, secret, approval-binding, and provider-upload
+  security boundaries.
+
+## Deliberately Deferred Until After V1
+
+- provider billing-account integration and independently verified actual charges;
+- provider-specific, contractually verified request maxima;
+- guaranteed project-budget enforcement across every provider and paid category;
+- advanced reservation/release accounting and provider-backed settlement;
+- pricing research beyond the existing registry data;
+- automatic recovery workers, universal cancellation/resume controls, and automatic
+  retries;
+- a claim that manually reviewed billing evidence is provider verification.
+
+The existing advanced reservation and reconciliation code remains in the Phase 8
+checkpoint for later work. The v1 path must not depend on those incomplete guarantees.
+
+## Strict-Policy Compatibility Rule
+
+An existing `strict_hard_stop` or legacy `hard_stop: true` project remains blocked
+for paid operations that lack an adapter-verified maximum. The UI must explain that
+v1 cannot enforce the requested ceiling. Paid work may resume only after the user
+explicitly changes the policy; opening or migrating a project must never downgrade
+strict policy automatically.
+
+## Remaining V1 Risks
+
+- displayed prices are estimates or unknown and may differ from provider charges;
+- actual charges are not independently verified by Studio;
+- an accepted remote job can outlive a local failure, so users may need to recover it
+  by job ID/prediction ID or reconcile it manually;
+- provider status recovery is available only for adapters with durable prediction IDs;
+- parked Director approvals are intentionally non-persistent and require fresh
+  approval after host restart;
+- LLM/chat costs are not included in the production-media ledger and remain outside
+  any budget claim.
+
+## V1 Regression Gate
+
+Use mocks only; do not make live billable requests. Before Phase 9 or any merge to
+`main`, verify:
+
+- two consecutive paid-media operations each require and consume a fresh authorization;
+- voice TTS/design/create routes require authorization and strict policy blocks before
+  dispatch;
+- Director approval cannot be replaced by chat words, replayed, or used after scoped
+  inputs change;
+- project reopening and re-import preserve jobs, prediction IDs, retry lineage,
+  existing files, and strict budget policy;
+- uncertain provider outcomes do not trigger a new generation request;
+- existing filesystem, navigation, secret, and approval security regressions pass;
+- host tests, Electron tests, frontend tests, TypeScript build, and production build
+  pass.
+
+## Post-V1 Phase 8 Goal
+
+Make generation spending visible before it becomes surprising and, only where backed
+by provider/account evidence, enforceable.
+
+## Deferred Foundation
 
 - operation support;
 - duration buckets;
@@ -832,7 +918,7 @@ Pull forward a minimal provider registry:
 - pricing version or timestamp;
 - unknown-cost marker.
 
-## Budget Model
+## Deferred Budget Model
 
 Add structured budget:
 
@@ -855,7 +941,7 @@ Track:
 
 Use decimal or integer minor units for money. Avoid floating point accumulation for authoritative totals.
 
-## Job Model
+## Deferred Job Model
 
 Jobs should show:
 
@@ -872,20 +958,22 @@ Jobs should show:
 - provider prediction ID;
 - cancellation/resume state where supported.
 
-## Policy
+## Deferred Policy
 
-Support:
+Eventually support enforceable forms of:
 
 - no limit;
 - warn only;
 - require confirmation above threshold;
 - hard stop.
 
-Director cannot bypass hard budget policy.
+Director cannot bypass an enforceable host-owned budget policy.
 
-## Done When
+## Done When (Post-V1)
 
-Before paid work runs, Studio can tell the user what is known, what is unknown, and whether the project budget allows the operation.
+Phase 8 may be marked complete only when Studio can distinguish estimates, verified
+actuals, and enforceable maxima across every claimed paid path and can prove any
+budget guarantee at the real provider-dispatch boundary.
 
 ---
 

@@ -812,20 +812,48 @@ async function loadLibrary(more: boolean): Promise<void> {
   }
 }
 
-async function authorizeVoiceSpend(operation: string, model: string, input: string, _characters: number): Promise<{ projectRoot: string; confirmation: string }> {
-  const projectRoot = hostProjectRoot();
+type VoiceSpendQuote = {
+  policy: "approval_required" | "warn_only";
+  requestHash: string;
+  ledgerRevision: string | null;
+  disclosure: string;
+};
+
+export async function authorizeVoiceSpendWith(
+  deps: {
+    invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>;
+    confirm: (message: string) => boolean;
+    projectRoot: () => string | null;
+  },
+  operation: string,
+  model: string,
+  input: string,
+): Promise<{ projectRoot: string; confirmation: string }> {
+  const projectRoot = deps.projectRoot();
   if (!projectRoot) throw new Error("A saved project is required for paid voice requests.");
-  type VoiceQuote = { policy: "approval_required" | "warn_only"; requestHash: string; ledgerRevision: string | null; disclosure: string };
   const request = { projectRoot, operation, model, input };
-  const quote = await invoke<VoiceQuote>("elevenlabs_quote_voice_spend", request);
+  const quote = await deps.invoke("elevenlabs_quote_voice_spend", request) as VoiceSpendQuote;
   const warning = `${quote.disclosure}\n\nThis ${operation} request has no verified USD maximum. The provider may charge more than the project budget. Continue?`;
-  if (!window.confirm(warning)) throw new Error("Voice request cancelled; no provider request was sent.");
-  if (quote.policy === "warn_only") return { projectRoot, confirmation: "" };
-  if (quote.policy !== "approval_required" || !quote.ledgerRevision) throw new Error("Voice approval quote is incomplete.");
-  const confirmation = await invoke<string>("elevenlabs_confirm_unbounded_voice_spend", {
+  if (!deps.confirm(warning)) throw new Error("Voice request cancelled; no provider request was sent.");
+  if (!quote.ledgerRevision || !["approval_required", "warn_only"].includes(quote.policy)) {
+    throw new Error("Voice approval quote is incomplete.");
+  }
+  const confirmation = await deps.invoke("elevenlabs_confirm_unbounded_voice_spend", {
     ...request, requestHash: quote.requestHash, ledgerRevision: quote.ledgerRevision,
   });
+  if (typeof confirmation !== "string" || !confirmation) {
+    throw new Error("Host did not issue a voice spend token.");
+  }
   return { projectRoot, confirmation };
+}
+
+async function authorizeVoiceSpend(operation: string, model: string, input: string, _characters: number): Promise<{ projectRoot: string; confirmation: string }> {
+  return authorizeVoiceSpendWith(
+    { invoke, confirm: (message) => window.confirm(message), projectRoot: hostProjectRoot },
+    operation,
+    model,
+    input,
+  );
 }
 
 async function previewLibraryVoice(voiceId: string): Promise<void> {

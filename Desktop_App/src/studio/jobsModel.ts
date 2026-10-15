@@ -20,6 +20,7 @@ export type JobRowModel = {
   actual: string;
   currency: string;
   retry: string;
+  predictionId: string | null;
   reconciliation: string;
   cancellation: string;
   resume: string;
@@ -121,6 +122,7 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
   const estimate = money(job.estimated_cost_minor);
   const actual = money(job.cost_minor);
   const currency = knownText(job.currency);
+  const predictionId = job.request_metadata?.prediction_id?.trim() || null;
   const retry = job.retry_of
     ? `of ${job.retry_of} · further retry unsupported (provider outcome unverified; original request unavailable)`
     : job.status === "failed" && job.spend_category
@@ -145,16 +147,25 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
     actual,
     currency,
     retry,
+    predictionId,
     reconciliation,
     // No job-level provider cancel/resume command is wired to Studio. Do not infer
     // support from a provider name, an ID, or a persisted cancelled status.
     // Assembly is local work, not a provider prediction to resume or cancel.
     cancellation: job.kind === "assemble" ? "Unsupported for local assembly" : "Provider support unknown · unavailable in Studio",
-    resume: job.kind === "assemble" ? "Unsupported for local assembly" : "Provider support unknown · unavailable in Studio",
+    resume: job.kind === "assemble"
+      ? "Unsupported for local assembly"
+      : predictionId
+        ? "Automatic retry disabled · read-only status recovery available"
+        : "Provider support unknown · unavailable in Studio",
     detail,
     outputPath,
     outputKind,
-    actionLabel: actionLabel(outputKind, Boolean(located.scene)),
+    actionLabel: outputKind
+      ? actionLabel(outputKind, Boolean(located.scene))
+      : predictionId
+        ? "Check provider status"
+        : actionLabel(null, Boolean(located.scene)),
     sceneId: located.scene?.id ?? null,
     cut: located.cut,
     lookSlotId: located.lookSlotId,

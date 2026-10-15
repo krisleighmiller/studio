@@ -233,6 +233,11 @@ pub fn dispatch(
                 None => Err("Unsupported media operation".into()),
             }
         }
+        "media_recovery_status" => to_value(media::recovery_status(
+            opt_string(args, "projectRoot").as_deref(),
+            &arg_string(args, "jobId")?,
+            app,
+        )),
         "elevenlabs_list_voices" => {
             let search = opt_string(args, "search");
             let voice_type = opt_string(args, "voiceType");

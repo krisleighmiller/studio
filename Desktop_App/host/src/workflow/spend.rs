@@ -128,8 +128,9 @@ pub fn quote_unbounded_scoped(
     }
     let _lock = import::lock_project(root)?;
     let state = persisted(root)?;
-    if policy(&state) != BudgetPolicy::ApprovalRequired {
-        return Err("unbounded approval requires approval_required policy".into());
+    let current_policy = policy(&state);
+    if current_policy == BudgetPolicy::StrictHardStop {
+        return Err("unbounded approval is unavailable under strict_hard_stop policy".into());
     }
     Ok(UnboundedSpendQuote {
         currency: cost::compute_ledger(&state).currency,
@@ -157,7 +158,8 @@ pub fn confirm_unbounded_scoped(
     }
     let _lock = import::lock_project(root)?;
     let mut state = persisted(root)?;
-    if policy(&state) != BudgetPolicy::ApprovalRequired || revision(&state)? != shown_revision {
+    let current_policy = policy(&state);
+    if current_policy == BudgetPolicy::StrictHardStop || revision(&state)? != shown_revision {
         return Err("unbounded quote stale or policy changed".into());
     }
     let mut random = [0u8; 32];
@@ -425,7 +427,7 @@ where
             ledger.currency
         ));
     }
-    if mode == BudgetPolicy::ApprovalRequired && maximum.is_none() {
+    if maximum.is_none() {
         let hash = request
             .as_ref()
             .ok_or("unbounded approval needs an exact request fingerprint")?
@@ -727,9 +729,20 @@ mod tests {
     fn submission_id_is_durable_before_status_and_duplicate_unknown_outcome_is_blocked() {
         let dir = setup(100, false);
         let mut state = persisted(dir.path()).unwrap();
-        state.budget.as_mut().unwrap().policy = Some(BudgetPolicy::WarnOnly);
+        state.budget.as_mut().unwrap().policy = Some(BudgetPolicy::ApprovalRequired);
         import::persist_state(dir.path(), &state).unwrap();
         let req = request(&fingerprint('d'));
+        let quote = quote_unbounded_scoped(dir.path(), &req.request_hash).unwrap();
+        let token = confirm_unbounded_scoped(
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "model",
+            &req.request_hash,
+            &quote.ledger_revision,
+        )
+        .unwrap();
         let invoke = |dispatch: &dyn Fn(
             &str,
             &dyn Fn(&str) -> Result<(), String>,
@@ -741,7 +754,7 @@ mod tests {
                 "atlas_generate_image",
                 "image.text_to_image",
                 "model",
-                None,
+                Some(&token),
                 None,
                 Some(req.clone()),
                 None,
@@ -832,7 +845,53 @@ mod tests {
     }
 
     #[test]
-    fn warn_only_unbounded_persists_disclosure_and_requires_fingerprint() {
+    fn two_consecutive_unbounded_operations_each_require_fresh_authorization() {
+        let dir = setup(100, false);
+        let mut state = persisted(dir.path()).unwrap();
+        state.budget.as_mut().unwrap().policy = Some(BudgetPolicy::ApprovalRequired);
+        import::persist_state(dir.path(), &state).unwrap();
+        let attempted = AtomicUsize::new(0);
+
+        for ch in ['a', 'b'] {
+            let hash = fingerprint(ch);
+            let quote = quote_unbounded_scoped(dir.path(), &hash).unwrap();
+            let token = confirm_unbounded_scoped(
+                dir.path(),
+                "atlas-cloud",
+                "media",
+                "atlas_generate_image",
+                "model",
+                &hash,
+                &quote.ledger_revision,
+            )
+            .unwrap();
+            run_scoped_with_request(
+                dir.path(),
+                "atlas-cloud",
+                "media",
+                "atlas_generate_image",
+                "image.text_to_image",
+                "model",
+                Some(&token),
+                None,
+                Some(request(&hash)),
+                None,
+                || {
+                    attempted.fetch_add(1, Ordering::Relaxed);
+                    Ok("done".into())
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(attempted.load(Ordering::Relaxed), 2);
+        let state = persisted(dir.path()).unwrap();
+        assert_eq!(state.jobs.len(), 2);
+        assert!(state.jobs.iter().all(|job| job.cost_minor.is_none()));
+    }
+
+    #[test]
+    fn warn_only_unbounded_requires_explicit_one_use_authorization() {
         let dir = setup(100, false);
         let mut state = persisted(dir.path()).unwrap();
         state.budget.as_mut().unwrap().policy = Some(BudgetPolicy::WarnOnly);
@@ -850,7 +909,9 @@ mod tests {
         )
         .unwrap_err()
         .contains("fingerprint"));
-        run_scoped_with_request(
+        let hash = fingerprint('c');
+        let attempted = AtomicUsize::new(0);
+        assert!(run_scoped_with_request(
             dir.path(),
             "atlas-cloud",
             "media",
@@ -859,11 +920,45 @@ mod tests {
             "model",
             None,
             None,
-            Some(request(&fingerprint('c'))),
+            Some(request(&hash)),
             None,
-            || Ok("done".into()),
+            || {
+                attempted.fetch_add(1, Ordering::Relaxed);
+                Ok("done".into())
+            },
+        )
+        .unwrap_err()
+        .contains("approval required"));
+        assert_eq!(attempted.load(Ordering::Relaxed), 0);
+        let quote = quote_unbounded_scoped(dir.path(), &hash).unwrap();
+        let token = confirm_unbounded_scoped(
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "model",
+            &hash,
+            &quote.ledger_revision,
         )
         .unwrap();
+        run_scoped_with_request(
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "image.text_to_image",
+            "model",
+            Some(&token),
+            None,
+            Some(request(&hash)),
+            None,
+            || {
+                attempted.fetch_add(1, Ordering::Relaxed);
+                Ok("done".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(attempted.load(Ordering::Relaxed), 1);
         let state = persisted(dir.path()).unwrap();
         assert!(state.jobs[0]
             .request_metadata

@@ -19,6 +19,28 @@ describe("job cancellation and resume presentation", () => {
     expect(intents).toEqual([]);
   });
 
+  it("offers read-only provider status recovery when a prediction ID is preserved", () => {
+    const model = modelFor({
+      id: "spend-status",
+      kind: "atlas_generate_video",
+      provider: "atlas-cloud",
+      spend_category: "media",
+      status: "failed",
+      request_metadata: {
+        request_hash: "a".repeat(64),
+        prediction_id: "prediction-123",
+      },
+    });
+    expect(model.rows[0].predictionId).toBe("prediction-123");
+    expect(model.rows[0].actionLabel).toBe("Check provider status");
+    expect(model.rows[0].resume).toContain("read-only status recovery available");
+    const intents: JobsIntent[] = [];
+    const view = renderJobsView(model, true, "all", (intent) => intents.push(intent));
+    expect(view.textContent).toContain("Prediction prediction-123");
+    view.querySelector<HTMLButtonElement>("button.studio-job")?.click();
+    expect(intents).toEqual([{ type: "open", jobId: "spend-status" }]);
+  });
+
   it("marks local assembly cancellation and resume unsupported without inventing controls", () => {
     const model = modelFor({ id: "local", kind: "assemble", status: "completed", output_path: "export.mp4" });
     expect(model.rows[0].cancellation).toBe("Unsupported for local assembly");

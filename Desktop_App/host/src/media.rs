@@ -342,8 +342,9 @@ fn generate_unchecked(
 
     let parsed: Value = serde_json::from_str(&generated).unwrap_or(json!({ "raw": generated }));
     if let Some(id) = parsed.get("prediction_id").and_then(Value::as_str) {
-        // Persistence errors are best effort: the job remains reserved and retry is blocked.
-        let _ = submitted(id);
+        // Recovery metadata must be durable before polling. If persistence fails,
+        // stop after the accepted submission and require reconciliation; never regenerate.
+        submitted(id)?;
     }
     let Some(save_path) = save_path else {
         return Ok(generated);

@@ -409,7 +409,17 @@ export type JobRecord = {
   /** Whether the actual charge was independently provider-verified. */
   actual_verified?: boolean;
   /** Host marker for exposure without a defensible maximum. */
+  unbounded_exposure?: boolean;
+  /** @deprecated Legacy frontend fixture spelling. */
   unknown_exposure?: boolean;
+  request_metadata?: {
+    request_hash: string;
+    disclosure?: string | null;
+    duration_seconds?: number | null;
+    width?: number | null;
+    height?: number | null;
+    prediction_id?: string | null;
+  } | null;
   currency?: string | null;
   retry_of?: string | null;
   /** Host spend category; absent on legacy jobs. Not evidence of chat accounting. */

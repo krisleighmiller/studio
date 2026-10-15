@@ -1908,6 +1908,10 @@ function handleJobsIntent(intent: JobsIntent): void {
     filter: "all",
   }).rows.find((item) => item.id === intent.jobId);
   if (!row) return;
+  if (row.predictionId && row.actionLabel === "Check provider status") {
+    void checkProviderJobStatus(row.id);
+    return;
+  }
   if (row.sceneId != null) {
     const scene = state?.scenes.find((item) => item.id === row.sceneId);
     if (scene) {
@@ -1924,6 +1928,21 @@ function handleJobsIntent(intent: JobsIntent): void {
   }
   if (!row.outputPath) return;
   hooks?.onOpenPath(resolveProjectPath(row.outputPath) ?? row.outputPath);
+}
+
+async function checkProviderJobStatus(jobId: string): Promise<void> {
+  const projectRoot = hooks?.projectRoot();
+  if (!projectRoot) {
+    hooks?.onStatus("Provider status unavailable", "Open a saved project first.");
+    return;
+  }
+  try {
+    const raw = await invoke<string>("media_recovery_status", { projectRoot, jobId });
+    const result = JSON.parse(raw) as { status?: string };
+    hooks?.onStatus("Provider status checked", result.status?.trim() || "unknown");
+  } catch (error) {
+    hooks?.onStatus("Provider status unavailable", String(error));
+  }
 }
 
 function renderFinishPanel(): HTMLElement {

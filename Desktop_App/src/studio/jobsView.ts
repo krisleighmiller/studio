@@ -105,6 +105,7 @@ function jobRow(row: JobRowModel, onIntent: (intent: JobsIntent) => void): HTMLE
     `Actual ${row.actual}`,
     `Currency ${row.currency}`,
     `Retry ${row.retry}`,
+    `Prediction ${row.predictionId ?? "unknown"}`,
     row.reconciliation,
   ].join(" · ");
   copy.append(title, meta, facts);

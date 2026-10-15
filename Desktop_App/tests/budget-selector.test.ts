@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { buildBudgetModel } from "../src/studio/selectors/budget";
 import { renderBudgetSummary } from "../src/studio/components/budgetSummary";
+import { buildJobsModel } from "../src/studio/jobsModel";
+import { renderSpendReview } from "../src/studio/components/spendReview";
 import { minorToMoney, moneyToMinor } from "../src/studio/money";
 import type { JobRecord, ProjectBudget, ProjectState } from "../src/workflowTypes";
 
@@ -44,7 +46,83 @@ describe("buildBudgetModel mirrors the host ledger", () => {
     const text = renderBudgetSummary(model).textContent ?? "";
     expect(text).toContain("Accounted jobs only");
     expect(text).toContain("LLM/chat costs are not included");
-    expect(text).toContain("Chat requests are blocked");
+    expect(text).toContain("chat is not budget-enforced");
+  });
+
+  it("retains verified maximum exposure on a completed unsettled job, not its estimate as actual", () => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, policy: "strict_hard_stop" },
+      jobs: [job({ status: "completed", provider: "p", reserved_max_minor: 700, estimated_cost_minor: 200, cost_minor: null })],
+    }));
+    expect(model.spent).toBe("0.00");
+    expect(model.committed).toBe("7.00");
+    expect(model.remaining).toBe("3.00");
+    expect(model.unknownExposureJobs).toBe(0);
+    expect(model.gate).toBe("none");
+  });
+
+  it("keeps unused reservation after a reported charge without treating it as verified", () => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, policy: "strict_hard_stop" },
+      jobs: [job({ status: "completed", provider: "p", reserved_max_minor: 700, cost_minor: 200, actual_verified: false })],
+    }));
+    expect(model.spent).toBe("2.00");
+    expect(model.committed).toBe("5.00");
+    expect(model.unknownJobs).toBe(1);
+    expect(model.gate).toBe("none");
+    expect(renderBudgetSummary(model).textContent).not.toContain("verified actual");
+  });
+
+  it("releases the remainder of a reservation after provider-backed actual verification", () => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, policy: "strict_hard_stop" },
+      jobs: [job({ status: "completed", provider: "p", reserved_max_minor: 700, cost_minor: 200, actual_verified: true })],
+    }));
+    expect(model.spent).toBe("2.00");
+    expect(model.committed).toBe("0.00");
+    expect(model.remaining).toBe("8.00");
+    expect(model.unknownExposureJobs).toBe(0);
+    expect(model.unknownJobs).toBe(0);
+  });
+
+  it("labels manually reported amounts as unverified without releasing a bounded reservation", () => {
+    const reviewed = job({ status: "completed", provider: "p", reserved_max_minor: 700,
+      cost_minor: 200, actual_verified: false, reconciliation: {
+        reported_outcome: "charged", evidence_reference: "billing-ref", reviewed_at: "2026-01-01",
+      } });
+    const row = buildJobsModel({ jobs: [reviewed], scenes: [], assets: [], filter: "all" }).rows[0];
+    expect(row?.tooltip).toContain("actual 2.00 (not provider-verified)");
+    const reviewText = renderSpendReview({ ledgerRevision: "r", jobs: [reviewed] }, () => {}, () => {}).textContent ?? "";
+    expect(reviewText).toContain("maximum exposure 7.00");
+    expect(reviewText).not.toContain("dispatch and retry remain blocked");
+  });
+
+  it.each([
+    { policy: "strict_hard_stop", gate: "blocked" },
+    { policy: "approval_required", gate: "none" },
+    { policy: "warn_only", gate: "none" },
+  ] as const)("discloses unbounded exposure under $policy", ({ policy, gate }) => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, policy },
+      jobs: [job({ status: "pending", provider: "p", estimated_cost_minor: 100, unknown_exposure: true })],
+    }));
+    expect(model.unknownExposureJobs).toBe(1);
+    expect(model.remaining).toBeNull();
+    expect(model.gate).toBe(gate);
+    const text = renderBudgetSummary(model).textContent ?? "";
+    expect(text).not.toContain("left");
+    expect(text).toContain("unknown exposure");
+    if (policy !== "strict_hard_stop") expect(text).not.toContain("hard-stop");
+  });
+
+  it("uses policy over legacy hard_stop and warns rather than confirms in warn-only mode", () => {
+    const model = buildBudgetModel(stateWith({
+      budget: { currency: "USD", limit_minor: 1000, policy: "warn_only", hard_stop: true },
+      jobs: [job({ status: "running", provider: "p", reserved_max_minor: 1001 })],
+    }));
+    expect(model.hardStop).toBe(false);
+    expect(model.gate).toBe("warn");
+    expect(renderBudgetSummary(model).textContent).not.toContain("hard-stop");
   });
 
   it("sums settled and committed spend, leaving available headroom", () => {
@@ -52,9 +130,9 @@ describe("buildBudgetModel mirrors the host ledger", () => {
       stateWith({
         budget: { currency: "USD", limit_minor: 5000, hard_stop: true },
         jobs: [
-          job({ id: "a", status: "completed", cost_minor: 2000 }),
-          job({ id: "b", status: "failed", cost_minor: 500 }),
-          job({ id: "c", status: "pending", estimated_cost_minor: 300 }),
+          job({ id: "a", status: "completed", cost_minor: 2000, reserved_max_minor: 2000 }),
+          job({ id: "b", status: "failed", cost_minor: 500, reserved_max_minor: 500 }),
+          job({ id: "c", status: "pending", estimated_cost_minor: 300, reserved_max_minor: 300 }),
         ],
       }),
     );
@@ -69,8 +147,8 @@ describe("buildBudgetModel mirrors the host ledger", () => {
     const model = buildBudgetModel(stateWith({
       budget: { currency: "USD", limit_minor: 1000, hard_stop: true },
       jobs: [
-        job({ id: "a", status: "completed", cost_minor: 900 }),
-        job({ id: "b", status: "pending", estimated_cost_minor: 200 }),
+        job({ id: "a", status: "completed", cost_minor: 900, reserved_max_minor: 900 }),
+        job({ id: "b", status: "pending", estimated_cost_minor: 200, reserved_max_minor: 200 }),
       ],
     }));
     expect(model.remaining).toBe("-1.00");
@@ -84,8 +162,8 @@ describe("buildBudgetModel mirrors the host ledger", () => {
       stateWith({
         budget: { currency: "USD", limit_minor: 1000, hard_stop: true },
         jobs: [
-          job({ id: "a", status: "completed", cost_minor: 900 }),
-          job({ id: "b", status: "running", estimated_cost_minor: 200 }),
+          job({ id: "a", status: "completed", cost_minor: 900, reserved_max_minor: 900 }),
+          job({ id: "b", status: "running", estimated_cost_minor: 200, reserved_max_minor: 200 }),
         ],
       }),
     );
@@ -112,7 +190,7 @@ describe("buildBudgetModel mirrors the host ledger", () => {
   ] as const)("gates $amount minor at strict warning/limit boundaries (hard stop: $hardStop)", ({ amount, hardStop, gate, overLimit }) => {
     const model = buildBudgetModel(stateWith({
       budget: { currency: "USD", limit_minor: 1000, warning_at_minor: 800, hard_stop: hardStop },
-      jobs: [job({ status: "pending", estimated_cost_minor: amount })],
+      jobs: [job({ status: "pending", estimated_cost_minor: amount, reserved_max_minor: amount })],
     }));
     expect(model.gate).toBe(gate);
     expect(model.overLimit).toBe(overLimit);
@@ -122,8 +200,8 @@ describe("buildBudgetModel mirrors the host ledger", () => {
   it("counts pending and running jobs without estimates as unknown", () => {
     const model = buildBudgetModel(stateWith({
       jobs: [
-        job({ id: "a", status: "pending", estimated_cost_minor: null }),
-        job({ id: "b", status: "running" }),
+        job({ id: "a", status: "pending", provider: "p", estimated_cost_minor: null }),
+        job({ id: "b", status: "running", provider: "p" }),
         job({ id: "c", status: "running", estimated_cost_minor: 0 }),
       ],
     }));
@@ -137,8 +215,10 @@ describe("buildBudgetModel mirrors the host ledger", () => {
       jobs: [job({ status: "completed", estimated_cost_minor: 700, cost_minor: null })],
     }));
     expect(model.spent).toBe("0.00");
-    expect(model.committed).toBe("7.00");
-    expect(model.remaining).toBe("3.00");
+    expect(model.committed).toBe("0.00");
+    expect(model.remaining).toBeNull();
+    expect(model.unknownExposureJobs).toBe(1);
+    expect(model.gate).toBe("blocked");
     expect(model.unknownJobs).toBe(1);
   });
 
@@ -151,7 +231,7 @@ describe("buildBudgetModel mirrors the host ledger", () => {
       ],
     }));
     expect(model.spent).toBe("0.00");
-    expect(model.remaining).toBe("10.00");
+    expect(model.remaining).toBeNull();
     expect(model.unknownJobs).toBe(2);
   });
 
@@ -159,8 +239,8 @@ describe("buildBudgetModel mirrors the host ledger", () => {
     const model = buildBudgetModel(
       stateWith({
         jobs: [
-          job({ id: "a", status: "completed", cost_minor: null }),
-          job({ id: "b", status: "cancelled", cost_minor: null }),
+          job({ id: "a", status: "completed", provider: "p", cost_minor: null }),
+          job({ id: "b", status: "cancelled", provider: "p", cost_minor: null }),
           job({ id: "c", status: "completed", cost_minor: 100 }),
         ],
       }),

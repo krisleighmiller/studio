@@ -199,6 +199,24 @@ pub fn dispatch(
                 amount,
             ))
         }
+        "confirm_unbounded_spend" => {
+            let root = crate::session::command_root(opt_string(args, "projectRoot").as_deref())?;
+            let provider = arg_string(args, "provider")?;
+            let category = arg_string(args, "category")?;
+            let operation = arg_string(args, "operation")?;
+            let model = arg_string(args, "model")?;
+            let request_hash = arg_string(args, "requestHash")?;
+            let revision = arg_string(args, "ledgerRevision")?;
+            to_value(crate::workflow::spend::confirm_unbounded_scoped(
+                &root,
+                &provider,
+                &category,
+                &operation,
+                &model,
+                &request_hash,
+                &revision,
+            ))
+        }
         "media_generate_confirmed" => {
             let root = arg_string(args, "projectRoot")?;
             let operation = arg_string(args, "operation")?;
@@ -229,6 +247,22 @@ pub fn dispatch(
                 voice_type,
                 page_size,
                 next_page_token,
+            ))
+        }
+        "elevenlabs_quote_voice_spend" => to_value(elevenlabs::elevenlabs_quote_voice_spend(
+            arg_string(args, "projectRoot")?,
+            arg_string(args, "operation")?,
+            arg_string(args, "model")?,
+            arg_string(args, "input")?,
+        )),
+        "elevenlabs_confirm_unbounded_voice_spend" => {
+            to_value(elevenlabs::elevenlabs_confirm_unbounded_voice_spend(
+                arg_string(args, "projectRoot")?,
+                arg_string(args, "operation")?,
+                arg_string(args, "model")?,
+                arg_string(args, "input")?,
+                arg_string(args, "requestHash")?,
+                arg_string(args, "ledgerRevision")?,
             ))
         }
         "elevenlabs_confirm_voice_spend" => {
@@ -506,6 +540,7 @@ mod protected_workflow_tests {
             limit_minor: Some(100),
             warning_at_minor: None,
             hard_stop: true,
+            policy: None,
         });
         workflow::import::persist_state(&root, &initial).unwrap();
         let original = fs::read(&state).unwrap();
@@ -562,7 +597,7 @@ mod protected_workflow_tests {
         }
         // A mock provider is invoked only after the reservation; rejected generic
         // writes must not change the running job, revision or active lock.
-        workflow::spend::run_scoped(
+        workflow::spend::run_scoped_with_request(
             &root,
             "atlas-cloud",
             "media",
@@ -571,6 +606,10 @@ mod protected_workflow_tests {
             "model",
             None,
             None,
+            None,
+            Some(workflow::spend::VerifiedMaximum::synthetic_for_test(
+                "USD", 7,
+            )),
             || {
                 let reserved_bytes = fs::read(&state).unwrap();
                 let before = workflow::state::ProjectState::from_json(

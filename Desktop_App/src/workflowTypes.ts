@@ -404,6 +404,12 @@ export type JobRecord = {
   progress?: string | null;
   cost_minor?: number | null;
   estimated_cost_minor?: number | null;
+  /** Host-verified per-request maximum; an estimate is not a ceiling. */
+  reserved_max_minor?: number | null;
+  /** Whether the actual charge was independently provider-verified. */
+  actual_verified?: boolean;
+  /** Host marker for exposure without a defensible maximum. */
+  unknown_exposure?: boolean;
   currency?: string | null;
   retry_of?: string | null;
   /** Host spend category; absent on legacy jobs. Not evidence of chat accounting. */
@@ -535,7 +541,9 @@ export type ProjectBudget = {
   limit_minor?: number | null;
   /** Spend level that should surface a warning before the limit. */
   warning_at_minor?: number | null;
-  /** Host-enforced for accounted jobs; does not imply project-wide chat coverage. */
+  /** Spending policy for accounted jobs only; chat is not budget-enforced. */
+  policy?: "strict_hard_stop" | "approval_required" | "warn_only";
+  /** Legacy setting retained for old project files; new files should set policy. */
   hard_stop?: boolean;
 };
 

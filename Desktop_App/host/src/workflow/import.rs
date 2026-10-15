@@ -1619,6 +1619,10 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            reserved_max_minor: None,
+            actual_verified: false,
+            unbounded_exposure: false,
+            request_metadata: None,
         });
 
         assert!(uniquify_duplicate_asset_ids(&mut state));
@@ -1717,6 +1721,10 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            reserved_max_minor: None,
+            actual_verified: false,
+            unbounded_exposure: false,
+            request_metadata: None,
         });
 
         assert!(restore_wardrobe_plate_assets(dir.path(), &mut state));
@@ -1776,6 +1784,10 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            reserved_max_minor: None,
+            actual_verified: false,
+            unbounded_exposure: false,
+            request_metadata: None,
         });
 
         assert!(restore_render_jobs(dir.path(), &mut state));
@@ -1921,6 +1933,10 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            reserved_max_minor: None,
+            actual_verified: false,
+            unbounded_exposure: false,
+            request_metadata: None,
         }
     }
 

@@ -127,9 +127,9 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
       ? "Unsupported · provider outcome unverified; original request unavailable"
       : "unknown";
   const reconciliation = job.reconciliation
-    ? `Manual accounting (reviewer-reported ${job.reconciliation.reported_outcome ?? job.reconciliation.provider_outcome ?? "unknown"}; ref ${job.reconciliation.evidence_reference}; ${job.reconciliation.reviewed_at}) — not independently provider-verified; paid generation remains blocked`
+    ? `Manual accounting (reviewer-reported ${job.reconciliation.reported_outcome ?? job.reconciliation.provider_outcome ?? "unknown"}; ref ${job.reconciliation.evidence_reference}; ${job.reconciliation.reviewed_at}) — not independently provider-verified; retry remains blocked`
     : "No recorded reconciliation";
-  const cost = `estimate ${estimate} · actual ${actual} · currency ${currency}`;
+  const cost = `estimate ${estimate} · actual ${actual}${job.cost_minor != null && !job.actual_verified ? " (not provider-verified)" : ""} · currency ${currency}`;
   return {
     id: job.id,
     title: KIND_LABELS[job.kind] ?? labelize(job.kind || "Job"),

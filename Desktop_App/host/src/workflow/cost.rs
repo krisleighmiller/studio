@@ -9,7 +9,7 @@
 //! key (a production operation). No enum of providers or capabilities lives in
 //! this module; adding one is a data edit to `providers.json`, not a code change.
 
-use crate::workflow::state::{JobStatus, ProjectState};
+use crate::workflow::state::{BudgetPolicy, JobStatus, ProjectState};
 use serde::{Deserialize, Serialize};
 
 /// A price the registry knows, or an explicit "we do not know" marker.
@@ -255,17 +255,21 @@ pub struct BudgetLedger {
     /// Count of jobs without a usable actual or estimate in the ledger currency.
     /// Includes pending/running jobs without estimates and completed jobs without actuals.
     pub unknown_cost_jobs: usize,
+    /// Jobs whose maximum exposure cannot be proven, including legacy obligations.
+    pub unknown_exposure_jobs: usize,
     /// Budget gate derived from reservations plus actual spend vs thresholds.
     pub gate: SpendGate,
 }
 
 pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
     let budget = state.budget.clone().unwrap_or_default();
-    let mut committed = 0i64;
-    let mut unsettled = 0i64;
-    let mut completed = 0i64;
-    let mut failed = 0i64;
+    // Aggregate in i128: an i64-saturated subtotal can hide over-limit exposure.
+    let mut committed = 0i128;
+    let mut unsettled = 0i128;
+    let mut completed = 0i128;
+    let mut failed = 0i128;
     let mut unknown = 0usize;
+    let mut unknown_exposure = 0usize;
     for job in &state.jobs {
         // Local assembly/import jobs never call a paid provider. Do not let an
         // unpriced local job veto unrelated paid work.
@@ -284,12 +288,21 @@ pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
             .is_some_and(|currency| !currency.trim().eq_ignore_ascii_case(&budget.currency))
         {
             unknown += 1;
+            unknown_exposure += 1;
             continue;
+        }
+        // Forecasts are never ceilings. A legacy job with an estimate alone
+        // remains an unknown exposure even if it numerically fits the limit.
+        let reserved = job.reserved_max_minor.filter(|amount| *amount >= 0);
+        if reserved.is_none() && !(job.actual_verified && job.cost_minor.is_some_and(|v| v >= 0)) {
+            unknown_exposure += 1;
         }
         match job.status {
             JobStatus::Pending | JobStatus::Running => {
-                if let Some(estimate) = job.estimated_cost_minor.filter(|amount| *amount >= 0) {
-                    committed = committed.saturating_add(estimate);
+                if let Some(maximum) =
+                    reserved.or(job.estimated_cost_minor.filter(|amount| *amount >= 0))
+                {
+                    committed += i128::from(maximum);
                 } else {
                     unknown += 1;
                 }
@@ -299,52 +312,78 @@ pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
                 // but does not establish a verified provider outcome. No adapter
                 // currently supplies independent verification for spend jobs.
                 if (job.provider.is_some() || job.spend_category.is_some())
+                    && !job.actual_verified
                     && job.cost_minor.is_some_and(|amount| amount >= 0)
                 {
                     unknown += 1;
                 }
                 match job.cost_minor.filter(|amount| *amount >= 0) {
-                    Some(cost) => completed = completed.saturating_add(cost),
+                    Some(cost) => {
+                        completed += i128::from(cost);
+                        if !job.actual_verified {
+                            if let Some(maximum) = reserved {
+                                unsettled += i128::from(maximum.saturating_sub(cost));
+                            }
+                        }
+                    }
                     None => {
                         unknown += 1;
-                        if let Some(estimate) =
-                            job.estimated_cost_minor.filter(|amount| *amount >= 0)
-                        {
-                            unsettled = unsettled.saturating_add(estimate);
+                        if let Some(maximum) = reserved {
+                            unsettled += i128::from(maximum);
                         }
                     }
                 }
             }
             JobStatus::Failed | JobStatus::Cancelled => {
                 if (job.provider.is_some() || job.spend_category.is_some())
+                    && !job.actual_verified
                     && job.cost_minor.is_some_and(|amount| amount >= 0)
                 {
                     unknown += 1;
                 }
                 match job.cost_minor.filter(|amount| *amount >= 0) {
-                    Some(cost) => failed = failed.saturating_add(cost),
-                    None => unknown += 1,
+                    Some(cost) => {
+                        failed += i128::from(cost);
+                        if !job.actual_verified {
+                            if let Some(maximum) = reserved {
+                                unsettled += i128::from(maximum.saturating_sub(cost));
+                            }
+                        }
+                    }
+                    None => {
+                        unknown += 1;
+                        if let Some(maximum) = reserved {
+                            unsettled += i128::from(maximum);
+                        }
+                    }
                 }
             }
         }
     }
-    let spent = completed.saturating_add(failed);
-    let on_the_hook = spent.saturating_add(committed).saturating_add(unsettled);
-    let remaining = budget
-        .limit_minor
-        .map(|limit| limit.saturating_sub(on_the_hook));
+    let on_the_hook = completed + failed + committed + unsettled;
+    let clamp = |amount: i128| amount.min(i128::from(i64::MAX)) as i64;
+    let remaining = budget.limit_minor.map(|limit| {
+        (i128::from(limit) - on_the_hook).clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+    });
     // Compute gate inline to avoid infinite recursion (gate_spend calls compute_ledger).
+    let policy = budget.policy.unwrap_or(if budget.hard_stop {
+        BudgetPolicy::StrictHardStop
+    } else {
+        BudgetPolicy::ApprovalRequired
+    });
     let gate = match budget.limit_minor {
         None => SpendGate::NoLimit,
         Some(limit) => {
-            if on_the_hook > limit {
-                if budget.hard_stop {
-                    SpendGate::Blocked
-                } else {
-                    SpendGate::Confirm
+            if policy == BudgetPolicy::StrictHardStop && unknown_exposure != 0 {
+                SpendGate::Blocked
+            } else if on_the_hook > i128::from(limit) {
+                match policy {
+                    BudgetPolicy::StrictHardStop => SpendGate::Blocked,
+                    BudgetPolicy::ApprovalRequired => SpendGate::Confirm,
+                    BudgetPolicy::WarnOnly => SpendGate::Warn,
                 }
             } else if let Some(warn_at) = budget.warning_at_minor {
-                if on_the_hook > warn_at {
+                if on_the_hook > i128::from(warn_at) {
                     SpendGate::Warn
                 } else {
                     SpendGate::Allow
@@ -359,12 +398,13 @@ pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
         limit_minor: budget.limit_minor,
         warning_at_minor: budget.warning_at_minor,
         hard_stop: budget.hard_stop,
-        committed_minor: committed,
-        unsettled_estimated_minor: unsettled,
-        completed_minor: completed,
-        failed_minor: failed,
+        committed_minor: clamp(committed),
+        unsettled_estimated_minor: clamp(unsettled),
+        completed_minor: clamp(completed),
+        failed_minor: clamp(failed),
         remaining_minor: remaining,
         unknown_cost_jobs: unknown,
+        unknown_exposure_jobs: unknown_exposure,
         gate,
     }
 }
@@ -398,6 +438,14 @@ pub fn gate_spend(state: &ProjectState, proposed_minor: i64) -> SpendGate {
         return SpendGate::NoLimit;
     };
     let ledger = compute_ledger(state);
+    let policy = budget.policy.unwrap_or(if budget.hard_stop {
+        BudgetPolicy::StrictHardStop
+    } else {
+        BudgetPolicy::ApprovalRequired
+    });
+    if policy == BudgetPolicy::StrictHardStop && ledger.unknown_exposure_jobs != 0 {
+        return SpendGate::Blocked;
+    }
     // Use a wider intermediate: saturating i64 addition could turn
     // MAX + one minor unit into MAX, incorrectly approving a hard-stop call.
     let on_the_hook = i128::from(ledger.committed_minor)
@@ -405,9 +453,15 @@ pub fn gate_spend(state: &ProjectState, proposed_minor: i64) -> SpendGate {
         + i128::from(ledger.completed_minor)
         + i128::from(ledger.failed_minor);
     let total = on_the_hook + i128::from(proposed_minor.max(0));
-    if total > i128::from(limit) {
-        return if budget.hard_stop {
+    if ledger
+        .remaining_minor
+        .is_some_and(|remaining| remaining < 0)
+        || total > i128::from(limit)
+    {
+        return if policy == BudgetPolicy::StrictHardStop {
             SpendGate::Blocked
+        } else if policy == BudgetPolicy::WarnOnly {
+            SpendGate::Warn
         } else {
             SpendGate::Confirm
         };
@@ -439,6 +493,12 @@ mod tests {
         job
     }
 
+    fn bounded_job(kind: &str, status: JobStatus, actual: Option<i64>, maximum: i64) -> JobRecord {
+        let mut job = job(kind, status, actual, Some(maximum));
+        job.reserved_max_minor = Some(maximum);
+        job
+    }
+
     #[test]
     fn gate_does_not_allow_a_positive_charge_when_minor_units_overflow_i64() {
         let mut state = ProjectState::new();
@@ -446,12 +506,29 @@ mod tests {
             currency: "USD".into(),
             limit_minor: Some(i64::MAX),
             warning_at_minor: None,
+            policy: None,
             hard_stop: true,
         });
         state
             .jobs
             .push(job("image", JobStatus::Completed, Some(i64::MAX), None));
         assert_eq!(gate_spend(&state, 1), SpendGate::Blocked);
+    }
+
+    #[test]
+    fn multiple_bounded_reservations_do_not_saturate_into_budget_headroom() {
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            limit_minor: Some(i64::MAX),
+            hard_stop: true,
+            ..Default::default()
+        });
+        state.jobs = vec![
+            bounded_job("render", JobStatus::Completed, None, i64::MAX),
+            bounded_job("render", JobStatus::Completed, None, 1),
+        ];
+        assert_eq!(compute_ledger(&state).gate, SpendGate::Blocked);
+        assert_eq!(gate_spend(&state, 0), SpendGate::Blocked);
     }
 
     #[test]
@@ -512,6 +589,7 @@ mod tests {
             currency: "USD".to_string(),
             limit_minor: Some(10_000),
             warning_at_minor: Some(7_000),
+            policy: None,
             hard_stop: true,
         });
         state.jobs = vec![
@@ -537,13 +615,14 @@ mod tests {
         let mut state = ProjectState::new();
         state.budget = Some(ProjectBudget {
             limit_minor: Some(1_000),
+            policy: None,
             hard_stop: true,
             ..Default::default()
         });
         state.jobs = vec![
-            job("render", JobStatus::Pending, None, Some(100)),
-            job("render", JobStatus::Completed, None, Some(400)),
-            job("render", JobStatus::Completed, Some(200), Some(900)),
+            bounded_job("render", JobStatus::Pending, None, 100),
+            bounded_job("render", JobStatus::Completed, None, 400),
+            bounded_job("render", JobStatus::Completed, Some(200), 200),
         ];
         let ledger = compute_ledger(&state);
         assert_eq!(ledger.committed_minor, 100);
@@ -555,11 +634,59 @@ mod tests {
     }
 
     #[test]
+    fn sequential_bounded_completion_keeps_headroom_until_actual_is_settled() {
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            limit_minor: Some(10),
+            hard_stop: true,
+            ..Default::default()
+        });
+        state
+            .jobs
+            .push(bounded_job("image", JobStatus::Completed, None, 7));
+        assert_eq!(compute_ledger(&state).unsettled_estimated_minor, 7);
+        assert_eq!(gate_spend(&state, 4), SpendGate::Blocked);
+        assert_ne!(gate_spend(&state, 3), SpendGate::Blocked);
+
+        state
+            .jobs
+            .push(bounded_job("image", JobStatus::Completed, None, 3));
+        assert_eq!(compute_ledger(&state).unsettled_estimated_minor, 10);
+        assert_eq!(gate_spend(&state, 1), SpendGate::Blocked);
+
+        state.jobs[0].cost_minor = Some(2);
+        assert_eq!(compute_ledger(&state).unsettled_estimated_minor, 8);
+        assert_eq!(compute_ledger(&state).completed_minor, 2);
+        assert_eq!(gate_spend(&state, 1), SpendGate::Blocked);
+    }
+
+    #[test]
+    fn provider_verified_actual_releases_unused_reservation_without_unknown_exposure() {
+        let mut state = ProjectState::new();
+        state.budget = Some(ProjectBudget {
+            limit_minor: Some(10),
+            hard_stop: true,
+            ..Default::default()
+        });
+        let mut job = bounded_job("image", JobStatus::Completed, Some(2), 7);
+        job.actual_verified = true;
+        state.jobs.push(job);
+        let ledger = compute_ledger(&state);
+        assert_eq!(ledger.completed_minor, 2);
+        assert_eq!(ledger.unsettled_estimated_minor, 0);
+        assert_eq!(ledger.unknown_cost_jobs, 0);
+        assert_eq!(ledger.unknown_exposure_jobs, 0);
+        assert_ne!(gate_spend(&state, 8), SpendGate::Blocked);
+        assert_eq!(gate_spend(&state, 9), SpendGate::Blocked);
+    }
+
+    #[test]
     fn ledger_does_not_add_foreign_currency_to_budget_totals() {
         let mut state = ProjectState::new();
         state.budget = Some(ProjectBudget {
             currency: "USD".into(),
             limit_minor: Some(100),
+            policy: None,
             hard_stop: true,
             ..Default::default()
         });
@@ -571,7 +698,8 @@ mod tests {
         assert_eq!(ledger.unsettled_estimated_minor, 0);
         assert_eq!(ledger.remaining_minor, Some(100));
         assert_eq!(ledger.unknown_cost_jobs, 1);
-        assert_eq!(gate_spend(&state, 100), SpendGate::Allow);
+        assert_eq!(ledger.unknown_exposure_jobs, 1);
+        assert_eq!(gate_spend(&state, 100), SpendGate::Blocked);
     }
 
     #[test]
@@ -601,7 +729,7 @@ mod tests {
             hard_stop: true,
             ..Default::default()
         });
-        state.jobs = vec![job("render", JobStatus::Completed, Some(-50), Some(80))];
+        state.jobs = vec![bounded_job("render", JobStatus::Completed, Some(-50), 80)];
         let ledger = compute_ledger(&state);
         assert_eq!(ledger.completed_minor, 0);
         assert_eq!(ledger.unsettled_estimated_minor, 80);
@@ -707,6 +835,7 @@ mod tests {
                 currency: "USD".into(),
                 limit_minor: Some(5),
                 warning_at_minor: None,
+                policy: None,
                 hard_stop: true,
             }),
             ..ProjectState::new()
@@ -720,6 +849,7 @@ mod tests {
                 currency: "USD".into(),
                 limit_minor: Some(10),
                 warning_at_minor: None,
+                policy: None,
                 hard_stop: true,
             }),
             ..ProjectState::new()
@@ -796,12 +926,13 @@ mod tests {
                 currency: "USD".into(),
                 limit_minor: Some(10_000),
                 warning_at_minor: Some(7_000),
+                policy: None,
                 hard_stop: true,
             }),
             // committed 500 + completed 1_000 = on_the_hook = 1_500 → under warn (7_000)
             jobs: vec![
-                job("r1", JobStatus::Pending, None, Some(500)),
-                job("r2", JobStatus::Completed, Some(1_000), None),
+                bounded_job("r1", JobStatus::Pending, None, 500),
+                bounded_job("r2", JobStatus::Completed, Some(1_000), 1_000),
             ],
             ..ProjectState::new()
         };
@@ -813,12 +944,13 @@ mod tests {
                 currency: "USD".into(),
                 limit_minor: Some(10_000),
                 warning_at_minor: Some(2_000),
+                policy: None,
                 hard_stop: true,
             }),
             // committed 500 + completed 2_000 = 2_500 → over warn (2_000), under limit
             jobs: vec![
-                job("r1", JobStatus::Pending, None, Some(500)),
-                job("r2", JobStatus::Completed, Some(2_000), None),
+                bounded_job("r1", JobStatus::Pending, None, 500),
+                bounded_job("r2", JobStatus::Completed, Some(2_000), 2_000),
             ],
             ..ProjectState::new()
         };
@@ -830,12 +962,13 @@ mod tests {
                 currency: "USD".into(),
                 limit_minor: Some(2_000),
                 warning_at_minor: None,
+                policy: None,
                 hard_stop: false,
             }),
             // committed 500 + completed 2_000 = 2_500 → over limit (2_000), soft
             jobs: vec![
-                job("r1", JobStatus::Pending, None, Some(500)),
-                job("r2", JobStatus::Completed, Some(2_000), None),
+                bounded_job("r1", JobStatus::Pending, None, 500),
+                bounded_job("r2", JobStatus::Completed, Some(2_000), 2_000),
             ],
             ..ProjectState::new()
         };
@@ -847,11 +980,12 @@ mod tests {
                 currency: "USD".into(),
                 limit_minor: Some(2_000),
                 warning_at_minor: None,
+                policy: None,
                 hard_stop: true,
             }),
             jobs: vec![
-                job("r1", JobStatus::Pending, None, Some(500)),
-                job("r2", JobStatus::Completed, Some(2_000), None),
+                bounded_job("r1", JobStatus::Pending, None, 500),
+                bounded_job("r2", JobStatus::Completed, Some(2_000), 2_000),
             ],
             ..ProjectState::new()
         };
@@ -863,12 +997,13 @@ mod tests {
                 currency: "USD".into(),
                 limit_minor: Some(10_000),
                 warning_at_minor: None,
+                policy: None,
                 hard_stop: true,
             }),
             // committed 500 + completed 1_000 = 1_500 → under limit (10_000), no warn
             jobs: vec![
-                job("r1", JobStatus::Pending, None, Some(500)),
-                job("r2", JobStatus::Completed, Some(1_000), None),
+                bounded_job("r1", JobStatus::Pending, None, 500),
+                bounded_job("r2", JobStatus::Completed, Some(1_000), 1_000),
             ],
             ..ProjectState::new()
         };
@@ -883,6 +1018,7 @@ mod tests {
                 limit_minor: Some(limit),
                 warning_at_minor: Some(warning),
                 hard_stop,
+                policy: None,
             }),
             ..ProjectState::new()
         };
@@ -994,7 +1130,12 @@ mod tests {
         let mut state = ProjectState::default();
         // Spend = 1000, limit = 1000 — exact-equal should NOT block.
         state.budget = Some(budget_with(Some(1000), None, true));
-        state.jobs = vec![job("render", JobStatus::Completed, Some(1000), Some(1000))];
+        state.jobs = vec![bounded_job(
+            "render",
+            JobStatus::Completed,
+            Some(1000),
+            1000,
+        )];
 
         let gate = gate_spend(&state, 0);
         assert!(!matches!(gate, SpendGate::Blocked),

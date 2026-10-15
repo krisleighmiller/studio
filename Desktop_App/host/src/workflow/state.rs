@@ -1288,6 +1288,12 @@ pub struct JobRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_minor: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_max_minor: Option<i64>,
+    /// True only after an attributable provider-backed charge has been verified.
+    /// Caller-supplied/manual accounting must never set this flag.
+    #[serde(default)]
+    pub actual_verified: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
     /// Job id this attempt retries. The previous job stays in the ledger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1298,6 +1304,27 @@ pub struct JobRecord {
     /// User-entered accounting, not provider verification. Never infer verification from cost_minor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconciliation: Option<SpendReconciliation>,
+    #[serde(default)]
+    pub unbounded_exposure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_metadata: Option<SpendRequestMetadata>,
+}
+
+/// Allowlisted nonsecret recovery data, not a raw provider request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpendRequestMetadata {
+    pub request_hash: String,
+    /// Policy disclosure visible for this unbounded attempt, if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disclosure: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prediction_id: Option<String>,
 }
 
 /// Only manual provenance is supported. Provider verification requires an adapter
@@ -1368,10 +1395,14 @@ impl JobRecord {
             progress: None,
             cost_minor: None,
             estimated_cost_minor: None,
+            reserved_max_minor: None,
+            actual_verified: false,
             currency: None,
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            unbounded_exposure: false,
+            request_metadata: None,
             attempts: vec![JobAttempt {
                 id: attempt_id,
                 status: JobStatus::Pending,
@@ -1858,6 +1889,15 @@ pub fn requirement_id(kind: RequirementKind, key: &str) -> String {
 }
 
 /// Structured project budget, in integer minor units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetPolicy {
+    StrictHardStop,
+    ApprovalRequired,
+    WarnOnly,
+}
+
+/// Structured project budget, in integer minor units.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectBudget {
     /// ISO 4217 currency code for every amount in this budget.
@@ -1871,6 +1911,8 @@ pub struct ProjectBudget {
     /// When true, the budget ceiling cannot be bypassed by the Director.
     #[serde(default)]
     pub hard_stop: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<BudgetPolicy>,
 }
 
 impl Default for ProjectBudget {
@@ -1880,6 +1922,7 @@ impl Default for ProjectBudget {
             limit_minor: None,
             warning_at_minor: None,
             hard_stop: false,
+            policy: None,
         }
     }
 }
@@ -1895,6 +1938,8 @@ pub struct SpendConfirmation {
     pub currency: String,
     pub amount_minor: i64,
     pub ledger_revision: String,
+    #[serde(default)]
+    pub request_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

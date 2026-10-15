@@ -1536,6 +1536,10 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            reserved_max_minor: None,
+            actual_verified: false,
+            unbounded_exposure: false,
+            request_metadata: None,
         });
         assert_eq!(
             next_frame_rel(root, &state, 1, 1, "png"),

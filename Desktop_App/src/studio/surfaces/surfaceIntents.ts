@@ -84,6 +84,7 @@ export type ProfileIntent =
         limit_minor: number | null;
         warning_at_minor: number | null;
         hard_stop: boolean;
+        policy: "strict_hard_stop" | "approval_required" | "warn_only";
       } | null;
     }
   | { type: "set-requirement"; requirementId: string; status: string; name: string }

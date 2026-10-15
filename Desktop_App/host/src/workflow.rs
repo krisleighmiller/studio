@@ -342,6 +342,11 @@ pub fn parse_budget(value: Option<&Value>) -> Result<Option<ProjectBudget>, Stri
                 .get("hard_stop")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let policy = match value.get("policy") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(serde_json::from_value::<state::BudgetPolicy>(value.clone())
+                    .map_err(|_| "Budget policy must be strict_hard_stop, approval_required, or warn_only".to_string())?),
+            };
             if let Some(limit) = limit_minor {
                 if limit < 0 {
                     return Err("Budget limit cannot be negative.".into());
@@ -362,6 +367,7 @@ pub fn parse_budget(value: Option<&Value>) -> Result<Option<ProjectBudget>, Stri
                 limit_minor,
                 warning_at_minor,
                 hard_stop,
+                policy,
             }))
         }
     }

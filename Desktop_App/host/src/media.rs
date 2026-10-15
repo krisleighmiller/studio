@@ -171,7 +171,32 @@ fn generate(
         _ => return Err(format!("unknown billable operation: {name}")),
     };
     let confirmation = arg_str(args, &["spend_confirmation", "spendConfirmation"]);
-    let result = crate::workflow::spend::run_scoped(
+    // Fingerprint the resolved operation and request, excluding only the one-use
+    // authorization token. No prompt or credential is persisted in the ledger.
+    let mut request_args = args.clone();
+    if let Some(object) = request_args.as_object_mut() {
+        object.remove("spend_confirmation");
+        object.remove("spendConfirmation");
+    }
+    let request_bytes = serde_json::to_vec(&json!([name, api.kind, request_args]))
+        .map_err(|error| format!("cannot fingerprint media request: {error}"))?;
+    let request_hash = crate::workflow::spend::fingerprint(&request_bytes)?;
+    let numeric = |key: &str, ceiling: u64| {
+        args.get("params")
+            .and_then(|p| p.get(key))
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0 && *n <= ceiling)
+            .map(|n| n as u32)
+    };
+    let metadata = crate::workflow::state::SpendRequestMetadata {
+        request_hash: request_hash.clone(),
+        disclosure: None,
+        duration_seconds: numeric("duration", 3600),
+        width: numeric("width", 16384),
+        height: numeric("height", 16384),
+        prediction_id: None,
+    };
+    let result = crate::workflow::spend::run_scoped_with_submission(
         &root,
         &api.kind,
         "media",
@@ -180,7 +205,9 @@ fn generate(
         &model,
         confirmation.as_deref(),
         arg_str(args, &["retry_of", "retryOf"]).as_deref(),
-        || generate_unchecked(name, args, root.to_str(), app, &api),
+        Some(metadata),
+        None, // Registry estimates are not contractually verified maxima.
+        |_, submitted| generate_unchecked(name, args, root.to_str(), app, &api, submitted),
     );
     // Only a host-confirmed soft-limit gate exposes a quote. A failed replay
     // must not open another prompt or mint another token automatically.
@@ -200,6 +227,17 @@ fn generate(
             );
         }
     }
+    if matches!(&result, Err(error) if error == "unbounded request approval required")
+        && confirmation.is_none()
+    {
+        if let Ok(quote) = crate::workflow::spend::quote_unbounded_scoped(&root, &request_hash) {
+            app.emit(
+                "spend-confirmation-required",
+                json!({ "quote": quote, "provider": api.kind, "category": "media", "operation": name,
+                        "model": model, "projectRoot": root, "args": args }),
+            );
+        }
+    }
     result
 }
 
@@ -209,6 +247,7 @@ fn generate_unchecked(
     project_root: Option<&str>,
     app: &HostCtx,
     api: &ApiEntry,
+    submitted: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<String, String> {
     let model = arg_str(args, &["model"]).ok_or_else(|| "missing model".to_string())?;
     let params = args.get("params").cloned().unwrap_or(json!({}));
@@ -301,11 +340,16 @@ fn generate_unchecked(
         return Ok(generated);
     }
 
+    let parsed: Value = serde_json::from_str(&generated).unwrap_or(json!({ "raw": generated }));
+    if let Some(id) = parsed.get("prediction_id").and_then(Value::as_str) {
+        // Persistence errors are best effort: the job remains reserved and retry is blocked.
+        let _ = submitted(id);
+    }
     let Some(save_path) = save_path else {
         return Ok(generated);
     };
 
-    let parsed: Value = serde_json::from_str(&generated).unwrap_or(json!({ "raw": generated }));
+    // Record as soon as the adapter returns, before a best-effort download or GET.
     // Replicate Prefer:wait may already include output_url
     if let Some(url) = parsed.get("output_url").and_then(|v| v.as_str()) {
         if !url.is_empty() {
@@ -427,6 +471,59 @@ fn collect_by_api(
             Some(app),
         ),
     }
+}
+
+/// Read-only provider status lookup by immutable spend job id. Never submits or downloads.
+/// Arguments: project_root: Option<&str>, job_id: &str, app: &HostCtx.
+/// Returns JSON {job_id, status}; no provider response body or credentials.
+pub fn recovery_status(
+    project_root: Option<&str>,
+    job_id: &str,
+    app: &HostCtx,
+) -> Result<String, String> {
+    let root = crate::session::command_root(project_root)?;
+    recovery_status_with(&root, job_id, |provider, prediction_id| {
+        let api = resolve_api_for_prediction(app, prediction_id)?;
+        if api.kind != provider {
+            return Err("stored provider and prediction id disagree".into());
+        }
+        get_prediction(
+            &json!({"prediction_id": prediction_id, "wait_seconds": 0}),
+            app,
+        )
+    })
+}
+
+pub(crate) fn recovery_status_with(
+    root: &std::path::Path,
+    job_id: &str,
+    get: impl FnOnce(&str, &str) -> Result<String, String>,
+) -> Result<String, String> {
+    let (provider, prediction_id) = crate::workflow::spend::recovery_job(root, job_id)?;
+    let response = get(&provider, &prediction_id)
+        .map_err(|_| "provider status lookup failed; no generation was submitted".to_string())?;
+    let body: Value = serde_json::from_str(&response)
+        .map_err(|_| "provider returned invalid status JSON".to_string())?;
+    let status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|s| {
+            matches!(
+                *s,
+                "starting"
+                    | "queued"
+                    | "pending"
+                    | "processing"
+                    | "running"
+                    | "succeeded"
+                    | "completed"
+                    | "failed"
+                    | "canceled"
+                    | "cancelled"
+            )
+        })
+        .unwrap_or("unknown");
+    Ok(json!({"job_id": job_id, "status": status}).to_string())
 }
 
 fn get_prediction(args: &Value, app: &HostCtx) -> Result<String, String> {

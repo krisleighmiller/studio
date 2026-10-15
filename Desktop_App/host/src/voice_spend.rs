@@ -1,17 +1,20 @@
-//! Direct voice operations require a machine-verified account-specific USD ceiling.
-//! User attestations and arbitrary positive caps cannot establish a hard spend bound.
-//! The same project lock and ledger as media spend serialize quote and reservation.
+//! Unknown-exposure direct voice dispatch shares the project ledger and reservation.
+//! No provider usage header or user-entered amount is a verified USD maximum.
 #[cfg(test)]
 use crate::workflow::{
     cost, import,
-    state::{JobRecord, JobStatus, ProjectState, SpendConfirmation},
+    state::{JobRecord, JobStatus, SpendConfirmation},
 };
-#[cfg(test)]
+use crate::workflow::{
+    spend,
+    state::{BudgetPolicy, ProjectState, SpendRequestMetadata},
+};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::fs;
 use std::path::Path;
 #[cfg(test)]
 use std::{
-    fs,
     io::Read,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -28,7 +31,6 @@ fn persisted(root: &Path) -> Result<ProjectState, String> {
         .map_err(|_| "persisted project state required for paid voice request".to_string())?;
     ProjectState::from_json(&text)
 }
-#[cfg(test)]
 fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -40,7 +42,6 @@ fn revision(state: &ProjectState) -> Result<String, String> {
     let bytes = serde_json::to_vec(&(&state.budget, &state.jobs)).map_err(|e| e.to_string())?;
     Ok(hash(&bytes))
 }
-#[cfg(test)]
 fn scope(operation: &str, model: &str, input: &str) -> Result<String, String> {
     let expected = match operation {
         "elevenlabs_tts_preview" => "eleven_multilingual_v2",
@@ -128,26 +129,136 @@ fn confirm_verified(
         currency: "USD".into(),
         amount_minor: requested_cap,
         ledger_revision: revision(&state)?,
+        request_hash: String::new(),
     });
     import::persist_state_locked(root, &state)?;
     Ok(token)
 }
-#[cfg(not(test))]
-pub fn run(
-    _root: &Path,
-    _operation: &str,
-    _model: &str,
-    _input: &str,
-    _token: Option<&str>,
-    _dispatch: impl FnOnce() -> Result<String, String>,
+fn fingerprint(operation: &str, model: &str, input: &str) -> Result<String, String> {
+    scope(operation, model, input)?;
+    let value: serde_json::Value =
+        serde_json::from_str(input).map_err(|_| "invalid voice request JSON".to_string())?;
+    let fields = value.as_object().ok_or("voice request must be an object")?;
+    let keys: &[&str] = match operation {
+        "elevenlabs_tts_preview" => &["text", "voice_id"],
+        "elevenlabs_design_voice" => &["text", "voice_description"],
+        "elevenlabs_create_designed_voice" => {
+            &["voice_name", "voice_description", "generated_voice_id"]
+        }
+        _ => return Err("unknown direct voice operation".into()),
+    };
+    if fields.len() != keys.len()
+        || keys.iter().any(|key| {
+            fields
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|text| text.is_empty())
+        })
+    {
+        return Err("voice request fields do not match the operation".into());
+    }
+    let canonical = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+    Ok(hash(
+        format!("voice:v1:{operation}:{model}:")
+            .as_bytes()
+            .iter()
+            .copied()
+            .chain(canonical)
+            .collect::<Vec<_>>()
+            .as_slice(),
+    ))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceQuote {
+    pub policy: &'static str,
+    pub request_hash: String,
+    pub ledger_revision: Option<String>,
+    pub disclosure: String,
+}
+
+/// Host derives the fingerprint from the exact submitted input, not a renderer hash.
+pub fn quote(root: &Path, operation: &str, model: &str, input: &str) -> Result<VoiceQuote, String> {
+    let request_hash = fingerprint(operation, model, input)?;
+    let _lock = crate::workflow::import::lock_project(root)?;
+    let text = fs::read_to_string(root.join(crate::workflow::state::STATE_REL))
+        .map_err(|_| "persisted project state required for paid voice request".to_string())?;
+    let state = ProjectState::from_json(&text)?;
+    let policy = state
+        .budget
+        .as_ref()
+        .and_then(|budget| budget.policy)
+        .unwrap_or_else(|| {
+            if state.budget.as_ref().is_some_and(|budget| budget.hard_stop) {
+                BudgetPolicy::StrictHardStop
+            } else {
+                BudgetPolicy::ApprovalRequired
+            }
+        });
+    drop(_lock);
+    match policy {
+        BudgetPolicy::StrictHardStop => Err("strict hard stop requires an adapter-verified request maximum; voice request blocked".into()),
+        BudgetPolicy::ApprovalRequired => {
+            let shared = spend::quote_unbounded_scoped(root, &request_hash)?;
+            Ok(VoiceQuote { policy: "approval_required", request_hash: shared.request_hash,
+                ledger_revision: Some(shared.ledger_revision), disclosure: shared.disclosure })
+        }
+        BudgetPolicy::WarnOnly => Ok(VoiceQuote { policy: "warn_only", request_hash,
+            ledger_revision: None, disclosure: "No verified maximum exists for this voice request. The charge may exceed your budget; warn-only policy does not enforce a hard stop.".into() }),
+    }
+}
+
+pub fn confirm_unbounded(
+    root: &Path,
+    operation: &str,
+    model: &str,
+    input: &str,
+    shown_hash: &str,
+    shown_revision: &str,
 ) -> Result<String, String> {
-    Err("Direct voice is blocked: no machine-verifiable account-specific USD upper bound is available".into())
+    let actual_hash = fingerprint(operation, model, input)?;
+    if shown_hash != actual_hash {
+        return Err("voice request changed since quote".into());
+    }
+    spend::confirm_unbounded_scoped(
+        root,
+        "elevenlabs",
+        "voice",
+        operation,
+        model,
+        &actual_hash,
+        shown_revision,
+    )
+}
+
+/// The shared host boundary reserves before dispatch and leaves actual USD unknown.
+pub fn run(
+    root: &Path,
+    operation: &str,
+    model: &str,
+    input: &str,
+    token: Option<&str>,
+    dispatch: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let request_hash = fingerprint(operation, model, input)?;
+    let capability = match operation {
+        "elevenlabs_tts_preview" => "audio.tts_profile",
+        "elevenlabs_design_voice" => "audio.voice_design",
+        "elevenlabs_create_designed_voice" => "audio.voice_clone",
+        _ => return Err("unknown direct voice operation".into()),
+    };
+    spend::run_scoped_with_request(root, "elevenlabs", "voice", operation, capability,
+        model, token, None, Some(SpendRequestMetadata {
+            request_hash, disclosure: Some("No verified maximum exists for this voice request; charge may exceed the project budget.".into()), duration_seconds: None, width: None,
+            height: None, prediction_id: None,
+        }), None, dispatch)
 }
 
 #[cfg(test)]
-/// The closure is the sole provider dispatch; reservation is persisted before invocation.
+/// Synthetic verified ceiling only: exercise reservation without live dispatch.
 /// Actual cost remains unknown until independently reconciled, including failed requests.
-pub fn run(
+fn run_verified(
     root: &Path,
     operation: &str,
     model: &str,
@@ -225,15 +336,72 @@ mod tests {
             limit_minor: Some(100),
             warning_at_minor: None,
             hard_stop: true,
+            policy: None,
         });
         import::persist_state(root.path(), &state).unwrap();
         root
     }
     #[test]
+    fn production_boundary_blocks_every_direct_voice_route_even_with_a_token() {
+        let root = setup();
+        let before = fs::read(root.path().join(crate::workflow::state::STATE_REL)).unwrap();
+        let routes = [
+            ("elevenlabs_tts_preview", "eleven_multilingual_v2"),
+            ("elevenlabs_design_voice", "eleven_multilingual_ttv_v2"),
+            ("elevenlabs_create_designed_voice", "text-to-voice/create"),
+        ];
+        for (operation, model) in routes {
+            let input = match operation {
+                "elevenlabs_tts_preview" => r#"{"text":"hello","voice_id":"voice"}"#,
+                "elevenlabs_design_voice" => r#"{"text":"hello","voice_description":"sample"}"#,
+                _ => {
+                    r#"{"voice_name":"name","voice_description":"sample","generated_voice_id":"id"}"#
+                }
+            };
+            let calls = Cell::new(0);
+            let error = run(
+                root.path(),
+                operation,
+                model,
+                input,
+                Some("forged-token"),
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok("sent".into())
+                },
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("strict hard stop requires an adapter-verified request maximum"),
+                "{error}"
+            );
+            assert_eq!(
+                calls.get(),
+                0,
+                "{operation} dispatched without authorization"
+            );
+            assert!(confirm(
+                root.path(),
+                operation,
+                model,
+                "input",
+                100,
+                "user-entered invoice",
+                true
+            )
+            .is_err());
+        }
+        assert_eq!(
+            fs::read(root.path().join(crate::workflow::state::STATE_REL)).unwrap(),
+            before
+        );
+    }
+
+    #[test]
     fn no_quote_never_reaches_provider() {
         let root = setup();
         let calls = Cell::new(0);
-        assert!(run(
+        assert!(run_verified(
             root.path(),
             "elevenlabs_tts_preview",
             "eleven_multilingual_v2",
@@ -260,7 +428,7 @@ mod tests {
         )
         .unwrap();
         let calls = Cell::new(0);
-        assert!(run(
+        assert!(run_verified(
             root.path(),
             "elevenlabs_tts_preview",
             "eleven_multilingual_v2",
@@ -274,7 +442,7 @@ mod tests {
         .is_err());
         assert_eq!(calls.get(), 0);
         assert_eq!(
-            run(
+            run_verified(
                 root.path(),
                 "elevenlabs_tts_preview",
                 "eleven_multilingual_v2",
@@ -289,7 +457,7 @@ mod tests {
             "sent"
         );
         assert_eq!(calls.get(), 1);
-        assert!(run(
+        assert!(run_verified(
             root.path(),
             "elevenlabs_tts_preview",
             "eleven_multilingual_v2",
@@ -317,7 +485,7 @@ mod tests {
         .unwrap_err()
         .contains("blocked"));
         let calls = Cell::new(0);
-        assert!(run(
+        assert!(run_verified(
             root.path(),
             "elevenlabs_design_voice",
             "eleven_multilingual_ttv_v2",
@@ -349,7 +517,7 @@ mod tests {
             25,
         )
         .unwrap();
-        assert!(run(
+        assert!(run_verified(
             root.path(),
             "elevenlabs_create_designed_voice",
             "text-to-voice/create",
@@ -358,5 +526,76 @@ mod tests {
             || panic!("wrong route sent")
         )
         .is_err());
+    }
+    #[test]
+    fn unknown_approval_binds_request_and_is_one_use() {
+        let root = setup();
+        let mut state = persisted(root.path()).unwrap();
+        state.budget.as_mut().unwrap().policy = Some(BudgetPolicy::ApprovalRequired);
+        import::persist_state(root.path(), &state).unwrap();
+        let op = "elevenlabs_tts_preview";
+        let model = "eleven_multilingual_v2";
+        let input = r#"{"text":"hello","voice_id":"voice"}"#;
+        let quote = quote(root.path(), op, model, input).unwrap();
+        assert_eq!(quote.policy, "approval_required");
+        let altered = r#"{"text":"different","voice_id":"voice"}"#;
+        assert!(confirm_unbounded(
+            root.path(),
+            op,
+            model,
+            altered,
+            &quote.request_hash,
+            quote.ledger_revision.as_deref().unwrap()
+        )
+        .is_err());
+        let token = confirm_unbounded(
+            root.path(),
+            op,
+            model,
+            input,
+            &quote.request_hash,
+            quote.ledger_revision.as_deref().unwrap(),
+        )
+        .unwrap();
+        let calls = Cell::new(0);
+        assert!(run(root.path(), op, model, altered, Some(&token), || {
+            calls.set(1);
+            Ok("sent".into())
+        })
+        .is_err());
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            run(root.path(), op, model, input, Some(&token), || {
+                calls.set(1);
+                Ok("sent".into())
+            })
+            .unwrap(),
+            "sent"
+        );
+        assert!(run(root.path(), op, model, input, Some(&token), || panic!(
+            "replay sent"
+        ))
+        .is_err());
+        let state = persisted(root.path()).unwrap();
+        assert_eq!(state.jobs[0].cost_minor, None);
+        assert_eq!(state.jobs[0].estimated_cost_minor, None);
+    }
+    #[test]
+    fn strict_blocks_quote_warn_only_discloses_unknown_exposure() {
+        let root = setup();
+        let op = "elevenlabs_design_voice";
+        let model = "eleven_multilingual_ttv_v2";
+        let input = r#"{"text":"hello","voice_description":"sample"}"#;
+        assert!(quote(root.path(), op, model, input).is_err());
+        let mut state = persisted(root.path()).unwrap();
+        state.budget.as_mut().unwrap().policy = Some(BudgetPolicy::WarnOnly);
+        import::persist_state(root.path(), &state).unwrap();
+        let quote = quote(root.path(), op, model, input).unwrap();
+        assert_eq!(quote.policy, "warn_only");
+        assert!(quote.disclosure.contains("verified maximum"));
+        assert_eq!(
+            run(root.path(), op, model, input, None, || Ok("sent".into())).unwrap(),
+            "sent"
+        );
     }
 }

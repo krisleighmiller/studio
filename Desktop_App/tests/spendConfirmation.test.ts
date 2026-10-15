@@ -82,4 +82,21 @@ describe("paid media confirmation handoff (host mocked; no provider calls)", () 
     await handle(payload());
     expect(invoke).not.toHaveBeenCalled();
   });
+  it("discloses unknown maximum and binds approval to the exact request hash", async () => {
+    const { handle, invoke, ask } = setup();
+    invoke.mockImplementation(async (command: string) =>
+      command === "confirm_unbounded_spend" ? "one-use-token" : "saved");
+    await handle({ ...payload(), provider: "atlas-cloud", category: "media",
+      operation: "atlas_generate_image", model: "image-model",
+      quote: { currency: "USD", requestHash: "a".repeat(64), ledgerRevision: "revision-a",
+        disclosure: "No verified maximum exists for this request; charge may exceed budget." },
+    });
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining("NOT a guaranteed hard stop"), expect.anything());
+    expect(invoke).toHaveBeenNthCalledWith(1, "confirm_unbounded_spend", {
+      projectRoot: "/project", provider: "atlas-cloud", category: "media",
+      operation: "atlas_generate_image", model: "image-model",
+      requestHash: "a".repeat(64), ledgerRevision: "revision-a",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "media_generate_confirmed", expect.objectContaining({token: "one-use-token"}));
+  });
 });

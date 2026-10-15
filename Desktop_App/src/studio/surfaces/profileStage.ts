@@ -221,24 +221,32 @@ function renderBudgetEditor(emit: (intent: ProfileIntent) => void): HTMLElement 
   warningInput.placeholder = "e.g. 40.00";
   warningInput.value = budget?.warning_at_minor != null ? minorToMoney(budget.warning_at_minor) : "";
 
-  const hardStop = document.createElement("label");
-  hardStop.className = "wide";
-  const hardStopInput = document.createElement("input");
-  hardStopInput.name = "budget_hard_stop";
-  hardStopInput.type = "checkbox";
-  hardStopInput.checked = budget?.hard_stop ?? false;
-  const hardStopText = document.createElement("span");
-  hardStopText.textContent = " Hard stop for accounted provider jobs (not a project-wide guarantee)";
-  hardStop.append(hardStopInput, hardStopText);
+  const policyLabel = document.createElement("label");
+  policyLabel.className = "wide";
+  policyLabel.textContent = "Spending policy";
+  const policySelect = document.createElement("select");
+  policySelect.name = "budget_policy";
+  for (const [value, label] of [
+    ["strict_hard_stop", "Strict hard stop — only source-backed maximum charges"],
+    ["approval_required", "Approval required — disclose unknown exposure per request"],
+    ["warn_only", "Warn only — unknown exposure is not capped"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    policySelect.append(option);
+  }
+  policySelect.value = budget?.policy ?? (budget?.hard_stop ? "strict_hard_stop" : "approval_required");
+  policyLabel.append(policySelect);
 
   const note = document.createElement("p");
   note.className = "workflow-budget-note";
-  note.textContent = "LLM/chat costs are not in this budget ledger. Chat requests are blocked until project-aware enforcement is available.";
+  note.textContent = "Only strict hard stop with verified maximum charges enforces a ceiling on accounted jobs. Approval-required and warn-only may incur unbounded charges. LLM/chat requests remain blocked and are not covered by this budget.";
 
   currency.append(currencyInput);
   limit.append(limitInput);
   warning.append(warningInput);
-  form.append(currency, limit, warning, hardStop, note);
+  form.append(currency, limit, warning, policyLabel, note);
 
   const actions = document.createElement("span");
   actions.className = "workflow-budget-actions";
@@ -281,7 +289,8 @@ function renderBudgetEditor(emit: (intent: ProfileIntent) => void): HTMLElement 
         currency: currencyValue,
         limit_minor: limitMinor,
         warning_at_minor: warningMinor,
-        hard_stop: hardStopInput.checked,
+        hard_stop: policySelect.value === "strict_hard_stop",
+        policy: policySelect.value as "strict_hard_stop" | "approval_required" | "warn_only",
       },
     });
   });

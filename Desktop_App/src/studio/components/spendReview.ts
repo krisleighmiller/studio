@@ -20,7 +20,7 @@ export function renderSpendReview(
   const heading = document.createElement("h3");
   heading.textContent = "Paid media · unknown or manually reviewed spend";
   const disclosure = document.createElement("p");
-  disclosure.textContent = "Provider verification is unavailable here. This is user-entered accounting only: a reference or zero amount cannot prove a provider outcome, clear the unknown-spend gate, or enable retry. Paid dispatch stays blocked after manual review. Check provider billing/history outside Studio.";
+  disclosure.textContent = "Provider verification is unavailable here. This is user-entered accounting only: a reference or zero amount cannot prove a provider outcome or enable retry. Unbounded exposure blocks dispatch under strict hard-stop; approval-required and warn-only policies do not guarantee a hard stop. Check provider billing/history outside Studio.";
   const refresh = document.createElement("button");
   refresh.type = "button";
   refresh.textContent = "Load / refresh unsettled jobs";
@@ -39,7 +39,7 @@ export function renderSpendReview(
     group.append(label);
     if (job.reconciliation) {
       const accounting = document.createElement("p");
-      accounting.textContent = `Manual accounting ${minorToMoney(job.cost_minor)} ${job.currency ?? "?"} · reviewer-reported ${job.reconciliation.reported_outcome ?? job.reconciliation.provider_outcome ?? "unknown"} · reference ${job.reconciliation.evidence_reference}. Not provider-verified; dispatch and retry remain blocked.`;
+      accounting.textContent = `Manual accounting ${minorToMoney(job.cost_minor)} ${job.currency ?? "?"} · reviewer-reported ${job.reconciliation.reported_outcome ?? job.reconciliation.provider_outcome ?? "unknown"} · reference ${job.reconciliation.evidence_reference}. Not provider-verified; ${job.reserved_max_minor != null ? `maximum exposure ${minorToMoney(job.reserved_max_minor)} ${job.currency ?? "?"}` : "exposure unbounded"}; retry remains blocked.`;
       group.append(accounting);
       panel.append(group);
       continue;

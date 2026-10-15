@@ -18,7 +18,9 @@ export function renderBudgetSummary(model: BudgetModel): HTMLElement {
   }
 
   if (model.hasLimit) {
-    parts.push(`${model.remaining} ${model.currency} left`);
+    parts.push(model.remaining === null
+      ? "Remaining cannot be guaranteed (unknown exposure)"
+      : `${model.remaining} ${model.currency} left against known exposure`);
   } else {
     parts.push(`No budget · ${model.jobCount === 0 ? "no spend yet" : `${model.spent} ${model.currency} spent`}`);
   }
@@ -29,12 +31,15 @@ export function renderBudgetSummary(model: BudgetModel): HTMLElement {
     parts.push(`${model.committed} ${model.currency} committed`);
   }
   if (model.unknownJobs > 0) {
-    parts.push(model.unknownJobs === 1 ? "1 unverified/unknown-cost job · paid dispatch blocked" : `${model.unknownJobs} unverified/unknown-cost jobs · paid dispatch blocked`);
+    parts.push(`${model.unknownJobs} unverified/unknown-cost ${model.unknownJobs === 1 ? "job" : "jobs"}`);
+  }
+  if (model.unknownExposureJobs > 0) {
+    parts.push(`${model.unknownExposureJobs} unknown exposure ${model.unknownExposureJobs === 1 ? "job" : "jobs"}${model.hardStop && model.hasLimit ? " · strict paid dispatch blocked" : " · exposure not bounded"}`);
   }
   if (model.overLimit) {
     parts.push(model.hardStop ? "over hard-stop limit" : "over budget");
   }
-  parts.push("Accounted jobs only; LLM/chat costs are not included. Chat requests are blocked until budget enforcement is wired.");
+  parts.push("Accounted jobs only; LLM/chat costs are not included; chat is not budget-enforced.");
   line.textContent = parts.join(" · ");
   if (model.overLimit) line.classList.add("studio-budget-over");
   return line;

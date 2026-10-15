@@ -1847,6 +1847,7 @@ Here is the action:
             limit_minor: Some(10),
             warning_at_minor: None,
             hard_stop: true,
+            policy: None,
         });
         assert_eq!(aggregate_route_gate(&state, [6]), SpendGate::Allow);
         assert_eq!(aggregate_route_gate(&state, [6, 5]), SpendGate::Blocked);

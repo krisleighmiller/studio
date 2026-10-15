@@ -812,10 +812,20 @@ async function loadLibrary(more: boolean): Promise<void> {
   }
 }
 
-async function authorizeVoiceSpend(_operation: string, _model: string, _input: string, _characters: number): Promise<{ projectRoot: string; confirmation: string }> {
-  // No provider-backed account-specific USD maximum is available. An invoice,
-  // checkbox or user-entered cap cannot enforce a project-wide hard spending bound.
-  throw new Error("Paid voice requests are blocked: no machine-verifiable account-specific USD upper bound is available. No provider request was sent.");
+async function authorizeVoiceSpend(operation: string, model: string, input: string, _characters: number): Promise<{ projectRoot: string; confirmation: string }> {
+  const projectRoot = hostProjectRoot();
+  if (!projectRoot) throw new Error("A saved project is required for paid voice requests.");
+  type VoiceQuote = { policy: "approval_required" | "warn_only"; requestHash: string; ledgerRevision: string | null; disclosure: string };
+  const request = { projectRoot, operation, model, input };
+  const quote = await invoke<VoiceQuote>("elevenlabs_quote_voice_spend", request);
+  const warning = `${quote.disclosure}\n\nThis ${operation} request has no verified USD maximum. The provider may charge more than the project budget. Continue?`;
+  if (!window.confirm(warning)) throw new Error("Voice request cancelled; no provider request was sent.");
+  if (quote.policy === "warn_only") return { projectRoot, confirmation: "" };
+  if (quote.policy !== "approval_required" || !quote.ledgerRevision) throw new Error("Voice approval quote is incomplete.");
+  const confirmation = await invoke<string>("elevenlabs_confirm_unbounded_voice_spend", {
+    ...request, requestHash: quote.requestHash, ledgerRevision: quote.ledgerRevision,
+  });
+  return { projectRoot, confirmation };
 }
 
 async function previewLibraryVoice(voiceId: string): Promise<void> {
@@ -830,10 +840,11 @@ async function previewLibraryVoice(voiceId: string): Promise<void> {
     if (voice.previewUrl) {
       payload = await invoke("elevenlabs_download_preview_url", { url: voice.previewUrl });
     } else {
+      const text = sampleText;
       payload = await invoke("elevenlabs_tts_preview", {
         voiceId,
-        text: sampleText,
-        ...await authorizeVoiceSpend("elevenlabs_tts_preview", "eleven_multilingual_v2", JSON.stringify({ text: sampleText, voice_id: voiceId }), [...sampleText].length),
+        text,
+        ...await authorizeVoiceSpend("elevenlabs_tts_preview", "eleven_multilingual_v2", JSON.stringify({ text: text.trim(), voice_id: voiceId }), [...text].length),
       });
     }
     if (selectedLibraryId !== voiceId) {
@@ -865,9 +876,10 @@ async function saveLibraryVoice(voiceId: string): Promise<void> {
     selectedLibraryId = voiceId;
     busy = true;
     renderVoicePanel();
+    const text = sampleText;
     const payload = await invoke<{ audioBase64: string; mediaType: string }>(
       "elevenlabs_tts_preview",
-      { voiceId, text: sampleText, ...await authorizeVoiceSpend("elevenlabs_tts_preview", "eleven_multilingual_v2", JSON.stringify({ text: sampleText, voice_id: voiceId }), [...sampleText].length) },
+      { voiceId, text, ...await authorizeVoiceSpend("elevenlabs_tts_preview", "eleven_multilingual_v2", JSON.stringify({ text: text.trim(), voice_id: voiceId }), [...text].length) },
     );
     const saved = await invoke<SavedVoiceProfile>("voice_save_library_voice", {
       request: {

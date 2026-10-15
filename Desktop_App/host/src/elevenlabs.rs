@@ -56,6 +56,37 @@ pub fn elevenlabs_confirm_voice_spend(
     )
 }
 
+pub fn elevenlabs_quote_voice_spend(
+    project_root: String,
+    operation: String,
+    model: String,
+    input: String,
+) -> Result<crate::voice_spend::VoiceQuote, String> {
+    let root =
+        crate::session::authorize_user_path(&project_root, crate::project_path::PathIntent::Write)?;
+    crate::voice_spend::quote(&root, &operation, &model, &input)
+}
+
+pub fn elevenlabs_confirm_unbounded_voice_spend(
+    project_root: String,
+    operation: String,
+    model: String,
+    input: String,
+    request_hash: String,
+    ledger_revision: String,
+) -> Result<String, String> {
+    let root =
+        crate::session::authorize_user_path(&project_root, crate::project_path::PathIntent::Write)?;
+    crate::voice_spend::confirm_unbounded(
+        &root,
+        &operation,
+        &model,
+        &input,
+        &request_hash,
+        &ledger_revision,
+    )
+}
+
 fn error_body(status: reqwest::StatusCode, body: &str) -> String {
     let detail = serde_json::from_str::<Value>(body)
         .ok()

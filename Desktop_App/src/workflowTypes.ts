@@ -413,7 +413,9 @@ export type JobRecord = {
     source: "manual_evidence_review";
     evidence_reference: string;
     review_note: string;
-    provider_outcome: "charged" | "not_charged";
+    /** Reported by a reviewer; legacy serialized data used provider_outcome. */
+    reported_outcome?: "charged" | "not_charged";
+    provider_outcome?: "charged" | "not_charged";
     reviewed_at: string;
   } | null;
 };

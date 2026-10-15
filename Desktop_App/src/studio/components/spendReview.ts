@@ -18,9 +18,9 @@ export function renderSpendReview(
   const panel = document.createElement("section");
   panel.className = "studio-spend-review";
   const heading = document.createElement("h3");
-  heading.textContent = "Unsettled paid media · manual evidence review";
+  heading.textContent = "Paid media · unknown or manually reviewed spend";
   const disclosure = document.createElement("p");
-  disclosure.textContent = "Provider verification is unavailable here. Review attributable provider billing/history evidence yourself. Entering a number does not verify a charge; this manual accounting decision is recorded with its evidence and may unblock retry. Unknown cost blocks new paid work.";
+  disclosure.textContent = "Provider verification is unavailable here. This is user-entered accounting only: a reference or zero amount cannot prove a provider outcome, clear the unknown-spend gate, or enable retry. Paid dispatch stays blocked after manual review. Check provider billing/history outside Studio.";
   const refresh = document.createElement("button");
   refresh.type = "button";
   refresh.textContent = "Load / refresh unsettled jobs";
@@ -29,7 +29,7 @@ export function renderSpendReview(
   if (!list) return panel;
   if (!list.jobs.length) {
     const empty = document.createElement("p");
-    empty.textContent = "No unsettled paid jobs.";
+    empty.textContent = "No unknown or manually reviewed paid jobs.";
     panel.append(empty);
   }
   for (const job of list.jobs) {
@@ -37,6 +37,13 @@ export function renderSpendReview(
     const label = document.createElement("p");
     label.textContent = `${job.id} · ${job.provider ?? "unknown provider"} · ${job.kind} · ${job.status ?? "unknown"} · estimate ${minorToMoney(job.estimated_cost_minor)} ${job.currency ?? "?"}. ${job.error ?? ""}`;
     group.append(label);
+    if (job.reconciliation) {
+      const accounting = document.createElement("p");
+      accounting.textContent = `Manual accounting ${minorToMoney(job.cost_minor)} ${job.currency ?? "?"} · reviewer-reported ${job.reconciliation.reported_outcome ?? job.reconciliation.provider_outcome ?? "unknown"} · reference ${job.reconciliation.evidence_reference}. Not provider-verified; dispatch and retry remain blocked.`;
+      group.append(accounting);
+      panel.append(group);
+      continue;
+    }
     // A running or pending job has not yet reached a reviewable outcome.
     if (job.status !== "failed" && job.status !== "completed") {
       panel.append(group);
@@ -48,8 +55,8 @@ export function renderSpendReview(
     amount.setAttribute("aria-label", `Actual charge for ${job.id}`);
     amount.required = true;
     const outcome = document.createElement("select");
-    outcome.setAttribute("aria-label", `Provider outcome for ${job.id}`);
-    for (const [value, text] of [["", "Confirm provider outcome"], ["charged", "Charged"], ["not_charged", "Not charged"]]) {
+    outcome.setAttribute("aria-label", `Reviewer-reported outcome for ${job.id}`);
+    for (const [value, text] of [["", "Report outcome (not verified)"], ["charged", "Reported charged"], ["not_charged", "Reported not charged"]]) {
       const option = document.createElement("option"); option.value = value; option.textContent = text; outcome.append(option);
     }
     outcome.required = true;

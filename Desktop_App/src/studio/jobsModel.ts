@@ -121,9 +121,13 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
   const estimate = money(job.estimated_cost_minor);
   const actual = money(job.cost_minor);
   const currency = knownText(job.currency);
-  const retry = job.retry_of ? `of ${job.retry_of}` : "unknown";
+  const retry = job.retry_of
+    ? `of ${job.retry_of} · further retry unsupported (provider outcome unverified; original request unavailable)`
+    : job.status === "failed" && job.spend_category
+      ? "Unsupported · provider outcome unverified; original request unavailable"
+      : "unknown";
   const reconciliation = job.reconciliation
-    ? `Manual evidence review (${job.reconciliation.provider_outcome}; ref ${job.reconciliation.evidence_reference}; ${job.reconciliation.reviewed_at}) — not independently provider-verified`
+    ? `Manual accounting (reviewer-reported ${job.reconciliation.reported_outcome ?? job.reconciliation.provider_outcome ?? "unknown"}; ref ${job.reconciliation.evidence_reference}; ${job.reconciliation.reviewed_at}) — not independently provider-verified; paid generation remains blocked`
     : "No recorded reconciliation";
   const cost = `estimate ${estimate} · actual ${actual} · currency ${currency}`;
   return {

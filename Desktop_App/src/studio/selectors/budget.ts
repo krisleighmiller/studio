@@ -98,12 +98,14 @@ function settle(jobs: JobRecord[], currency: string): Settled {
       if (isMinor(job.estimated_cost_minor)) committed += job.estimated_cost_minor;
       else unknown += 1;
     } else if (status === "completed") {
+      if ((job.spend_category || job.provider) && isMinor(job.cost_minor)) unknown += 1;
       if (isMinor(job.cost_minor)) completed += job.cost_minor as number;
       else {
         unknown += 1;
         if (isMinor(job.estimated_cost_minor)) committed += job.estimated_cost_minor;
       }
     } else if (status === "failed" || status === "cancelled") {
+      if ((job.spend_category || job.provider) && isMinor(job.cost_minor)) unknown += 1;
       if (isMinor(job.cost_minor)) failed += job.cost_minor as number;
       else unknown += 1;
     }

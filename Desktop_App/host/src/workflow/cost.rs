@@ -294,16 +294,33 @@ pub fn compute_ledger(state: &ProjectState) -> BudgetLedger {
                     unknown += 1;
                 }
             }
-            JobStatus::Completed => match job.cost_minor.filter(|amount| *amount >= 0) {
-                Some(cost) => completed = completed.saturating_add(cost),
-                None => {
+            JobStatus::Completed => {
+                // A manually entered amount contributes to the accounting total,
+                // but does not establish a verified provider outcome. No adapter
+                // currently supplies independent verification for spend jobs.
+                if (job.provider.is_some() || job.spend_category.is_some())
+                    && job.cost_minor.is_some_and(|amount| amount >= 0)
+                {
                     unknown += 1;
-                    if let Some(estimate) = job.estimated_cost_minor.filter(|amount| *amount >= 0) {
-                        unsettled = unsettled.saturating_add(estimate);
+                }
+                match job.cost_minor.filter(|amount| *amount >= 0) {
+                    Some(cost) => completed = completed.saturating_add(cost),
+                    None => {
+                        unknown += 1;
+                        if let Some(estimate) =
+                            job.estimated_cost_minor.filter(|amount| *amount >= 0)
+                        {
+                            unsettled = unsettled.saturating_add(estimate);
+                        }
                     }
                 }
-            },
+            }
             JobStatus::Failed | JobStatus::Cancelled => {
+                if (job.provider.is_some() || job.spend_category.is_some())
+                    && job.cost_minor.is_some_and(|amount| amount >= 0)
+                {
+                    unknown += 1;
+                }
                 match job.cost_minor.filter(|amount| *amount >= 0) {
                     Some(cost) => failed = failed.saturating_add(cost),
                     None => unknown += 1,
@@ -511,7 +528,7 @@ mod tests {
         assert_eq!(ledger.completed_minor, 2_000);
         assert_eq!(ledger.failed_minor, 800);
         assert_eq!(ledger.remaining_minor, Some(6_200));
-        assert_eq!(ledger.unknown_cost_jobs, 1);
+        assert_eq!(ledger.unknown_cost_jobs, 4);
         assert!(ledger.hard_stop);
     }
 
@@ -532,7 +549,7 @@ mod tests {
         assert_eq!(ledger.committed_minor, 100);
         assert_eq!(ledger.unsettled_estimated_minor, 400);
         assert_eq!(ledger.completed_minor, 200);
-        assert_eq!(ledger.unknown_cost_jobs, 1);
+        assert_eq!(ledger.unknown_cost_jobs, 2);
         assert_eq!(ledger.remaining_minor, Some(300));
         assert_eq!(gate_spend(&state, 301), SpendGate::Blocked);
     }
@@ -616,7 +633,7 @@ mod tests {
         let ledger = compute_ledger(&state);
         assert_eq!(ledger.remaining_minor, None);
         assert_eq!(ledger.completed_minor, 123);
-        assert_eq!(ledger.unknown_cost_jobs, 1);
+        assert_eq!(ledger.unknown_cost_jobs, 2);
         assert_eq!(ledger.currency, "USD");
     }
 

@@ -2,7 +2,8 @@
 use crate::workflow::cost::{self, Price, SpendGate};
 use crate::workflow::import;
 use crate::workflow::state::{
-    JobRecord, JobStatus, ProjectState, SpendConfirmation, SpendReconciliation,
+    JobRecord, JobStatus, ProjectState, SpendConfirmation, SpendEvidenceProvenance,
+    SpendReconciliation,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -176,7 +177,7 @@ fn confirm_with_quote(
 }
 
 /// Category is a data string; every attempt has an independent job and reservation.
-/// A retry requires a reconciled failed job of the same scope; the old cost remains in the ledger.
+/// Retry is unavailable until a provider-backed verifier and reconstructible request exist.
 pub fn run_scoped<F>(
     root: &Path,
     provider: &str,
@@ -192,6 +193,9 @@ where
     F: FnOnce() -> Result<String, String>,
 {
     valid_scope(category, operation, model)?;
+    if retry_of.is_some() {
+        return Err("retry unsupported: provider outcome is not independently verified and original request is not stored".into());
+    }
     let (currency, minor) = price(provider, capability)?;
     let _lock = import::lock_project(root)?;
     let mut state = persisted(root)?;
@@ -227,23 +231,9 @@ where
         }
         SpendGate::NoLimit | SpendGate::Allow | SpendGate::Warn => {}
     }
-    if let Some(previous) = retry_of {
-        let old = state
-            .jobs
-            .iter()
-            .find(|job| job.id == previous)
-            .ok_or("retry source job not found")?;
-        if old.status != JobStatus::Failed
-            || old.cost_minor.is_none()
-            || old.reconciliation.is_none()
-            || old.provider.as_deref() != Some(provider)
-            || old.spend_category.as_deref() != Some(category)
-            || old.kind != operation
-            || old.model.as_deref() != Some(model)
-        {
-            return Err("retry requires a reconciled failed attempt with matching scope".into());
-        }
-    }
+    // Never infer a verified outcome from a job's recorded cost or user text.
+    // A verified retry requires a provider adapter and persisted nonsecret input;
+    // neither exists here, so no retry lineage can be authorized.
     let id = format!(
         "spend-{}-{}-{}",
         std::process::id(),
@@ -320,7 +310,10 @@ pub fn unsettled_jobs(root: &Path) -> Result<UnsettledJobs, String> {
         jobs: state
             .jobs
             .iter()
-            .filter(|job| job.spend_category.is_some() && job.cost_minor.is_none())
+            .filter(|job| {
+                job.spend_category.is_some()
+                    && (job.cost_minor.is_none() || job.reconciliation.is_some())
+            })
             .cloned()
             .collect(),
     })
@@ -378,10 +371,10 @@ pub fn reconcile_job(
     }
     job.cost_minor = Some(actual_minor);
     job.reconciliation = Some(SpendReconciliation {
-        source: "manual_evidence_review".into(),
+        source: SpendEvidenceProvenance::ManualEvidenceReview,
         evidence_reference: evidence_reference.trim().into(),
         review_note: review_note.trim().into(),
-        provider_outcome: outcome.into(),
+        reported_outcome: outcome.into(),
         reviewed_at: crate::workflow::state::utc_now(),
     });
     import::persist_state_locked(root, &state).map(|_| ())
@@ -390,7 +383,7 @@ pub fn reconcile_job(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::state::ProjectBudget;
+    use crate::workflow::state::{JobStatus, ProjectBudget};
     use std::sync::atomic::AtomicUsize;
 
     fn setup(limit: i64, hard_stop: bool) -> tempfile::TempDir {
@@ -554,10 +547,17 @@ mod tests {
         assert!(reviewed(dir.path(), &id, -1).is_err());
         reviewed(dir.path(), &id, 7).unwrap();
         assert!(reviewed(dir.path(), &id, 0).is_err());
-        image(dir.path(), None, Some(&id), || Ok("ok".into())).unwrap();
+        let error = image(dir.path(), None, Some(&id), || panic!("retry dispatched")).unwrap_err();
+        assert!(error.contains("retry unsupported"), "{error}");
         let state = persisted(dir.path()).unwrap();
-        assert_eq!(state.jobs[1].retry_of.as_deref(), Some(id.as_str()));
+        assert_eq!(state.jobs.len(), 1);
         assert_eq!(cost::compute_ledger(&state).failed_minor, 7);
+        assert_eq!(cost::compute_ledger(&state).unknown_cost_jobs, 1);
+        assert!(image(dir.path(), None, None, || panic!(
+            "new dispatch after manual review"
+        ))
+        .unwrap_err()
+        .contains("unknown outstanding spend"));
     }
     #[test]
     fn stale_revision_and_missing_evidence_cannot_reconcile_or_retry() {
@@ -600,14 +600,72 @@ mod tests {
         assert_eq!(job.cost_minor, Some(0));
         assert_eq!(
             job.reconciliation.as_ref().unwrap().source,
-            "manual_evidence_review"
+            SpendEvidenceProvenance::ManualEvidenceReview
         );
-        image(dir.path(), None, Some(&id), || Ok("sent".into())).unwrap();
         assert_eq!(
-            persisted(dir.path()).unwrap().jobs[1].retry_of.as_deref(),
-            Some(id.as_str())
+            job.reconciliation.as_ref().unwrap().reported_outcome,
+            "not_charged"
         );
+        assert_eq!(
+            cost::compute_ledger(&persisted(dir.path()).unwrap()).unknown_cost_jobs,
+            1
+        );
+        assert!(
+            image(dir.path(), None, Some(&id), || panic!("retry dispatched"))
+                .unwrap_err()
+                .contains("retry unsupported")
+        );
+        assert!(
+            image(dir.path(), None, None, || panic!("new request dispatched"))
+                .unwrap_err()
+                .contains("unknown outstanding spend")
+        );
+        assert_eq!(persisted(dir.path()).unwrap().jobs.len(), 1);
     }
+    #[test]
+    fn fabricated_reference_and_zero_never_verify_outcome_or_authorize_spend() {
+        let dir = setup(100, true);
+        image(dir.path(), None, None, || Err("connection lost".into())).unwrap_err();
+        let id = persisted(dir.path()).unwrap().jobs[0].id.clone();
+        let rev = unsettled_jobs(dir.path()).unwrap().ledger_revision;
+        reconcile_job(
+            dir.path(),
+            &id,
+            0,
+            "USD",
+            &rev,
+            "not_charged",
+            "fake-provider-reference-000",
+            "I cannot verify this reference",
+            "I reviewed the provider evidence and accept this manual accounting entry",
+        )
+        .unwrap();
+        let state = persisted(dir.path()).unwrap();
+        let entry = state.jobs[0].reconciliation.as_ref().unwrap();
+        assert_eq!(entry.source, SpendEvidenceProvenance::ManualEvidenceReview);
+        assert_eq!(entry.reported_outcome, "not_charged");
+        assert_eq!(state.jobs[0].cost_minor, Some(0));
+        assert_eq!(cost::compute_ledger(&state).unknown_cost_jobs, 1);
+        assert!(image(dir.path(), None, Some(&id), || panic!("retry sent"))
+            .unwrap_err()
+            .contains("retry unsupported"));
+        assert!(
+            image(dir.path(), None, None, || panic!("paid request sent"))
+                .unwrap_err()
+                .contains("unknown outstanding spend")
+        );
+        assert!(quote_scoped(
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "image.text_to_image",
+            "model"
+        )
+        .is_err());
+        assert_eq!(persisted(dir.path()).unwrap().jobs.len(), 1);
+    }
+
     #[test]
     fn unknown_price_and_missing_project_never_dispatch() {
         let dir = tempfile::tempdir().unwrap();
@@ -752,7 +810,7 @@ mod tests {
         assert_eq!(persisted(dir.path()).unwrap().jobs[0].cost_minor, Some(7));
         assert!(image(dir.path(), None, None, || panic!("sent"))
             .unwrap_err()
-            .contains("hard stop"));
+            .contains("unknown outstanding spend"));
     }
 
     #[test]

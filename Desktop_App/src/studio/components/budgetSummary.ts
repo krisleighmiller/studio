@@ -29,7 +29,7 @@ export function renderBudgetSummary(model: BudgetModel): HTMLElement {
     parts.push(`${model.committed} ${model.currency} committed`);
   }
   if (model.unknownJobs > 0) {
-    parts.push(model.unknownJobs === 1 ? "1 unknown-cost job" : `${model.unknownJobs} unknown-cost jobs`);
+    parts.push(model.unknownJobs === 1 ? "1 unverified/unknown-cost job · paid dispatch blocked" : `${model.unknownJobs} unverified/unknown-cost jobs · paid dispatch blocked`);
   }
   if (model.overLimit) {
     parts.push(model.hardStop ? "over hard-stop limit" : "over budget");

@@ -1295,17 +1295,27 @@ pub struct JobRecord {
     /// Budget category (e.g. media, voice). Missing on legacy jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend_category: Option<String>,
-    /// Manual evidence review, not a provider-verified charge. Never infer verification from cost_minor.
+    /// User-entered accounting, not provider verification. Never infer verification from cost_minor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconciliation: Option<SpendReconciliation>,
 }
 
+/// Only manual provenance is supported. Provider verification requires an adapter
+/// that fetches attributable provider evidence, not a serialized user assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendEvidenceProvenance {
+    ManualEvidenceReview,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpendReconciliation {
-    pub source: String,
+    pub source: SpendEvidenceProvenance,
     pub evidence_reference: String,
     pub review_note: String,
-    pub provider_outcome: String,
+    /// The reviewer's reported outcome; NOT an independently verified provider outcome.
+    #[serde(alias = "provider_outcome")]
+    pub reported_outcome: String,
     pub reviewed_at: String,
 }
 

@@ -46,11 +46,32 @@ export function createSpendConfirmationHandler(deps: {
   status: (message: string) => void;
   onSubmitted?: (result: unknown) => void | Promise<void>;
 }): (payload: unknown) => Promise<void> {
-  let pending = false;
-  return async (payload) => {
-    const request = parseRequest(payload);
-    if (!request || pending || deps.projectRoot() !== request.projectRoot) return;
-    pending = true;
+  // Authorization events can arrive while a previous dialog is still open.
+  // Never drop them silently: distinct requests queue (bounded), duplicates
+  // and overflow are rejected with an observable status and a resume path.
+  const MAX_QUEUED = 4;
+  const queue: Request[] = [];
+  const seen = new Set<string>();
+  let active = false;
+
+  const keyOf = (request: Request): string => {
+    // Bounded quotes share a ledger revision until something settles, so the
+    // revision alone cannot distinguish two different operations quoted at
+    // the same revision. The request args (model, params, save_path) are the
+    // operation's identity for dedup purposes: an exact re-emission of the
+    // same event serializes identically, a distinct operation does not.
+    const identity =
+      "requestHash" in request.quote ? request.quote.requestHash : request.quote.ledgerRevision;
+    let argsKey = "";
+    try {
+      argsKey = JSON.stringify(request.args ?? null) ?? "";
+    } catch {
+      argsKey = "<unserializable>";
+    }
+    return `${request.projectRoot}|${request.operation}|${request.model}|${identity}|${argsKey}`;
+  };
+
+  async function processOne(request: Request): Promise<void> {
     const { quote, projectRoot, args, provider, operation, model } = request;
     const unbounded = "requestHash" in quote;
     let dispatchAttempted = false;
@@ -64,6 +85,7 @@ export function createSpendConfirmationHandler(deps: {
       );
       if (!accepted || deps.projectRoot() !== projectRoot) {
         if (!accepted) deps.status("Paid generation was not authorized; no provider request was sent.");
+        else deps.status(`Paid generation (${operation} · ${model}) was dropped: the open project changed while its authorization was pending. It was not dispatched.`);
         return;
       }
       const token = unbounded ?
@@ -92,11 +114,61 @@ export function createSpendConfirmationHandler(deps: {
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      if (!dispatchAttempted && /stale/i.test(detail)) {
+        // Another completed operation changed the ledger revision after this
+        // quote was issued. The host rejected the quote; nothing was charged
+        // or dispatched, and only a fresh quote can proceed.
+        deps.status(`Paid generation (${request.operation} · ${request.model}) was NOT dispatched: its authorization expired when another operation settled first. Re-run the operation from its Studio surface (Scene Look → Generate still → Approve) to get a fresh quote.`);
+        return;
+      }
       deps.status(dispatchAttempted
         ? `Paid generation outcome is uncertain: ${detail}. Do not retry automatically; inspect Jobs and check provider status when a prediction ID is available.`
         : `Paid generation blocked before dispatch: ${detail}`);
-    } finally {
-      pending = false;
     }
+  }
+
+  async function drain(): Promise<void> {
+    if (active) return;
+    active = true;
+    try {
+      for (let next = queue.shift(); next; next = queue.shift()) {
+        // Revalidate before dispatch: a queued quote is only ever presented
+        // against the project it was issued for, and confirm_spend itself
+        // rejects a stale ledger revision or reused token.
+        if (deps.projectRoot() !== next.projectRoot) {
+          seen.delete(keyOf(next));
+          deps.status(`Paid generation (${next.operation} · ${next.model}) was discarded: it belongs to a different project. Re-run it from that project.`);
+          continue;
+        }
+        await processOne(next);
+        seen.delete(keyOf(next));
+      }
+    } finally {
+      active = false;
+    }
+  }
+
+  return (payload) => {
+    const request = parseRequest(payload);
+    if (!request) return Promise.resolve();
+    if (deps.projectRoot() !== request.projectRoot) {
+      deps.status(`Ignored a paid-generation authorization for a different project (${request.operation}); nothing was dispatched.`);
+      return Promise.resolve();
+    }
+    const key = keyOf(request);
+    if (seen.has(key)) {
+      deps.status(`Ignored a duplicate paid-generation authorization event (${request.operation} · ${request.model}); the original is still being handled.`);
+      return Promise.resolve();
+    }
+    if (queue.length >= MAX_QUEUED) {
+      deps.status(`Paid-generation authorization queue is full; ${request.operation} · ${request.model} was NOT dispatched and nothing was charged. Re-trigger the operation from its Studio surface once the current authorizations settle.`);
+      return Promise.resolve();
+    }
+    seen.add(key);
+    queue.push(request);
+    if (active) {
+      deps.status(`Queued a paid-generation authorization (${request.operation} · ${request.model}); it will be presented after the current one settles.`);
+    }
+    return drain();
   };
 }

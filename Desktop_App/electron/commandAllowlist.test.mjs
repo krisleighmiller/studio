@@ -23,3 +23,27 @@ test("the allowlist remains deny-by-default", () => {
   assert.equal(HOST_COMMANDS.has("arbitrary_host_command"), false);
   assert.equal(HOST_COMMANDS.has("shell:openPath"), false);
 });
+
+test("Phase 4 workflow commands stay allowlisted (removal must fail CI)", () => {
+  for (const command of [
+    // Chain: approval head, dependent render, continuity, assembly, reconcile, QC.
+    "workflow_approve_intent",
+    "workflow_approve_animatic",
+    "workflow_set_visual_source",
+    "workflow_prepare_render",
+    "workflow_bind_continuity_frame",
+    "workflow_set_take_status",
+    "workflow_prepare_assemble",
+    "workflow_check_deliverable",
+    // Desk plumbing: import, and workflow_status which reconciles job state
+    // from on-disk evidence on read.
+    "workflow_import",
+    "workflow_status",
+    // Review-export opening reaches the app file-open path through
+    // classify_file; opening a media tab also reads it.
+    "classify_file",
+    "read_media_bytes",
+  ]) {
+    assert.equal(HOST_COMMANDS.has(command), true, `${command} must stay allowlisted for Phase 4`);
+  }
+});

@@ -3,7 +3,7 @@
 #[cfg(test)]
 use crate::workflow::{
     cost, import,
-    state::{JobRecord, JobStatus, SpendConfirmation},
+    state::{JobRecord, SpendConfirmation},
 };
 use crate::workflow::{
     spend,
@@ -315,7 +315,7 @@ fn run_verified(
     job.model = Some(route);
     job.currency = Some("USD".into());
     job.estimated_cost_minor = Some(minor);
-    job.status = JobStatus::Running;
+    job.mark_running("dispatching voice request");
     state.jobs.push(job);
     import::persist_state_locked(root, &state)?;
     let result = dispatch();
@@ -483,6 +483,12 @@ mod tests {
         let state = persisted(root.path()).unwrap();
         assert_eq!(state.jobs[0].estimated_cost_minor, Some(25));
         assert_eq!(state.jobs[0].cost_minor, None);
+        // Minimum job metadata: the voice dispatch recorded real lifecycle facts.
+        assert!(state.jobs[0].created_at.is_some());
+        assert!(state.jobs[0].started_at.is_some());
+        assert!(state.jobs[0].completed_at.is_some());
+        assert_eq!(state.jobs[0].progress.as_deref(), Some("completed"));
+        assert!(state.jobs[0].attempts[0].started_at.is_some());
     }
     #[test]
     fn ceiling_is_not_inferred_from_registry_or_generic_rate() {

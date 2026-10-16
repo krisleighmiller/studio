@@ -1,4 +1,19 @@
 import type { AssetRecord, ProjectState, SceneRecord, SceneReport } from "../../workflowTypes";
+
+/**
+ * Compose a scene heading without duplicating a "Scene N" prefix that the
+ * stored title already carries (imported projects often store titles like
+ * "Scene 1 — The last train"). Returns "Scene N — <title without prefix>".
+ */
+export function sceneHeadingTitle(id: number, title: string): string {
+  const trimmed = title.trim();
+  if (new RegExp(`^Scene\\s+${id}\\s*$`, "i").test(trimmed)) return `Scene ${id}`;
+  const stripped = trimmed
+    .replace(new RegExp(`^Scene\\s+${id}\\s*[—–\\-:]\\s*`, "i"), "")
+    .trim();
+  if (!stripped) return trimmed || `Scene ${id}`;
+  return `Scene ${id} — ${stripped}`;
+}
 import { requirementBlocks } from "./project";
 
 export type SceneSummary = {

@@ -228,10 +228,58 @@ pub fn dispatch(
                 .ok_or("Missing mediaArgs")?;
             // Never accept a caller-supplied spend token inside mediaArgs.
             media_args["spend_confirmation"] = json!(token);
-            match media::run_media_tool(&operation, &media_args, Some(&root), app) {
-                Some(result) => to_value(result),
-                None => Err("Unsupported media operation".into()),
+            let result = match media::run_media_tool(&operation, &media_args, Some(&root), app) {
+                Some(result) => result,
+                None => return Err("Unsupported media operation".into()),
+            };
+            // The spend gate ends the specialist turn that requested this
+            // operation, so the confirmed replay must run the same
+            // post-save registration the specialist would have. These hooks
+            // only register an output that already exists on disk — they
+            // never submit another provider request, they dedupe on path,
+            // and they validate the project-relative location.
+            let save_path_for_failure = media_args
+                .get("save_path")
+                .or_else(|| media_args.get("savePath"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let text = match result {
+                Ok(text) => text,
+                Err(error) => {
+                    // Terminal provider failure: fail the pending scene-look
+                    // job so it never hangs as "pending" on a dead prediction.
+                    if error.starts_with("provider-failed:") {
+                        if let Some(save_path) = &save_path_for_failure {
+                            let _ = workflow::look::on_still_failed(
+                                Some(&root),
+                                save_path,
+                                &error,
+                            );
+                        }
+                    }
+                    return Err(error);
+                }
+            };
+            let save_path = media_args
+                .get("save_path")
+                .or_else(|| media_args.get("savePath"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let mut out = text;
+            if let Some(save_path) = save_path {
+                for note in [
+                    workflow::look::on_wardrobe_plate_saved(Some(&root), &save_path),
+                    workflow::look::on_still_saved(Some(&root), &save_path),
+                    workflow::start_frames::on_still_saved(Some(&root), &save_path),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    out.push_str("\n\n");
+                    out.push_str(&note);
+                }
             }
+            Ok(json!(out))
         }
         "media_recovery_status" => to_value(media::recovery_status(
             opt_string(args, "projectRoot").as_deref(),
@@ -445,6 +493,15 @@ pub fn dispatch(
         "workflow_delete_start_frame" => workflow::cmd_delete_start_frame(args),
         "director_cancel" => Ok(json!({ "cancelled": true })),
         "ping" => Ok(json!("pong")),
+        // Build identity: lets test harnesses prove which binary the app
+        // loaded. `mock_provider` is true only in builds compiled with
+        // `--features mock-provider`; an ordinary stale binary cannot
+        // masquerade as the mock-enabled build because the flag is compiled
+        // in, not read from the environment.
+        "host_build_info" => Ok(json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "mock_provider": cfg!(feature = "mock-provider"),
+        })),
         other => Err(format!("Unknown command: {other}")),
     }
 }

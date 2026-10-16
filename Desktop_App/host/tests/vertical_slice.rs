@@ -152,6 +152,12 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
     );
     let output = job.output_path.clone().unwrap();
     assert_eq!(output, "Final/Scene1_master.mp4");
+    // Minimum job metadata: the assemble job records creation and scene scope.
+    assert!(job.created_at.is_some());
+    assert_eq!(
+        job.scope.as_ref().map(|scope| scope.kind.as_str()),
+        Some("scene")
+    );
     fs::create_dir_all(root.join("Final")).unwrap();
     fs::write(root.join(&output), b"master").unwrap();
 

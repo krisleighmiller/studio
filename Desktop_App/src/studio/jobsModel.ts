@@ -279,7 +279,9 @@ function locateJob(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[])
   const label = scene
     ? cutNumber != null
       ? `Scene ${scene.id} · Cut ${cutNumber}`
-      : `Scene ${scene.id}${scene.title.trim() ? ` ${scene.title.trim()}` : ""}`
+      : // The scene title carries its own identity (e.g. "Scene 1 — …");
+        // prefixing "Scene ${id}" duplicated it in job rows.
+        scene.title.trim() || `Scene ${scene.id}`
     : "";
   return { scene, cut: cutNumber, lookSlotId, label, approval };
 }

@@ -9,8 +9,8 @@ use crate::director_actions::{
 use crate::scene_plan::assets::name_tokens;
 use crate::workflow::import;
 use crate::workflow::state::{
-    AssetRecord, AssetRole, AssetStatus, CharacterRecord, JobRecord, LookBoard, LookSlot,
-    ProjectState, SceneIntent, SceneRecord,
+    AssetRecord, AssetRole, AssetStatus, CharacterRecord, JobRecord, JobStatus, LookBoard,
+    LookSlot, ProjectState, SceneIntent, SceneRecord,
 };
 use serde_json::{json, Map, Value};
 use std::fs;
@@ -1438,16 +1438,35 @@ pub fn on_still_saved(project_root: Option<&str>, save_path: &str) -> Option<Str
         return None;
     }
     let mut state = import::load_state(root_path).ok()?;
+    let note = register_look_output(&mut state, root_path, save_path)?;
+    let _ = import::save_project(root_path, state);
+    Some(note)
+}
+
+/// State-level core of `on_still_saved`: registers an already-downloaded look
+/// output against the given state. Performs no file or state I/O beyond the
+/// in-memory update, so import-time recovery can call it without re-entering
+/// the load/save cycle. Idempotent: an already-registered path only completes
+/// its matching job; a second call changes nothing.
+pub(crate) fn register_look_output(
+    state: &mut ProjectState,
+    root_path: &Path,
+    save_path: &str,
+) -> Option<String> {
     let actual_path = actual_look_path(root_path, save_path)?;
     let rel = relativize(root_path, &actual_path.to_string_lossy())?;
     if !is_look_rel(&rel) {
         return None;
     }
+    // Content must actually be an image: a corrupt or partial download is
+    // rejected here rather than registered as a usable draft.
+    if crate::media_util::ensure_media_file(&actual_path).is_err() {
+        return None;
+    }
     let scene_id = scene_id_from_look_rel(&rel)?;
     let role = role_from_look_rel(&rel)?;
     if state.assets.iter().any(|a| a.path == rel) {
-        complete_matching_job(&mut state, &rel);
-        let _ = import::save_project(root_path, state);
+        complete_matching_job(state, &rel);
         return Some(format!("Look still already registered: `{rel}`."));
     }
     let parent_id = matching_slot(&state, scene_id, role).and_then(|s| {
@@ -1491,7 +1510,6 @@ pub fn on_still_saved(project_root: Option<&str>, save_path: &str) -> Option<Str
     {
         job.finish(Some(&rel), Some(&asset_id));
     }
-    let _ = import::save_project(root_path, state);
     Some(format!(
         "Registered scene look draft `{asset_id}` at `{rel}`. Approve it on the Scene Look stage."
     ))
@@ -1508,19 +1526,73 @@ fn matching_slot(state: &ProjectState, scene_id: u32, role: AssetRole) -> Option
 }
 
 fn matching_job<'a>(state: &'a ProjectState, rel: &str) -> Option<&'a JobRecord> {
-    state.jobs.iter().find(|j| {
+    // Prefer the pending job: when a retry reuses the same output stem, the
+    // live attempt must win over the older settled one.
+    state
+        .jobs
+        .iter()
+        .find(|j| {
+            j.kind == "scene_look"
+                && j.status == JobStatus::Pending
+                && j.output_path
+                    .as_deref()
+                    .is_some_and(|path| same_path_stem(path, rel))
+        })
+        .or_else(|| {
+            state.jobs.iter().find(|j| {
+                j.kind == "scene_look"
+                    && j.output_path
+                        .as_deref()
+                        .is_some_and(|path| same_path_stem(path, rel))
+            })
+        })
+}
+
+/// Terminal provider failure for a scene-look generation: fail the pending
+/// job whose output path matches. Idempotent; completed jobs are untouched.
+pub fn on_still_failed(project_root: Option<&str>, save_path: &str, error: &str) -> Option<String> {
+    let root = project_root.filter(|s| !s.trim().is_empty())?;
+    let root_path = Path::new(root);
+    if !crate::project_path::resolve(
+        crate::workflow::state::STATE_REL,
+        Some(root),
+        crate::project_path::PathIntent::Read,
+    )
+    .is_ok_and(|path| path.as_path().is_file())
+    {
+        return None;
+    }
+    let mut state = import::load_state(root_path).ok()?;
+    let rel = relativize(root_path, save_path)?;
+    let mut failed = false;
+    if let Some(job) = state.jobs.iter_mut().find(|j| {
         j.kind == "scene_look"
-            && j.output_path
+            && j.status == JobStatus::Pending
+            && j
+                .output_path
                 .as_deref()
-                .is_some_and(|path| same_path_stem(path, rel))
-    })
+                .is_some_and(|path| same_path_stem(path, &rel))
+    }) {
+        job.fail(None, error.to_string());
+        failed = true;
+    }
+    if failed {
+        let _ = import::save_project(root_path, state);
+        Some(format!("Marked scene look job failed for {rel}: {error}"))
+    } else {
+        None
+    }
 }
 
 fn complete_matching_job(state: &mut ProjectState, rel: &str) {
+    // Complete only a pending match; a settled same-stem job (older attempt,
+    // extension variant) must not absorb a new output.
     if let Some(job) = state.jobs.iter_mut().find(|j| {
-        j.output_path
-            .as_deref()
-            .is_some_and(|path| same_path_stem(path, rel))
+        j.status == JobStatus::Pending
+            && j
+                .output_path
+                .as_deref()
+                .is_some_and(|path| same_path_stem(path, rel))
     }) {
         job.finish(Some(rel), None);
     }
@@ -1902,9 +1974,11 @@ mod tests {
         import::save_project(root, state).unwrap();
         let abs = root.join(rel);
         fs::create_dir_all(abs.parent().unwrap()).unwrap();
-        fs::write(&abs, b"png").unwrap();
+        fs::write(&abs, b"\x89PNG\r\n\x1a\nrest").unwrap();
         let note = on_still_saved(Some(root.to_str().unwrap()), abs.to_str().unwrap()).unwrap();
-        assert!(note.contains("Registered scene look"));
+        // Import-time recovery may register the output before this hook runs;
+        // either phrasing confirms registration. The end state is asserted below.
+        assert!(note.to_ascii_lowercase().contains("registered"));
         let again = import::load_state(root).unwrap();
         assert_eq!(again.jobs[0].status, JobStatus::Completed);
         assert_eq!(again.assets[0].role, AssetRole::MoodReference);
@@ -1962,7 +2036,7 @@ mod tests {
         import::save_project(root, state).unwrap();
         let actual = root.join("Preproduction/Scene1/references/interior_1.jpg");
         fs::create_dir_all(actual.parent().unwrap()).unwrap();
-        fs::write(&actual, b"jpg").unwrap();
+        fs::write(&actual, b"\xff\xd8\xff\xe0rest").unwrap();
         let note = on_still_saved(Some(root.to_str().unwrap()), requested).unwrap();
         assert!(note.contains("interior_1.jpg"));
         let again = import::load_state(root).unwrap();
@@ -2130,7 +2204,7 @@ mod tests {
         ] {
             let abs = root.join(path);
             fs::create_dir_all(abs.parent().unwrap()).unwrap();
-            fs::write(&abs, b"png").unwrap();
+            fs::write(&abs, b"\x89PNG\r\n\x1a\nrest").unwrap();
         }
         let (card, _) = prepare_generate(root, &mut state, 1, "s1_look_01").unwrap();
         assert!(card.contains("Characters/Tom Vale/model_sheet/tom_closeup_front.png"));
@@ -2165,7 +2239,7 @@ mod tests {
         ] {
             let abs = root.join(path);
             fs::create_dir_all(abs.parent().unwrap()).unwrap();
-            fs::write(&abs, b"png").unwrap();
+            fs::write(&abs, b"\x89PNG\r\n\x1a\nrest").unwrap();
         }
         state.assets.push(AssetRecord {
             id: "wardrobe_lock".into(),
@@ -2259,7 +2333,7 @@ mod tests {
         ] {
             let abs = root.join(path);
             fs::create_dir_all(abs.parent().unwrap()).unwrap();
-            fs::write(&abs, b"png").unwrap();
+            fs::write(&abs, b"\x89PNG\r\n\x1a\nrest").unwrap();
         }
         state.assets.push(AssetRecord {
             id: "wardrobe_lock".into(),
@@ -2324,7 +2398,7 @@ mod tests {
         let rel = "Preproduction/Scene1/references/interior_2.png";
         let abs = root.join(rel);
         fs::create_dir_all(abs.parent().unwrap()).unwrap();
-        fs::write(&abs, b"png").unwrap();
+        fs::write(&abs, b"\x89PNG\r\n\x1a\nrest").unwrap();
         let mut state = ProjectState::new();
         state.assets.push(AssetRecord {
             id: "look_2".into(),
@@ -2399,7 +2473,7 @@ mod tests {
         let rel = "Preproduction/Scene1/references/interior_1.jpg";
         let abs = root.join(rel);
         fs::create_dir_all(abs.parent().unwrap()).unwrap();
-        fs::write(&abs, b"jpg").unwrap();
+        fs::write(&abs, b"\xff\xd8\xff\xe0rest").unwrap();
         let mut state = ProjectState::new();
         state.assets.push(AssetRecord {
             id: "look_1".into(),

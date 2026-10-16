@@ -116,6 +116,10 @@ function jobRow(row: JobRowModel, onIntent: (intent: JobsIntent) => void): HTMLE
 
   button.append(dot, copy);
   if (row.actionLabel) {
+    const action = document.createElement("span");
+    action.className = "studio-job-action";
+    action.textContent = row.actionLabel;
+    button.append(action);
     button.addEventListener("click", () => onIntent({ type: "open", jobId: row.id }));
   }
   return button;

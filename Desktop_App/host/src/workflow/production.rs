@@ -834,6 +834,17 @@ mod tests {
         assert!(writes.contains("S01C01.mp4"));
         assert_eq!(state.jobs[0].kind, "render");
         assert_eq!(state.jobs[0].status, JobStatus::Pending);
+        // Minimum job metadata: prepared-only jobs record creation, keep an
+        // honest unknown start, and carry the shot scope for the Jobs links.
+        let shot_stable = state.scene(1).unwrap().cuts[0].stable_id.clone();
+        assert!(state.jobs[0].created_at.is_some());
+        assert!(state.jobs[0].started_at.is_none());
+        let scope = state.jobs[0]
+            .scope
+            .as_ref()
+            .expect("render job carries a shot scope");
+        assert_eq!(scope.kind, "shot");
+        assert_eq!(scope.id, shot_stable);
     }
 
     #[test]

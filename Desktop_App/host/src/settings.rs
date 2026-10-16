@@ -661,8 +661,14 @@ pub fn fetch_atlas_catalog(api_key: String) -> Result<Vec<CatalogModel>, String>
         .build()
         .map_err(|error| format!("Could not build HTTP client: {error}"))?;
 
+    // Mock-provider builds must fail closed when the mock base is invalid,
+    // never fall back to the real endpoint.
+    #[cfg(feature = "mock-provider")]
+    let models_url = crate::atlas::catalog_models_url()?;
+    #[cfg(not(feature = "mock-provider"))]
+    let models_url = ATLAS_MODELS_URL.to_string();
     let response = client
-        .get(ATLAS_MODELS_URL)
+        .get(&models_url)
         .header("Authorization", format!("Bearer {key}"))
         .header("Accept", "application/json")
         .send()

@@ -95,6 +95,7 @@ const HOST_COMMANDS = new Set([
   "workflow_delete_start_frame",
   "close_project",
   "ping",
+  "host_build_info",
 ]);
 
 module.exports = { HOST_COMMANDS };

@@ -1302,12 +1302,25 @@ fn trim_scene(app: &HostCtx, scene: &ScenePlan, out: &Path) -> Result<(), String
         ];
         run_ffmpeg(&args, &format!("trim+vo scene {}", scene.id))?;
     } else {
+        // All inputs must be declared before any output option: the silent
+        // conformer's `-f lavfi -i anullsrc` previously trailed `-vf`, which
+        // ffmpeg rejects as an input option applied after output filters.
         let mut args = vec![
             "-y".into(),
             "-ss".into(),
             format!("{:.6}", scene.trim_start),
             "-i".into(),
             crate::ffmpeg_path::ffmpeg_local_arg(&scene.video)?,
+        ];
+        if !scene.has_audio_stream {
+            args.extend([
+                "-f".into(),
+                "lavfi".into(),
+                "-i".into(),
+                "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
+            ]);
+        }
+        args.extend([
             "-t".into(),
             format!("{:.6}", scene.trim_duration),
             "-vf".into(),
@@ -1316,19 +1329,11 @@ fn trim_scene(app: &HostCtx, scene: &ScenePlan, out: &Path) -> Result<(), String
             "libx264".into(),
             "-pix_fmt".into(),
             "yuv420p".into(),
-        ];
+        ]);
         if scene.has_audio_stream {
             args.extend(["-c:a".into(), "aac".into(), "-ar".into(), "48000".into()]);
         } else {
-            args.extend([
-                "-f".into(),
-                "lavfi".into(),
-                "-i".into(),
-                "anullsrc=channel_layout=stereo:sample_rate=48000".into(),
-                "-shortest".into(),
-                "-c:a".into(),
-                "aac".into(),
-            ]);
+            args.extend(["-shortest".into(), "-c:a".into(), "aac".into()]);
         }
         args.push(crate::ffmpeg_path::ffmpeg_local_arg(out)?);
         run_ffmpeg(&args, &format!("trim scene {}", scene.id))?;

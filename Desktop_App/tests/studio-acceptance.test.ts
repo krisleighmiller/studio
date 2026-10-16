@@ -7,6 +7,7 @@ import { buildFinishModel } from "../src/studio/finishModel";
 import { buildJobsModel, elapsedLabel } from "../src/studio/jobsModel";
 import { renderJobsView } from "../src/studio/jobsView";
 import { buildSceneList } from "../src/studio/sceneLookModel";
+import { sceneHeadingTitle } from "../src/studio/selectors/scenes";
 import { renderSceneListView } from "../src/studio/sceneLookView";
 import { visibleDirectorSelection, type DirectorSelection } from "../src/studio/selection";
 import { clearIntentDraft, renderSceneIntentView } from "../src/studio/sceneIntentView";
@@ -276,6 +277,46 @@ describe("phase 4 presentation and job truth", () => {
     expect(model.rows[0]?.outputPath).toBe("Scenes/Scene1/Cut1/take.mp4");
     expect(model.rows[0]?.cut).toBe(1);
     expect(model.rows[0]?.stage).toBe("take_review");
+  });
+
+  it("shows the recorded start time and live progress instead of unknown", () => {
+    const model = buildJobsModel({
+      jobs: [
+        {
+          id: "job-render",
+          kind: "render",
+          status: "completed",
+          created_at: "2026-01-01T00:00:00Z",
+          started_at: "2026-01-01T00:01:00Z",
+          completed_at: "2026-01-01T00:01:30Z",
+          progress: "completed",
+          scope: { kind: "shot", id: "shot-1" },
+          output_path: "Scenes/Scene1/Cut1/take.mp4",
+        } as JobRecord,
+      ],
+      scenes: [scene({ id: 1, cuts: [cut({ cut: 1, stable_id: "shot-1" })] })],
+      assets: [],
+      filter: "all",
+    });
+    expect(model.rows[0]?.created).toBe("2026-01-01T00:00:00Z");
+    expect(model.rows[0]?.started).toBe("2026-01-01T00:01:00Z");
+    expect(model.rows[0]?.completed).toBe("2026-01-01T00:01:30Z");
+    expect(model.rows[0]?.progress).toBe("completed");
+    // Elapsed prefers the real start; with neither timestamp it reports unknown.
+    expect(elapsedLabel({ status: "completed" })).toBe("unknown");
+    expect(
+      elapsedLabel({
+        status: "completed",
+        created_at: "2026-01-01T00:00:00Z",
+        started_at: "2026-01-01T00:01:00Z",
+        completed_at: "2026-01-01T00:01:30Z",
+      }),
+    ).toBe("30s");
+    const view = renderJobsView(model, true, "all", () => {});
+    const text = view.textContent ?? "";
+    expect(text).toContain("Started 2026-01-01T00:01:00Z");
+    expect(text).toContain("Progress completed");
+    expect(text).not.toContain("Started unknown");
   });
 
   it("links an assembly job to the review export", () => {
@@ -1122,6 +1163,20 @@ describe("ui fixture interactions", () => {
       const source = readFileSync(file, "utf8");
       expect(source, file).not.toMatch(/\binvoke\s*\(/);
     }
+  });
+});
+
+describe("sceneHeadingTitle", () => {
+  it("does not duplicate a stored 'Scene N —' prefix", () => {
+    expect(sceneHeadingTitle(1, "Scene 1 — The last train")).toBe("Scene 1 — The last train");
+    expect(sceneHeadingTitle(1, "Scene 1: The last train")).toBe("Scene 1 — The last train");
+    expect(sceneHeadingTitle(1, "scene 1 - the last train")).toBe("Scene 1 — the last train");
+  });
+  it("prefixes bare titles and leaves other scenes' numbers alone", () => {
+    expect(sceneHeadingTitle(1, "The last train")).toBe("Scene 1 — The last train");
+    expect(sceneHeadingTitle(2, "Scene 1 — The last train")).toBe("Scene 2 — Scene 1 — The last train");
+    expect(sceneHeadingTitle(3, "")).toBe("Scene 3");
+    expect(sceneHeadingTitle(1, "Scene 1")).toBe("Scene 1");
   });
 });
 

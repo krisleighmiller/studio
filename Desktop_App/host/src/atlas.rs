@@ -11,6 +11,97 @@ use std::time::Duration;
 
 const API_BASE: &str = "https://api.atlascloud.ai/api/v1";
 const BALANCE_URL: &str = "https://api.atlascloud.ai/public/v1/balance";
+
+/// Base URL for Atlas API calls.
+///
+/// Ordinary builds always use the production endpoint — there is no way to
+/// redirect provider traffic (and with it real credentials and uploads) from
+/// the environment. Builds compiled with `--features mock-provider` may
+/// redirect to a LOOPBACK mock via `WORKBENCH_ATLAS_BASE_URL`, and then:
+///   * the URL must parse with a standard parser and name a loopback host
+///     with no user-info, no query, and no fragment;
+///   * a missing/invalid value FAILS CLOSED (the request errors) instead of
+///     silently falling back to the real provider.
+#[cfg(not(feature = "mock-provider"))]
+fn api_base() -> Result<String, String> {
+    Ok(API_BASE.to_string())
+}
+
+#[cfg(feature = "mock-provider")]
+fn api_base() -> Result<String, String> {
+    let raw = std::env::var("WORKBENCH_ATLAS_BASE_URL").map_err(|_| {
+        "mock-provider build requires WORKBENCH_ATLAS_BASE_URL to name a loopback mock; \
+         refusing to use the real provider"
+            .to_string()
+    })?;
+    let parsed = reqwest::Url::parse(raw.trim())
+        .map_err(|e| format!("mock-provider build: WORKBENCH_ATLAS_BASE_URL is not a URL: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(format!(
+            "mock-provider build: mock base must be http(s), got `{}`",
+            parsed.scheme()
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("mock-provider build: mock base must not carry user-info".into());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("mock-provider build: mock base must not carry query/fragment".into());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "mock-provider build: mock base has no host".to_string())?;
+    if !is_loopback_host(host) {
+        return Err(format!(
+            "mock-provider build: mock base host `{host}` is not loopback; \
+             refusing to send provider-shaped traffic (and credentials) off-machine"
+        ));
+    }
+    Ok(raw.trim().trim_end_matches('/').to_string())
+}
+
+/// Catalog endpoint used by Settings. Mock-provider builds route it to the
+/// loopback mock like every other Atlas call.
+pub(crate) fn catalog_models_url() -> Result<String, String> {
+    Ok(format!("{}/models", api_base()?))
+}
+
+/// Loopback hostnames/addresses accepted for mock-provider builds and for
+/// loopback download URLs. Numeric IPv4 must be exactly four 0–255 octets in
+/// 127.0.0.0/8, so lookalikes such as `127.0.0.1.evil.com` are rejected.
+#[cfg(feature = "mock-provider")]
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") || host == "[::1]" || host == "::1" {
+        return true;
+    }
+    let octets: Vec<&str> = host.split('.').collect();
+    octets.len() == 4
+        && octets[0] == "127"
+        && octets
+            .iter()
+            .all(|part| !part.is_empty() && part.len() <= 3 && part.bytes().all(|b| b.is_ascii_digit()) && part.parse::<u8>().is_ok())
+}
+
+/// Validate a download URL. Production requires https. Mock-provider builds
+/// are hermetic: downloads may only target loopback, over http or https, so a
+/// mock response can never pull the test host into external traffic.
+#[cfg(not(feature = "mock-provider"))]
+fn download_url_allowed(url: &str) -> bool {
+    url.starts_with("https://")
+}
+
+/// Mock-provider builds: loopback-only downloads (see above).
+#[cfg(feature = "mock-provider")]
+fn download_url_allowed(url: &str) -> bool {
+    if let Ok(parsed) = reqwest::Url::parse(url) {
+        return matches!(parsed.scheme(), "http" | "https")
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.host_str().is_some_and(is_loopback_host);
+    }
+    false
+}
+
 const USER_AGENT: &str = "VideoWorkbench/0.1 (desktop; atlas-tools)";
 /// Default patience for a single prediction poll/collect window. The media router
 /// may run multiple windows while status stays `processing` (Seedream/edit, video).
@@ -60,7 +151,7 @@ fn parse_json_response(response: reqwest::blocking::Response) -> Result<Value, S
 }
 
 fn fetch_models_catalog() -> Result<Vec<Value>, String> {
-    let url = format!("{API_BASE}/models");
+    let url = format!("{}/models", api_base()?);
     let response = crate::http_util::get_with_retry(&client(60)?, &url, None, 3)?;
     let parsed = parse_json_response(response)?;
     let items = parsed
@@ -789,7 +880,7 @@ fn generate_media(
 
     let parsed = auth_post_json(
         api_key,
-        &format!("{API_BASE}/model/{endpoint}"),
+        &format!("{}/model/{endpoint}", api_base()?),
         &body,
         120,
     ).map_err(|error| {
@@ -854,6 +945,19 @@ fn is_success_status(status: &str) -> bool {
     matches!(status, "completed" | "succeeded" | "success")
 }
 
+/// Terminal provider failure gets a distinct, greppable error prefix so the
+/// media router stops polling and fails the workflow job instead of leaving
+/// it pending on a prediction that will never produce an output.
+fn terminal_failure_error(status: &str) -> Option<String> {
+    if is_terminal_status(status) && !is_success_status(status) {
+        Some(format!(
+            "provider-failed: prediction ended with status={status}; do not resume"
+        ))
+    } else {
+        None
+    }
+}
+
 /// Pull the first usable output URL from varied Atlas prediction shapes.
 fn extract_output_url(parsed: &Value) -> Option<String> {
     let candidates = [
@@ -910,7 +1014,7 @@ pub fn get_prediction(
     if prediction_id.is_empty() {
         return Err("prediction_id is required".into());
     }
-    let url = format!("{API_BASE}/model/prediction/{prediction_id}");
+    let url = format!("{}/model/prediction/{prediction_id}", api_base()?);
     let poll_every = Duration::from_secs(8);
     let deadline = std::time::Instant::now() + Duration::from_secs(wait_seconds);
     let mut consecutive_errors = 0u32;
@@ -1027,6 +1131,12 @@ pub fn collect_media(
         .unwrap_or("")
         .to_string();
     if !is_success_status(&status) {
+        // A terminal provider failure must be distinguishable from a
+        // still-processing prediction: callers must not keep polling it, and
+        // the workflow job must fail rather than hang as pending.
+        if let Some(terminal) = terminal_failure_error(&status) {
+            return Err(format!("{terminal} (prediction {prediction_id})"));
+        }
         return Err(format!(
             "Prediction {prediction_id} not ready to download (status={status}). Resume later with the same prediction_id."
         ));
@@ -1130,7 +1240,7 @@ pub fn upload_media(
     let form = reqwest::blocking::multipart::Form::new().part("file", part);
 
     let response = client(180)?
-        .post(format!("{API_BASE}/model/uploadMedia"))
+        .post(format!("{}/model/uploadMedia", api_base()?))
         .header("Authorization", format!("Bearer {api_key}"))
         .multipart(form)
         .send()
@@ -1154,8 +1264,19 @@ pub fn upload_media(
     .to_string())
 }
 
+#[cfg(not(feature = "mock-provider"))]
 pub fn get_balance(api_key: &str) -> Result<String, String> {
     let parsed = auth_get(api_key, BALANCE_URL, 30)?;
+    Ok(serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| parsed.to_string()))
+}
+
+/// Mock builds must never call the real billing endpoint; map the balance
+/// probe onto the mock base (`/api/v1` → `/public/v1`).
+#[cfg(feature = "mock-provider")]
+pub fn get_balance(api_key: &str) -> Result<String, String> {
+    let base = api_base()?;
+    let url = format!("{}/balance", base.replace("/api/v1", "/public/v1"));
+    let parsed = auth_get(api_key, &url, 30)?;
     Ok(serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| parsed.to_string()))
 }
 
@@ -1169,7 +1290,7 @@ pub fn download_atlas_media(
     if url.is_empty() {
         return Err("url is required".into());
     }
-    if !url.starts_with("https://") {
+    if !download_url_allowed(url) {
         return Err("Downloads must use https.".into());
     }
     let path = resolve_dest_path(dest, project_root)?;
@@ -1551,6 +1672,85 @@ pub fn run_atlas_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "mock-provider"))]
+    #[test]
+    fn production_build_has_no_override() {
+        // The production base is compiled in; the env var is inert.
+        std::env::set_var("WORKBENCH_ATLAS_BASE_URL", "http://127.0.0.1:8791/api/v1/");
+        assert_eq!(api_base().unwrap(), API_BASE);
+        std::env::remove_var("WORKBENCH_ATLAS_BASE_URL");
+        assert!(download_url_allowed("https://cdn.example/out.png"));
+        assert!(!download_url_allowed("http://127.0.0.1:8792/out.png"));
+        assert!(!download_url_allowed("http://example.com/out.png"));
+    }
+
+    #[cfg(feature = "mock-provider")]
+    #[test]
+    fn mock_build_base_url_validation() {
+        // One test: env-var mutation must not race parallel test threads.
+        std::env::remove_var("WORKBENCH_ATLAS_BASE_URL");
+        assert!(api_base().is_err(), "missing mock base must fail closed");
+        for bad in [
+            "not a url",
+            "ftp://127.0.0.1/x",
+            "http://user@127.0.0.1:8791/api/v1",
+            "http://user:pw@127.0.0.1:8791/api/v1",
+            "http://127.0.0.1:8791/api/v1?x=1",
+            "http://127.0.0.1:8791/api/v1#frag",
+            "http://example.com/api/v1",
+            "http://127.0.0.1.evil.com/api/v1",
+            "http://127.0.0.256/api/v1",
+            "http://0127.0.0.1/api/v1",
+        ] {
+            std::env::set_var("WORKBENCH_ATLAS_BASE_URL", bad);
+            assert!(api_base().is_err(), "accepted invalid mock base {bad}");
+        }
+        for good in [
+            "http://127.0.0.1:8791/api/v1/",
+            "http://localhost:8791/api/v1",
+            "http://[::1]:8791/api/v1",
+            "https://127.0.0.1:8791/api/v1",
+        ] {
+            std::env::set_var("WORKBENCH_ATLAS_BASE_URL", good);
+            assert!(api_base().is_ok(), "rejected valid mock base {good}");
+        }
+        std::env::remove_var("WORKBENCH_ATLAS_BASE_URL");
+    }
+
+    #[test]
+    fn terminal_failure_is_distinguished_from_still_processing() {
+        for failed in ["failed", "canceled", "cancelled", "error"] {
+            let err = terminal_failure_error(failed)
+                .unwrap_or_else(|| panic!("{failed} must be terminal"));
+            assert!(err.starts_with("provider-failed:"), "{err}");
+        }
+        for active in ["starting", "queued", "pending", "processing", "running", ""] {
+            assert!(terminal_failure_error(active).is_none(), "{active}");
+        }
+        for success in ["completed", "succeeded", "success"] {
+            assert!(terminal_failure_error(success).is_none(), "{success}");
+        }
+    }
+
+    #[cfg(feature = "mock-provider")]
+    #[test]
+    fn mock_build_download_url_rule() {
+        // Hermetic: even https to a non-loopback host is refused, so a mock
+        // response cannot pull the test into external traffic.
+        assert!(!download_url_allowed("https://cdn.example/out.png"));
+        assert!(!download_url_allowed("https://api.atlascloud.ai/out.png"));
+        assert!(download_url_allowed("https://127.0.0.1:8792/out.png"));
+        assert!(download_url_allowed("http://127.0.0.1:8792/out.png"));
+        assert!(download_url_allowed("http://localhost:8792/out.png"));
+        assert!(download_url_allowed("http://[::1]:8792/out.png"));
+        assert!(!download_url_allowed("http://example.com/out.png"));
+        assert!(!download_url_allowed("http://127.0.0.1.evil.com/out.png"));
+        assert!(!download_url_allowed("http://user@127.0.0.1:8792/out.png"));
+        assert!(!download_url_allowed("http://user:pw@127.0.0.1:8792/out.png"));
+        assert!(!download_url_allowed("http://127.0.0.256/out.png"));
+        assert!(!download_url_allowed("ftp://127.0.0.1/out.png"));
+    }
 
     #[test]
     fn remaps_shotgun_aliases_to_grok_image_urls() {

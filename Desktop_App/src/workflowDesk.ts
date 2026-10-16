@@ -704,8 +704,11 @@ function renderBody(): HTMLElement {
   body.classList.add("scene-look-body");
   const scenes = renderSceneList();
   scenes.classList.add("studio-scenes-list");
-  body.append(scenes, renderJobsPanel(), renderMain());
+  body.append(scenes, renderMain(), renderJobsPanel());
   renderFinishMount();
+  // Director context has one presentation: the interactive "Attached context"
+  // list in #director-context (add/remove without deleting project state).
+  // The former read-only chips mount was removed from index.html entirely.
   return body;
 }
 
@@ -1605,7 +1608,9 @@ function handleSceneLookIntent(scene: SceneRecord, intent: SceneLookIntent): voi
       break;
     }
     case "open":
-      hooks?.onOpenPath(intent.path);
+      // Review images live at project-relative paths; the app's file-open
+      // hook needs the resolved project path, exactly like review exports.
+      hooks?.onOpenPath(intent.path ? resolveProjectPath(intent.path) ?? intent.path : intent.path);
       break;
     case "attach-director":
       if (selectedLookSlotId === intent.slotId) detachDirectorContext("lookSlot", intent.slotId);
@@ -1832,26 +1837,39 @@ function renderInspector(): HTMLElement {
 function renderJobsPanel(): HTMLElement {
   const panel = document.createElement("div");
   panel.className = "studio-jobs-panel";
-  panel.append(
-    renderBudgetSummary(buildBudgetModel(state)),
-    renderJobsView(
-      buildJobsModel({
-        jobs: state?.jobs ?? [],
-        scenes: state?.scenes ?? [],
-        assets: state?.assets ?? [],
-        filter: jobsFilter,
-      }),
-      jobsOpen,
-      jobsFilter,
-      handleJobsIntent,
-    ),
+  const budget = renderBudgetSummary(buildBudgetModel(state));
+  const jobs = renderJobsView(
+    buildJobsModel({
+      jobs: state?.jobs ?? [],
+      scenes: state?.scenes ?? [],
+      assets: state?.assets ?? [],
+      filter: jobsFilter,
+    }),
+    jobsOpen,
+    jobsFilter,
+    handleJobsIntent,
   );
-  panel.append(renderSpendReview(spendReview, () => { void loadSpendReview(); }, (intent) => { void submitSpendReview(intent); }));
-  if (spendReviewError) {
-    const error = document.createElement("p");
-    error.setAttribute("role", "alert");
-    error.textContent = spendReviewError;
-    panel.append(error);
+  if (jobsOpen) {
+    // Detailed accounting belongs INSIDE the expandable Jobs region, so a
+    // collapsed Jobs band is actually compact instead of leaking rows.
+    jobs.append(renderSpendReview(spendReview, () => { void loadSpendReview(); }, (intent) => { void submitSpendReview(intent); }));
+    if (spendReviewError) {
+      const error = document.createElement("p");
+      error.setAttribute("role", "alert");
+      error.textContent = spendReviewError;
+      jobs.append(error);
+    }
+    panel.append(budget, jobs);
+  } else {
+    panel.append(jobs, budget);
+    if (spendReview && spendReview.jobs.length > 0) {
+      // Required cost visibility survives collapse as a one-line pointer;
+      // the full disclosures return when Jobs opens.
+      const chip = document.createElement("span");
+      chip.className = "studio-spend-chip";
+      chip.textContent = `Paid media · ${spendReview.jobs.length} unsettled — open Jobs to review`;
+      panel.append(chip);
+    }
   }
   return panel;
 }

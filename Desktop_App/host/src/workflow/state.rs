@@ -1414,8 +1414,37 @@ impl JobRecord {
         }
     }
 
+    /// Move the job and its current attempt to Running. The real start instant is
+    /// recorded exactly once — re-entering Running must not rewrite it. Progress is
+    /// only ever a summary of a milestone the host actually observed. Note the
+    /// per-attempt stamp reuses the job-level start when the attempt has no slot of
+    /// its own; that is correct while one attempt exists per job (retry lineage is
+    /// deferred, see Phase 8), and any future retry producer must start its new
+    /// attempt from an independent timestamp, not inherit this one.
+    pub fn mark_running(&mut self, progress: &str) {
+        self.status = JobStatus::Running;
+        if self.started_at.is_none() {
+            self.started_at = Some(utc_now());
+        }
+        if let Some(attempt) = self.attempts.last_mut() {
+            attempt.status = JobStatus::Running;
+            if attempt.started_at.is_none() {
+                attempt.started_at = self.started_at.clone();
+            }
+        }
+        self.progress = Some(progress.to_string());
+    }
+
+    /// Record a truthful progress summary for a host-observed milestone.
+    pub fn note_progress(&mut self, progress: &str) {
+        self.progress = Some(progress.to_string());
+    }
+
     pub fn finish(&mut self, path: Option<&str>, asset_id: Option<&str>) {
         self.status = JobStatus::Completed;
+        // The terminal milestone replaces any mid-flight progress line so a
+        // completed job never displays "awaiting result".
+        self.progress = Some("completed".to_string());
         if self.completed_at.is_none() {
             self.completed_at = Some(utc_now());
         }
@@ -1443,6 +1472,8 @@ impl JobRecord {
     pub fn fail(&mut self, billable_cost_minor: Option<i64>, error: impl Into<String>) {
         self.status = JobStatus::Failed;
         self.error = Some(error.into());
+        // Terminal milestone: never keep a mid-flight "awaiting result" line.
+        self.progress = Some("failed".to_string());
         // When the provider bills even for failures, record the actual cost.
         // When None, the ledger will count the failure as unknown-cost.
         if let Some(cost) = billable_cost_minor {
@@ -2257,6 +2288,51 @@ mod tests {
         assert_eq!(job.elapsed_label(), "1m 30s");
         job.started_at = Some("1970-01-01T00:01:00Z".into());
         assert_eq!(job.elapsed_label(), "30s");
+    }
+
+    #[test]
+    fn running_records_start_once_and_terminal_progress() {
+        let mut job = JobRecord::open("job_1", "render");
+        // open() records creation, but there is no real start or milestone yet.
+        assert!(job.created_at.is_some());
+        assert!(job.started_at.is_none());
+        assert!(job.progress.is_none());
+        assert_eq!(job.status, JobStatus::Pending);
+
+        job.mark_running("dispatching provider request");
+        assert_eq!(job.status, JobStatus::Running);
+        assert!(job.started_at.is_some(), "Running records a real start");
+        assert_eq!(
+            job.progress.as_deref(),
+            Some("dispatching provider request")
+        );
+        assert_eq!(job.attempts[0].status, JobStatus::Running);
+        assert_eq!(job.attempts[0].started_at, job.started_at);
+        let first_start = job.started_at.clone();
+
+        // Re-entering Running never rewrites the true start instant, at either level.
+        job.mark_running("provider accepted request; awaiting result");
+        assert_eq!(
+            job.progress.as_deref(),
+            Some("provider accepted request; awaiting result")
+        );
+        assert_eq!(job.started_at, first_start);
+        assert_eq!(job.attempts[0].started_at, first_start);
+
+        job.finish(None, None);
+        assert_eq!(job.status, JobStatus::Completed);
+        assert!(job.completed_at.is_some());
+        assert_eq!(job.started_at, first_start);
+        assert_eq!(job.progress.as_deref(), Some("completed"));
+        assert!(job.attempts[0].completed_at.is_some());
+
+        // A failure replaces the mid-flight line too, so no job claims "awaiting".
+        let mut job2 = JobRecord::open("job_2", "render");
+        job2.mark_running("dispatching provider request");
+        job2.note_progress("provider accepted request; awaiting result");
+        job2.fail(None, "timeout");
+        assert_eq!(job2.progress.as_deref(), Some("failed"));
+        assert_eq!(job2.status, JobStatus::Failed);
     }
 
     #[test]

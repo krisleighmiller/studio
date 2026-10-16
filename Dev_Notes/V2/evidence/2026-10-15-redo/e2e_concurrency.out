@@ -1,0 +1,19 @@
+PATCH: "patched"
+NAV: scene-look
+GEN1: {"hasApprove":true}
+APPROVE1: clicked
+DIALOGS after op1: 1
+GEN2: {"hasApprove":true}
+APPROVE2: clicked
+STATUS (expect Queued): Production
+DIALOGS after op2 (expect 1): 1
+RELEASED dialog 1
+OP1 RESULT: {"tiles":["approved · currentApprovedOpen","draftApproveOpenReject"],"waited":2500}
+DIALOGS after release (expect 2): 2
+STATUS (expect authorization expired): Approval ready
+GEN3: {"hasApprove":true}
+APPROVE3: clicked
+OP3 RESULT: {"tiles":["approved · currentApprovedOpen","draftApproveOpenReject"],"waited":240026}
+FINAL STATUS: Approval error: Error: That approval is no longer active. Ask for a new plan.
+CONCURRENCY DONE
+EXIT=0

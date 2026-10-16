@@ -512,7 +512,7 @@ where
         metadata
     });
     job.retry_of = retry_of.map(str::to_string);
-    job.status = JobStatus::Running;
+    job.mark_running("dispatching provider request");
     state.jobs.push(job);
     import::persist_state_locked(root, &state)?;
     drop(_lock);
@@ -547,6 +547,7 @@ where
             return Err("provider prediction id changed for job".into());
         }
         metadata.prediction_id = Some(prediction_id.to_owned());
+        job.note_progress("provider accepted request; awaiting result");
         import::persist_state_locked(root, &state).map(|_| ())
     };
     let result = dispatch(&id, &record_submission);
@@ -1047,6 +1048,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dispatched_job_records_created_started_and_progress_lifecycle() {
+        let dir = setup(100, false);
+        let mut state = persisted(dir.path()).unwrap();
+        state.budget.as_mut().unwrap().policy = Some(BudgetPolicy::ApprovalRequired);
+        import::persist_state(dir.path(), &state).unwrap();
+        let req = request(&fingerprint('e'));
+        let quote = quote_unbounded_scoped(dir.path(), &req.request_hash).unwrap();
+        let token = confirm_unbounded_scoped(
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "model",
+            &req.request_hash,
+            &quote.ledger_revision,
+        )
+        .unwrap();
+        run_scoped_with_submission(
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "image.text_to_image",
+            "model",
+            Some(&token),
+            None,
+            Some(req.clone()),
+            None,
+            |id, submitted| {
+                submitted("prediction_life")?;
+                let mid = persisted(dir.path()).unwrap();
+                let job = mid.jobs.iter().find(|j| j.id == id).unwrap();
+                assert!(job.created_at.is_some(), "reservation records creation");
+                assert!(job.started_at.is_some(), "dispatch records a real start");
+                assert_eq!(job.status, JobStatus::Running);
+                assert_eq!(job.attempts[0].started_at, job.started_at);
+                assert_eq!(
+                    job.progress.as_deref(),
+                    Some("provider accepted request; awaiting result")
+                );
+                assert_eq!(job.currency.as_deref(), Some("USD"));
+                Ok("ok".into())
+            },
+        )
+        .unwrap();
+        let done = persisted(dir.path()).unwrap();
+        let job = done
+            .jobs
+            .iter()
+            .find(|job| job.status == JobStatus::Completed)
+            .expect("completed dispatch job");
+        assert!(job.completed_at.is_some());
+        assert!(job.started_at.is_some());
+        assert_eq!(job.progress.as_deref(), Some("completed"));
+    }
+
     fn setup(limit: i64, hard_stop: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let mut state = ProjectState::new();
@@ -1178,6 +1236,79 @@ mod tests {
         image(dir.path(), Some(&token), None, || Ok("sent".into())).unwrap();
         assert!(image(dir.path(), Some(&token), None, || panic!("sent")).is_err());
     }
+    #[test]
+    fn second_queued_quote_goes_stale_after_first_operation_settles() {
+        // Two distinct operations quoted against the same ledger revision
+        // (the renderer's queued-requests case): once the first operation
+        // settles, the second quote's revision no longer matches and its
+        // confirmation must be rejected without dispatch. A fresh quote
+        // against the settled ledger confirms and dispatches independently.
+        let dir = setup(100, false);
+        let invoke = |hash: &str, token: &str, ok: bool| {
+            run_scoped_with_submission(
+                dir.path(),
+                "atlas-cloud",
+                "media",
+                "atlas_generate_image",
+                "image.text_to_image",
+                "model",
+                Some(token),
+                None,
+                Some(request(hash)),
+                None,
+                |_id, _submitted| {
+                    if ok {
+                        Ok("done".into())
+                    } else {
+                        Err("boom".into())
+                    }
+                },
+            )
+        };
+        let req_a = request(&fingerprint('a'));
+        let req_b = request(&fingerprint('b'));
+        let quote_a = quote_unbounded_scoped(dir.path(), &req_a.request_hash).unwrap();
+        let quote_b = quote_unbounded_scoped(dir.path(), &req_b.request_hash).unwrap();
+        assert_eq!(quote_a.ledger_revision, quote_b.ledger_revision);
+
+        let token_a = confirm_unbounded_scoped(
+            dir.path(), "atlas-cloud", "media", "atlas_generate_image", "model",
+            &req_a.request_hash, &quote_a.ledger_revision,
+        )
+        .unwrap();
+        invoke(&req_a.request_hash, &token_a, true).unwrap();
+        assert_eq!(persisted(dir.path()).unwrap().jobs.len(), 1);
+
+        // The queued second request still holds the pre-settlement revision.
+        let stale = confirm_unbounded_scoped(
+            dir.path(), "atlas-cloud", "media", "atlas_generate_image", "model",
+            &req_b.request_hash, &quote_b.ledger_revision,
+        )
+        .unwrap_err();
+        assert!(stale.contains("stale"), "{stale}");
+        assert_eq!(persisted(dir.path()).unwrap().jobs.len(), 1);
+
+        // A fresh quote against the settled ledger works; the second
+        // operation is usable once re-quoted, no cross-request reuse.
+        let quote_b2 = quote_unbounded_scoped(dir.path(), &req_b.request_hash).unwrap();
+        let token_b = confirm_unbounded_scoped(
+            dir.path(), "atlas-cloud", "media", "atlas_generate_image", "model",
+            &req_b.request_hash, &quote_b2.ledger_revision,
+        )
+        .unwrap();
+        invoke(&req_b.request_hash, &token_b, true).unwrap();
+        let state = persisted(dir.path()).unwrap();
+        assert_eq!(state.jobs.len(), 2);
+        // Each reservation carries its own request fingerprint.
+        let hashes: Vec<_> = state
+            .jobs
+            .iter()
+            .map(|j| j.request_metadata.as_ref().unwrap().request_hash.clone())
+            .collect();
+        assert!(hashes.contains(&fingerprint('a')));
+        assert!(hashes.contains(&fingerprint('b')));
+    }
+
     #[test]
     fn stale_confirmation_is_rejected_without_dispatch() {
         let dir = setup(0, false);

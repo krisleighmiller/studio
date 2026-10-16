@@ -9,6 +9,11 @@ edition = "2021"
 name = "workbench-host"
 path = "src/main.rs"
 
+[features]
+# Off by default. Enables the loopback-only mock provider redirect for
+# end-to-end tests. Ordinary builds contain no override code at all.
+mock-provider = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

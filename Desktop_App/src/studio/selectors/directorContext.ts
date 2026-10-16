@@ -27,6 +27,18 @@ const LOOK_DISPLAY: Record<string, string> = {
   lighting_reference: "Lighting",
   composition_reference: "Composition",
   group_reference: "Group",
+  // Audio roles, kept byte-identical to the host's AssetRole::display_label
+  // (host/src/workflow/state.rs) so the Director never sees two spellings.
+  dialogue: "Dialogue",
+  voice_over: "Voice over",
+  music: "Music",
+  ambience: "Ambience",
+  room_tone: "Room tone",
+  sound_effect: "Sound effect",
+  foley: "Foley",
+  source_audio: "Source audio",
+  scratch_audio: "Scratch audio",
+  mix: "Mix",
 };
 
 /** Same lines the host writes into the Director prompt. */
@@ -118,6 +130,7 @@ function entriesFor(state: ProjectState | null, selection: DirectorSelection): D
 }
 
 function sceneLabel(scene: SceneRecord): string {
+  // Host scope.rs owns this exact format — keep parity (see phase4-closeout).
   const title = scene.title.trim();
   return title ? `Scene ${scene.id} ${title}` : `Scene ${scene.id}`;
 }

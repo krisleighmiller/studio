@@ -1070,6 +1070,50 @@ fn restore_render_jobs(project_root: &Path, state: &mut ProjectState) -> bool {
     changed
 }
 
+/// Recover scene-look jobs whose output was downloaded but never registered
+/// (e.g. a spend-gated generation whose specialist turn ended at the
+/// authorization gate before the fix that registers on the confirmed replay).
+/// Registration reuses the shared `register_look_output` core: it validates
+/// the project-relative path, dedupes on path, never submits a provider
+/// request, and is idempotent across repeated loads.
+fn restore_scene_look_jobs(project_root: &Path, state: &mut ProjectState) -> bool {
+    let pending: Vec<String> = state
+        .jobs
+        .iter()
+        .filter(|job| {
+            job.kind == "scene_look"
+                && job.status == crate::workflow::state::JobStatus::Pending
+        })
+        .filter_map(|job| job.output_path.clone())
+        .collect();
+    let mut changed = false;
+    for requested in pending {
+        // Skip outputs that are missing or do not resolve inside the project;
+        // those jobs legitimately stay pending.
+        let Some(actual) = existing_media_path(project_root, &requested) else {
+            continue;
+        };
+        // A file that exists but is not a valid image (corrupt or partial
+        // download) is a failed output: fail the job explicitly instead of
+        // leaving it pending or registering unusable bytes.
+        if let Err(reason) = crate::media_util::ensure_media_file(&actual) {
+            if let Some(job) = state.jobs.iter_mut().find(|j| {
+                j.kind == "scene_look"
+                    && j.status == crate::workflow::state::JobStatus::Pending
+                    && j.output_path.as_deref() == Some(requested.as_str())
+            }) {
+                job.fail(None, format!("downloaded output is unusable: {reason}"));
+                changed = true;
+            }
+            continue;
+        }
+        if crate::workflow::look::register_look_output(state, project_root, &requested).is_some() {
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn restore_assemble_jobs(project_root: &Path, state: &mut ProjectState) -> bool {
     let jobs: Vec<(
         String,
@@ -1328,6 +1372,7 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
     }
     restore_wardrobe_plate_assets(project_root, &mut state);
     restore_render_jobs(project_root, &mut state);
+    restore_scene_look_jobs(project_root, &mut state);
     restore_assemble_jobs(project_root, &mut state);
     prune_missing_scene_look_assets(project_root, &mut state);
     restore_visual_sources(&mut state);
@@ -1425,6 +1470,7 @@ pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
         repaired |= restore_approved_look_pointers(&mut state);
         repaired |= restore_wardrobe_plate_assets(project_root, &mut state);
         repaired |= restore_render_jobs(project_root, &mut state);
+        repaired |= restore_scene_look_jobs(project_root, &mut state);
         repaired |= restore_assemble_jobs(project_root, &mut state);
         prune_missing_scene_look_assets(project_root, &mut state);
         repaired |= restore_visual_sources(&mut state);
@@ -1552,6 +1598,185 @@ mod tests {
         AssetRecord, AssetRole, AssetStatus, BudgetPolicy, CharacterRecord, JobRecord, JobStatus,
         LookBoard, LookSlot, ProjectBudget, SpendRequestMetadata,
     };
+
+    #[test]
+    fn load_recovers_scene_look_job_with_downloaded_unregistered_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = ProjectState::new();
+        let scene = state.scene_mut(1, "The last train");
+        let mut board = LookBoard::default();
+        board.slots.push(LookSlot::new(
+            "s1_look_01",
+            AssetRole::InteriorReference,
+            "Interior",
+        ));
+        scene.look_board = Some(board);
+        let rel = "Preproduction/Scene1/references/interior_4.png";
+        state.jobs.push(JobRecord {
+            id: "job_51".into(),
+            kind: "scene_look".into(),
+            provider: None,
+            model: None,
+            input_asset_ids: Vec::new(),
+            output_asset_ids: Vec::new(),
+            status: JobStatus::Pending,
+            output_path: Some(rel.into()),
+            raw_provider_id: Some("s1_look_01".into()),
+            error: None,
+            attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
+            currency: None,
+            retry_of: None,
+            spend_category: None,
+            reconciliation: None,
+            reserved_max_minor: None,
+            actual_verified: false,
+            unbounded_exposure: false,
+            request_metadata: None,
+        });
+        save_project(root, state).unwrap();
+        let abs = root.join(rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, b"\x89PNG\r\n\x1a\nrest").unwrap();
+
+        // First load recovers: draft asset registered, job completed.
+        let first = load_or_import(root).unwrap();
+        let job = first
+            .state
+            .jobs
+            .iter()
+            .find(|j| j.id == "job_51")
+            .unwrap();
+        assert_eq!(job.status, JobStatus::Completed);
+        assert_eq!(first.state.assets.len(), 1);
+        assert_eq!(first.state.assets[0].path, rel);
+        assert_eq!(first.state.assets[0].status, AssetStatus::Draft);
+        assert_eq!(
+            first.state.assets[0].source_job_id.as_deref(),
+            Some("job_51")
+        );
+
+        // Repeated loads are idempotent: no duplicate asset, still one job.
+        let second = load_or_import(root).unwrap();
+        assert_eq!(second.state.assets.len(), 1);
+        assert_eq!(
+            second
+                .state
+                .jobs
+                .iter()
+                .filter(|j| j.id == "job_51" && j.status == JobStatus::Completed)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn load_leaves_scene_look_job_pending_when_output_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = ProjectState::new();
+        state.scene_mut(1, "The last train");
+        state.jobs.push(JobRecord {
+            id: "job_9".into(),
+            kind: "scene_look".into(),
+            provider: None,
+            model: None,
+            input_asset_ids: Vec::new(),
+            output_asset_ids: Vec::new(),
+            status: JobStatus::Pending,
+            output_path: Some("Preproduction/Scene1/references/interior_9.png".into()),
+            raw_provider_id: None,
+            error: None,
+            attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
+            currency: None,
+            retry_of: None,
+            spend_category: None,
+            reconciliation: None,
+            reserved_max_minor: None,
+            actual_verified: false,
+            unbounded_exposure: false,
+            request_metadata: None,
+        });
+        save_project(root, state).unwrap();
+        let loaded = load_or_import(root).unwrap();
+        assert_eq!(loaded.state.jobs[0].status, JobStatus::Pending);
+        assert!(loaded.state.assets.is_empty());
+    }
+
+    #[test]
+    fn load_fails_scene_look_job_when_output_is_not_valid_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = ProjectState::new();
+        state.scene_mut(1, "The last train");
+        let rel = "Preproduction/Scene1/references/interior_7.png";
+        state.jobs.push(JobRecord {
+            id: "job_10".into(),
+            kind: "scene_look".into(),
+            provider: None,
+            model: None,
+            input_asset_ids: Vec::new(),
+            output_asset_ids: Vec::new(),
+            status: JobStatus::Pending,
+            output_path: Some(rel.into()),
+            raw_provider_id: None,
+            error: None,
+            attempts: Vec::new(),
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+            scope: None,
+            progress: None,
+            cost_minor: None,
+            estimated_cost_minor: None,
+            currency: None,
+            retry_of: None,
+            spend_category: None,
+            reconciliation: None,
+            reserved_max_minor: None,
+            actual_verified: false,
+            unbounded_exposure: false,
+            request_metadata: None,
+        });
+        save_project(root, state).unwrap();
+        // A corrupt/partial download: right extension, wrong bytes.
+        let abs = root.join(rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, b"this is not a png at all").unwrap();
+
+        let loaded = load_or_import(root).unwrap();
+        let job = loaded
+            .state
+            .jobs
+            .iter()
+            .find(|j| j.id == "job_10")
+            .unwrap();
+        assert_eq!(job.status, JobStatus::Failed);
+        assert!(job
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("downloaded output is unusable"));
+        // Nothing registered, and a repeated load does not flap the state.
+        assert!(loaded.state.assets.is_empty());
+        let again = load_or_import(root).unwrap();
+        assert_eq!(again.state.jobs[0].status, JobStatus::Failed);
+        assert!(again.state.assets.is_empty());
+    }
 
     #[test]
     fn reimport_merges_jobs_and_preserves_existing_budget_policy() {

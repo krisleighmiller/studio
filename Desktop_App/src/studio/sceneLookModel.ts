@@ -8,6 +8,7 @@ import {
   type SceneReport,
 } from "../workflowTypes";
 import { buildAudioStatus, describeAudioStatus } from "./selectors/audio";
+import { sceneHeadingTitle } from "./selectors/scenes";
 
 export type SceneListItemModel = {
   key: string;
@@ -121,7 +122,7 @@ export function buildSceneLook(input: {
   const primary = pickPrimary(versions, input.focusedAssetId);
   const plates = wardrobePlates(input.scene, input.assets, input.characters, input.resolvePath);
   return {
-    title: `Scene ${input.scene.id} — ${input.scene.title}`,
+    title: sceneHeadingTitle(input.scene.id, input.scene.title),
     counts: sceneCounts(input.scene, input.report, input.blockers.length),
     warnings: input.report?.warnings ?? [],
     blockers: input.blockers,

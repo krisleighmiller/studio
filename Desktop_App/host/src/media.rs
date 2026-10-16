@@ -410,6 +410,12 @@ fn generate_unchecked(
             }
             Err(error) => {
                 last_error = error.clone();
+                // A terminal provider failure is not "still processing":
+                // stop polling and fail the operation instead of leaving the
+                // workflow job pending on a prediction that will never finish.
+                if error.starts_with("provider-failed:") {
+                    break;
+                }
                 let lower = error.to_ascii_lowercase();
                 let retriable = lower.contains("not ready")
                     || lower.contains("processing")
@@ -426,6 +432,13 @@ fn generate_unchecked(
                 );
             }
         }
+    }
+
+    // Terminal provider failure: report Err so the spend ledger records a
+    // failed (unverified) attempt and callers can fail the workflow job,
+    // rather than presenting a dead prediction as "submitted, resume later".
+    if last_error.starts_with("provider-failed:") {
+        return Err(last_error);
     }
 
     Ok(json!({

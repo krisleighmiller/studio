@@ -3351,6 +3351,20 @@ button {
   white-space: normal;
 }
 
+/* Output link: makes it visible that a job row opens its finished file. */
+.studio-job-action {
+  margin-inline-start: auto;
+  align-self: center;
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 620;
+  white-space: nowrap;
+}
+
 .studio-finish {
   flex: 1 1 auto;
   max-height: none;
@@ -3414,6 +3428,162 @@ button {
 .studio-finish-actions select {
   min-width: 0;
   max-width: 100%;
+}
+
+/* --- Redo plan Scene Look composition (bounded 2026-10-15 visual task) --- */
+
+.workflow-body.scene-look-body .workflow-scenes.studio-scenes-list {
+  grid-area: scenes;
+}
+
+.scene-look-header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.scene-look-pill {
+  margin-left: auto;
+  padding: 3px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.scene-look-pill.is-approved { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.scene-look-pill.is-rejected { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+.scene-look-pill.is-pending { color: var(--warning); border-color: var(--warning); background: var(--warning-soft); }
+
+.scene-look.scene-look-hero {
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 175px);
+  align-items: start;
+}
+
+.scene-look.scene-look-hero .scene-look-stage img {
+  height: min(46vh, 440px);
+}
+
+.scene-look.scene-look-hero .scene-look-stage {
+  min-height: 300px;
+}
+
+.scene-look-context { display: flex; flex-direction: column; gap: 2px; }
+.scene-look-hero-title { margin: 0; font-size: 20px; font-weight: 700; line-height: 1.25; }
+.scene-look-hero-purpose { margin: 0; color: var(--text-muted); font-size: 13px; }
+
+.scene-look-slotrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.scene-look-slotrow-label { font-size: 12px; font-weight: 650; color: var(--text-muted); }
+
+.scene-look-alts { max-height: none; }
+
+.scene-look-alt-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.scene-look-alt-tile.selected { border-color: var(--accent); }
+.scene-look-alt-tile.approved { box-shadow: inset 3px 0 0 var(--accent); }
+.scene-look-alt-tile.rejected { opacity: 0.55; }
+.scene-look-alt-tile .scene-look-alt {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.scene-look-alt-tile img { height: 120px; }
+.scene-look-alt-actions { display: flex; gap: 6px; }
+.scene-look-alt-actions button { flex: 1 1 auto; font-size: 11px; }
+
+.studio-jobs-panel .studio-budget {
+  margin: 0;
+  padding: 6px var(--space-3);
+  border-top: 1px solid var(--border);
+  background: var(--sidebar);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.workflow-body.jobs-collapsed .studio-jobs-panel {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  max-height: 40px;
+  overflow: hidden;
+}
+
+.workflow-body.jobs-collapsed .studio-jobs-panel .studio-budget {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-top: 0;
+  padding: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workflow-body.jobs-collapsed .studio-jobs { flex: 0 0 auto; }
+
+.studio-spend-chip {
+  flex: 0 0 auto;
+  padding-right: var(--space-3);
+  color: var(--warning);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.studio-jobs.jobs-open { max-height: 320px; }
+.studio-jobs.jobs-open .workflow-jobs-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+
+.studio-spend-review {
+  flex: 0 0 auto;
+  max-height: 170px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.studio-spend-review h3 { margin: 0; font-size: 13px; }
+.studio-spend-review > p { margin: 0; color: var(--text-muted); }
+.studio-spend-review form,
+.studio-spend-review label { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.studio-spend-review > div { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; border-top: 1px dashed var(--border); }
+
+@media (max-width: 1050px) {
+  .scene-look.scene-look-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scene-look-alts {
+    max-height: none;
+    flex-direction: row;
+    overflow: auto;
+  }
+
+  .scene-look-alt-tile {
+    flex: 0 0 180px;
+    min-width: 180px;
+  }
 }
 
 @media (max-width: 900px) {
@@ -3480,6 +3650,11 @@ button {
       "jobs";
   }
 
+  .scene-look-alt-tile {
+    flex: 0 0 200px;
+    min-width: 200px;
+  }
+
   .workflow-scenes,
   .studio-jobs,
   .workflow-inspector {
@@ -3489,6 +3664,10 @@ button {
   }
 
   .scene-look {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scene-look.scene-look-hero {
     grid-template-columns: minmax(0, 1fr);
   }
 

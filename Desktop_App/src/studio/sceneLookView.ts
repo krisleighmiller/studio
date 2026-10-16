@@ -43,7 +43,9 @@ export function renderSceneListView(
     title.textContent = item.title;
     const meta = document.createElement("span");
     meta.className = "workflow-scene-mix";
-    meta.textContent = `${item.numberLabel} · ${item.readiness}`;
+    // Readiness only — the title already carries the scene identity, and
+    // repeating "Scene N" here doubled every list item's heading.
+    meta.textContent = item.readiness;
     copy.append(title, meta);
     if (item.audio) {
       const audio = document.createElement("span");
@@ -72,6 +74,11 @@ export function renderSceneLookView(
   counts.className = "scene-look-counts";
   counts.textContent = model.counts;
   header.append(title, counts);
+  const activeSlot =
+    model.emptySlots || !model.selectedSlotId
+      ? null
+      : model.slots.find((item) => item.id === model.selectedSlotId) ?? null;
+  if (activeSlot) header.append(approvalPill(activeSlot));
   wrap.append(header);
 
   if (model.blockers.length || model.failedJobs.length) {
@@ -124,30 +131,30 @@ export function renderSceneLookView(
     tab.addEventListener("click", () => onIntent({ type: "select-slot", slotId: item.id }));
     slotRow.append(tab);
   }
-  wrap.append(
-    disclosure(
-      `Look slots (${model.slots.length})`,
-      slotRow,
-      false,
-    ),
-    disclosure(
-      "Prompt & metadata",
-      (() => {
-        const fields = document.createElement("div");
-        fields.className = "scene-look-fields";
-        const approval = document.createElement("p");
-        approval.className = "workflow-look-status";
-        approval.textContent = slot.approvalLabel;
-        const purpose = document.createElement("p");
-        purpose.className = "scene-look-purpose";
-        purpose.textContent = model.narrativePurpose;
-        fields.append(role.label, titleInput.label, promptInput.label, negativeInput.label, approval, purpose);
-        if (model.identityHint) fields.append(note("workflow-look-identity", model.identityHint));
-        return fields;
-      })(),
-      false,
-    ),
-  );
+  // Redo-plan composition: the selected artifact's title and narrative
+  // purpose read directly under the image, the slot tabs stay a persistent
+  // row, and only the editable prompt fields collapse.
+  const context = document.createElement("div");
+  context.className = "scene-look-context";
+  const heroTitle = document.createElement("h2");
+  heroTitle.className = "scene-look-hero-title";
+  heroTitle.textContent = slot.title || roleLabel(slot.role);
+  context.append(heroTitle);
+  if (model.narrativePurpose) context.append(note("scene-look-hero-purpose", model.narrativePurpose));
+  wrap.append(context);
+
+  const slotRowWrap = document.createElement("div");
+  slotRowWrap.className = "scene-look-slotrow";
+  const slotRowLabel = document.createElement("span");
+  slotRowLabel.className = "scene-look-slotrow-label";
+  slotRowLabel.textContent = `Look slots (${model.slots.length})`;
+  slotRowWrap.append(slotRowLabel, slotRow);
+  wrap.append(slotRowWrap);
+
+  const metaFields = document.createElement("div");
+  metaFields.className = "scene-look-fields";
+  metaFields.append(role.label, titleInput.label, promptInput.label, negativeInput.label);
+  wrap.append(disclosure("Prompt & metadata", metaFields, false));
 
   if (model.warnings.length || model.notes.length) {
     const list = document.createElement("div");
@@ -186,6 +193,17 @@ export function renderSceneLookView(
     wrap.append(disclosure(`Plates (${model.plates.length})`, plates, false));
   }
   return wrap;
+}
+
+/** Header approval pill: the artifact's approval state stays visible, never buried. */
+function approvalPill(slot: SceneLookModel["slots"][number]): HTMLElement {
+  const label = slot.approvalLabel || "Not approved";
+  const approved = /approved/i.test(label) && !/needs|not approved/i.test(label);
+  const pill = document.createElement("span");
+  pill.className = `scene-look-pill${approved ? " is-approved" : /reject/i.test(label) ? " is-rejected" : " is-pending"}`;
+  pill.textContent = approved ? `✓ ${label}` : label;
+  pill.setAttribute("aria-label", `Approval state: ${label}`);
+  return pill;
 }
 
 function compactBlockerSummary(
@@ -264,17 +282,41 @@ function alternateColumn(
     column.append(note("empty-state", "No alternates yet."));
   }
   for (const version of model.versions) {
-    const buttonEl = document.createElement("button");
-    buttonEl.type = "button";
-    buttonEl.className = `scene-look-alt${version.assetId === model.selectedAssetId ? " active" : ""}${
-      version.approved ? " approved" : ""
-    }${version.rejected ? " rejected" : ""}`;
-    buttonEl.append(stillImage(version));
+    // Per the mock: each alternate is a captioned preview with its own
+    // action bar beneath it (approve / open live on the tile itself).
+    const tile = document.createElement("article");
+    tile.className = `scene-look-alt-tile${version.assetId === model.selectedAssetId ? " selected" : ""}${version.approved ? " approved" : ""}${version.rejected ? " rejected" : ""}`;
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = `scene-look-alt${version.assetId === model.selectedAssetId ? " active" : ""}${version.approved ? " approved" : ""}${version.rejected ? " rejected" : ""}`;
+    pick.append(stillImage(version));
     const label = document.createElement("span");
     label.textContent = version.statusLabel;
-    buttonEl.append(label);
-    buttonEl.addEventListener("click", () => onIntent({ type: "select-version", assetId: version.assetId }));
-    column.append(buttonEl);
+    pick.append(label);
+    pick.addEventListener("click", () => onIntent({ type: "select-version", assetId: version.assetId }));
+    const actions = document.createElement("div");
+    actions.className = "scene-look-alt-actions";
+    const approve = button(version.approved ? "Approved" : "Approve", version.approved ? null : model.busyReason, () => {
+      const slotId = model.selectedSlotId;
+      if (!slotId) return;
+      onIntent({ type: "approve", slotId, assetId: version.assetId });
+    });
+    if (version.approved) approve.disabled = true;
+    const open = button("Open", version.path ? model.busyReason : "This still has no file path.", () => {
+      if (version.path) onIntent({ type: "open", path: version.path });
+    });
+    actions.append(approve, open);
+    if (!version.approved && !version.rejected) {
+      actions.append(
+        button("Reject", model.busyReason, () => {
+          const slotId = model.selectedSlotId;
+          if (!slotId) return;
+          onIntent({ type: "reject", slotId, assetId: version.assetId });
+        }),
+      );
+    }
+    tile.append(pick, actions);
+    column.append(tile);
   }
   const generate = document.createElement("button");
   generate.type = "button";

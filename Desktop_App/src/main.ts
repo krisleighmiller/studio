@@ -3316,6 +3316,10 @@ async function approveDirectorAction(
 ): Promise<void> {
   const tab = activeChat();
   if (!tab || tab.busy || chatSendInFlight) return;
+  // Treat dispatch as one-shot even if IPC rejects after host consumption.
+  // Re-rendering an uncertain result must never offer a replay of this token.
+  const source = tab.messages.find((message) => message.id === messageId);
+  if (source) source.text = source.text.replace(/\[\[workbench_approve:[A-Za-z0-9]+\]\]/, "").trim();
   tab.busy = true;
   chatSendInFlight = true;
   renderChat();

@@ -200,7 +200,7 @@ export async function run(out, injectFailure = false, scenario = null) {
   }
   let main; let page; let ownershipTimer; let failure;
   try {
-    const configured = scenario ? await scenario.setup({ out, env, report }) : null;
+    const configured = scenario ? await scenario.setup({ out, env, report, trackServer }) : null;
     fs.mkdirSync(env.TMPDIR, { recursive: true });
     const userData = configured?.userData ?? path.join(out, 'userData');
     const project = configured?.project ?? path.join(out, 'project');
@@ -209,7 +209,8 @@ export async function run(out, injectFailure = false, scenario = null) {
       fs.mkdirSync(project);
       fs.writeFileSync(path.join(project, 'README.md'), '# T01 isolated project\nNo media or paid providers.\n');
     }
-    const hostBin = path.join(root, 'host/target/debug/workbench-host');
+    const hostBin = configured?.hostBin ?? path.join(root, 'host/target/debug/workbench-host');
+    report.hostBinaryIdentity = identity(hostBin);
     const electronBin = path.join(root, 'node_modules/electron/dist/electron');
     report.identities = Object.fromEntries(['tests/ui-tracer.mjs', 'tests/ui-tracer-native.py', 'electron/main.mjs', 'electron/sidecar.mjs',
       'electron/preload.cjs', 'src/main.ts', 'package.json', 'host/target/debug/workbench-host', 'node_modules/electron/dist/electron']
@@ -241,8 +242,10 @@ export async function run(out, injectFailure = false, scenario = null) {
     const api = (id, kind, enabled) => ({ id, name: 'T01 loopback only', kind, baseUrl, apiKey: enabled ? 't01-synthetic-fixture-only' : '', secretKey: '', enabled,
       catalog: enabled ? [{ id: 't01-planner', displayName: 'T01 Planner', type: 'Text' }] : [], catalogFetchedAt: new Date().toISOString(), pinnedLlmModelIds: enabled ? ['t01-planner'] : [] });
     const settingsFile = path.join(userData, 'config/settings.json');
-    fs.writeFileSync(settingsFile, JSON.stringify({ apis: [api(apiId, 'atlas-cloud', true), api(ollamaId, 'ollama', false)],
-      capabilityDefaults: {}, adultContentEnabled: false, adultCapabilityDefaults: {}, selectedChatModel: null }));
+    const fixtureSettings = { apis: [api(apiId, 'atlas-cloud', true), api(ollamaId, 'ollama', false)],
+      capabilityDefaults: {}, adultContentEnabled: false, adultCapabilityDefaults: {}, selectedChatModel: null };
+    if (configured?.configureSettings) configured.configureSettings(fixtureSettings);
+    fs.writeFileSync(settingsFile, JSON.stringify(fixtureSettings));
     fs.writeFileSync(path.join(userData, 'recent-projects.json'), JSON.stringify([project]));
     report.fixture = { userData, settingsFile, project, baseUrl, marker };
     // Both reqwest and Chromium proxy all non-loopback HTTP(S) to a local deny endpoint.
@@ -307,7 +310,7 @@ export async function run(out, injectFailure = false, scenario = null) {
     scanOwned(); assert(owned.has(report.windowIdentity[0].pid), 'Renderer must descend from owned Electron');
     const host = processes().find(p => p.ppid === electron.pid && p.exe === fs.realpathSync(hostBin));
     assert(host, 'Owned real Rust sidecar missing'); report.host = host;
-    assert.equal(identity(`/proc/${host.pid}/exe`).sha256, report.identities['host/target/debug/workbench-host'].sha256);
+    assert.equal(identity(`/proc/${host.pid}/exe`).sha256, report.hostBinaryIdentity.sha256);
     const hostEnv = Object.fromEntries(fs.readFileSync(`/proc/${host.pid}/environ`, 'utf8').split('\0').filter(s => s.startsWith('WORKBENCH_SETTINGS_DIR=')).map(s => s.split(/=(.*)/s).slice(0, 2)));
     assert.equal(hostEnv.WORKBENCH_SETTINGS_DIR, path.join(userData, 'config')); report.hostSettingsDir = hostEnv.WORKBENCH_SETTINGS_DIR;
     const listening = execFileSync('ss', ['-H', '-ltnp'], { encoding: 'utf8', timeout: 5000 }).trim().split('\n');
@@ -348,7 +351,10 @@ export async function run(out, injectFailure = false, scenario = null) {
     assert(report.nativeMenu[0].label.endsWith(project.slice(-56)));
     await wait('native menu shown', async () => (await main.evaluate('__t01MenuEvents')).includes('show'));
 
+    fs.writeFileSync(path.join(out, 'native-menu.png'), Buffer.from((await page.call('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
+    await page.evaluate(`globalThis.__a02MenuObserved=[];window.workbench.onMenu(id=>__a02MenuObserved.push(id));true`);
     report.nativeSelection = native('keys');
+    report.afterNativeSelection = await main.evaluate(`({events:__t01MenuEvents,focused:__t01Electron.BrowserWindow.getAllWindows().map(w=>w.isFocused())})`);
     await wait('actual recent UI host/main open', () => report.observed.project || (report.errors.length ? Promise.reject(new Error(report.errors.join('\n'))) : false));
     assert.equal(report.observed.project.mainRoot, project); assert.equal(report.observed.project.hostRoot, project);
     await main.call('Debugger.removeBreakpoint', { breakpointId: breakpoint.breakpointId });
@@ -392,7 +398,7 @@ export async function run(out, injectFailure = false, scenario = null) {
   } catch (error) {
     failure = error; report.errors.push(error.stack);
     if (main) try { report.failureMain = await main.evaluate(`({menus:globalThis.__t01MenuEvents,windows:__t01Electron?.BrowserWindow.getAllWindows().map(w=>({focused:w.isFocused(),url:w.webContents.getURL()}))})`); } catch {}
-    if (page) try { report.failurePage = await page.evaluate(`({title:document.querySelector('#shell-project-name')?.title,text:document.body.innerText})`); } catch {}
+    if (page) try { report.failurePage = await page.evaluate(`({menuEvents:globalThis.__a02MenuObserved,title:document.querySelector('#shell-project-name')?.title,text:document.body.innerText})`); } catch {}
   }
   finally {
     clearInterval(ownershipTimer);

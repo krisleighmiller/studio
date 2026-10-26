@@ -42,7 +42,8 @@ def keyring(api_id, delete):
         raise SystemExit(1)
 
 
-def keys():
+def keys(sequence=("Home", "Return")):
+    assert sequence and all(key in ("Home", "Return", "Escape") for key in sequence)
     x = ctypes.CDLL(ctypes.util.find_library("X11"))
     xt = ctypes.CDLL(ctypes.util.find_library("Xtst"))
     x.XOpenDisplay.restype = ctypes.c_void_p
@@ -60,22 +61,24 @@ def keys():
         # menu-will-show precedes native widget mapping; bound the input settling
         # interval and flush each key before sending the activation key.
         time.sleep(0.15)
-        for key in ("Home", "Return"):
+        for key in sequence:
             code = x.XKeysymToKeycode(display, x.XStringToKeysym(key.encode()))
             assert code
             assert xt.XTestFakeKeyEvent(display, code, 1, 0)
+            x.XSync(display, 0)
+            time.sleep(0.08)
             assert xt.XTestFakeKeyEvent(display, code, 0, 0)
             x.XSync(display, 0)
             time.sleep(0.1)
         x.XSync(display, 0)
     finally:
         x.XCloseDisplay(display)
-    print(json.dumps({"nativeKeys": ["Home", "Return"]}))
+    print(json.dumps({"nativeKeys": list(sequence)}))
 
 
 if __name__ == "__main__":
     if sys.argv[1] == "keys":
-        keys()
+        keys(tuple(sys.argv[2:]) or ("Home", "Return"))
     elif sys.argv[1] in ("check", "clear"):
         keyring(sys.argv[2], sys.argv[1] == "clear")
     else:

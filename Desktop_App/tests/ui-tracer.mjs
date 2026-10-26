@@ -167,7 +167,7 @@ export async function plannerBody(request) {
   return body ? JSON.parse(body) : null;
 }
 
-export async function run(out, injectFailure = false) {
+export async function run(out, injectFailure = false, scenario = null) {
   assert(path.isAbsolute(out), '--out must be absolute');
   fs.mkdirSync(out, { recursive: false, mode: 0o700 });
   const save = (name, value) => fs.writeFileSync(path.join(out, name), JSON.stringify(value, null, 2));
@@ -200,9 +200,15 @@ export async function run(out, injectFailure = false) {
   }
   let main; let page; let ownershipTimer; let failure;
   try {
-    fs.mkdirSync(env.TMPDIR); const userData = path.join(out, 'userData'); const project = path.join(out, 'project');
-    fs.mkdirSync(path.join(userData, 'config'), { recursive: true }); fs.mkdirSync(project);
-    fs.writeFileSync(path.join(project, 'README.md'), '# T01 isolated project\nNo media or paid providers.\n');
+    const configured = scenario ? await scenario.setup({ out, env, report }) : null;
+    fs.mkdirSync(env.TMPDIR, { recursive: true });
+    const userData = configured?.userData ?? path.join(out, 'userData');
+    const project = configured?.project ?? path.join(out, 'project');
+    fs.mkdirSync(path.join(userData, 'config'), { recursive: true });
+    if (!configured) {
+      fs.mkdirSync(project);
+      fs.writeFileSync(path.join(project, 'README.md'), '# T01 isolated project\nNo media or paid providers.\n');
+    }
     const hostBin = path.join(root, 'host/target/debug/workbench-host');
     const electronBin = path.join(root, 'node_modules/electron/dist/electron');
     report.identities = Object.fromEntries(['tests/ui-tracer.mjs', 'tests/ui-tracer-native.py', 'electron/main.mjs', 'electron/sidecar.mjs',
@@ -222,7 +228,8 @@ export async function run(out, injectFailure = false) {
         response.writeHead(400); response.end('Unexpected route'); return;
       }
       response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ choices: [{ message: { content: `<director_action>${JSON.stringify({ action: 'done', message: marker })}</director_action>` } }] }));
+      const action = scenario ? await scenario.plan({ record, report, save }) : { action: 'done', message: marker };
+      response.end(JSON.stringify({ choices: [{ message: { content: `<director_action>${JSON.stringify(action)}</director_action>` } }] }));
       })().catch(error => { failAsync(error); response.destroy(); });
     });
     trackServer(planner); report.ports.planner = await listen(planner);
@@ -240,7 +247,7 @@ export async function run(out, injectFailure = false) {
     report.fixture = { userData, settingsFile, project, baseUrl, marker };
     // Both reqwest and Chromium proxy all non-loopback HTTP(S) to a local deny endpoint.
     const proxy = `http://127.0.0.1:${report.ports.denyProxy}`;
-    Object.assign(env, { WORKBENCH_DEV: '1', WORKBENCH_HOST_BIN: hostBin, XDG_CONFIG_HOME: path.join(out, 'xdg'),
+    Object.assign(env, { WORKBENCH_DEV: '1', WORKBENCH_HOST_BIN: hostBin, XDG_CONFIG_HOME: configured?.xdgConfig ?? path.join(out, 'xdg'),
       HTTP_PROXY: proxy, HTTPS_PROXY: proxy, ALL_PROXY: proxy, http_proxy: proxy, https_proxy: proxy, all_proxy: proxy,
       NO_PROXY: '127.0.0.1,localhost,::1', no_proxy: '127.0.0.1,localhost,::1' });
     delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS;
@@ -255,7 +262,7 @@ export async function run(out, injectFailure = false) {
     ownershipTimer = setInterval(() => { try { scanOwned(); } catch (error) { failAsync(error); } }, 80);
     start('vite', process.execPath, [path.join(root, 'node_modules/vite/bin/vite.js'), '--host', '127.0.0.1', '--port', '1420', '--strictPort'], env);
     await wait('owned Vite', async () => { try { return (await fetch('http://127.0.0.1:1420', { signal: AbortSignal.timeout(500) })).ok; } catch { return false; } });
-    const electron = start('electron', electronBin, ['.', `--inspect-brk=127.0.0.1:${report.ports.mainInspector}`,
+    const electron = start('electron', electronBin, ['.', '--ozone-platform=x11', `--inspect-brk=127.0.0.1:${report.ports.mainInspector}`,
       `--remote-debugging-port=${report.ports.rendererCDP}`, '--remote-debugging-address=127.0.0.1', `--user-data-dir=${userData}`,
       `--proxy-server=${proxy}`, `--log-net-log=${path.join(out, 'chromium-netlog.json')}`, '--proxy-bypass-list=127.0.0.1;localhost;[::1]', '--disable-background-networking', '--disable-component-update', '--disable-sync', '--no-first-run'], env);
     const mainTargets = await wait('Electron main /json/list', async () => await jsonAt(report.ports.mainInspector, '/json/list'));
@@ -323,7 +330,10 @@ export async function run(out, injectFailure = false) {
           const isResult = resultBreakpoint && event.params.hitBreakpoints?.includes(resultBreakpoint.breakpointId);
           const value = checkedValue(await main.call('Debugger.evaluateOnCallFrame', { callFrameId: event.params.callFrames[0].callFrameId,
             expression: isResult ? 'message.result' : '({mainRoot:sessionRoot,hostRoot:result.root})', returnByValue: true }));
-          if (isResult) report.observed.hostResponse = value; else report.observed.project = value;
+          if (isResult) {
+            report.observed.hostResponse = value;
+            (report.observed.hostResponses ??= []).push(value);
+          } else report.observed.project = value;
         } catch (error) { report.errors.push(error.message); }
         finally { await main.call('Debugger.resume'); }
       })().catch(error => report.errors.push(error.message));
@@ -337,6 +347,7 @@ export async function run(out, injectFailure = false) {
     assert(report.nativeMenu[0].label.startsWith(`${path.basename(project)} — `));
     assert(report.nativeMenu[0].label.endsWith(project.slice(-56)));
     await wait('native menu shown', async () => (await main.evaluate('__t01MenuEvents')).includes('show'));
+
     report.nativeSelection = native('keys');
     await wait('actual recent UI host/main open', () => report.observed.project || (report.errors.length ? Promise.reject(new Error(report.errors.join('\n'))) : false));
     assert.equal(report.observed.project.mainRoot, project); assert.equal(report.observed.project.hostRoot, project);
@@ -350,6 +361,13 @@ export async function run(out, injectFailure = false) {
     await wait('model selection persisted by change handler', () => JSON.parse(fs.readFileSync(settingsFile)).selectedChatModel?.apiId === apiId);
     const settings = JSON.parse(fs.readFileSync(settingsFile)); assert(!settings.apis[0].apiKey, 'Fixture key must migrate off disk');
     report.keyringDuring = native('check', apiId); assert.equal(report.keyringDuring.remaining, 1);
+    if (scenario) {
+      const sidecarLines = fs.readFileSync(path.join(root, 'electron/sidecar.mjs'), 'utf8').split('\n');
+      resultBreakpoint = await main.call('Debugger.setBreakpointByUrl', { url: pathToFileURL(path.join(root, 'electron/sidecar.mjs')).href,
+        lineNumber: sidecarLines.findIndex(line => line.includes('pending.resolve(message.result)')), condition: "typeof message.result?.reply === 'string'" });
+      await scenario.exercise({ page, main, report, save, wait, out, project, root });
+      await main.call('Debugger.removeBreakpoint', { breakpointId: resultBreakpoint.breakpointId });
+    } else {
     const sidecarLines = fs.readFileSync(path.join(root, 'electron/sidecar.mjs'), 'utf8').split('\n');
     resultBreakpoint = await main.call('Debugger.setBreakpointByUrl', { url: pathToFileURL(path.join(root, 'electron/sidecar.mjs')).href,
       lineNumber: sidecarLines.findIndex(line => line.includes('pending.resolve(message.result)')), condition: `message.result?.reply === ${JSON.stringify(marker)}` });
@@ -370,6 +388,7 @@ export async function run(out, injectFailure = false) {
     const screenshot = await page.call('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(path.join(out, 'terminal.png'), Buffer.from(screenshot.data, 'base64'));
     report.steps.push({ pass: 'change event + actual form -> real host -> exactly one loopback terminal Director response' });
+    }
   } catch (error) {
     failure = error; report.errors.push(error.stack);
     if (main) try { report.failureMain = await main.evaluate(`({menus:globalThis.__t01MenuEvents,windows:__t01Electron?.BrowserWindow.getAllWindows().map(w=>({focused:w.isFocused(),url:w.webContents.getURL()}))})`); } catch {}

@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+cd -- "$(dirname -- "$(readlink -f -- "$0")")"
+export STUDIO_SOURCE=${STUDIO_SOURCE:-/home/kris/Content_Creation}
+if docker info --format '{{json .SecurityOptions}}' | grep -q 'name=rootless'; then
+  export STUDIO_UID=${STUDIO_UID:-0} STUDIO_GID=${STUDIO_GID:-0}
+  export COMPOSE_FILE=${COMPOSE_FILE:-compose.yaml:compose.rootless.yaml}
+else
+  export STUDIO_UID=${STUDIO_UID:-$(id -u)} STUDIO_GID=${STUDIO_GID:-$(id -g)}
+fi
+exec docker compose -p "${STUDIO_PROJECT:-studio-dev}" "$@"

@@ -1,0 +1,19 @@
+services:
+  ui:
+    environment:
+      STUDIO_NATIVE_DISPLAY: "1"
+      DISPLAY: ${DISPLAY:?Run native-display on the graphical host}
+      XAUTHORITY: /tmp/studio-xauthority
+    volumes:
+      - type: bind
+        source: /tmp/.X11-unix
+        target: /tmp/.X11-unix
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${STUDIO_XAUTHORITY:?Run native-display}
+        target: /tmp/studio-xauthority
+        read_only: true
+        bind:
+          create_host_path: false

@@ -1,0 +1,9 @@
+services:
+  ui:
+    user: "0:0"
+    # Only the namespace bootstrap needs this capability. Mapping parent UID 0
+    # requires SETFCAP (Linux >=5.12). unshare then runs as nested UID 1000,
+    # with zero effective/permitted capabilities, still host-owned kris on FUSE.
+    cap_add: [SETFCAP]
+    environment:
+      STUDIO_MAP_UI: "1"

@@ -1,0 +1,5 @@
+# The image contains environment tooling only; application source is bind-mounted.
+# Also keep Syncthing's transient files out of the build context.
+*
+!Dockerfile
+!session.sh

@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+cd -- "$(dirname -- "$(readlink -f -- "$0")")"
+: "${DISPLAY:?Run from your laptop graphical terminal}"
+command -v xauth >/dev/null
+state=${XDG_RUNTIME_DIR:-${TMPDIR:?Set TMPDIR}}/studio-docker-xauth
+mkdir -p "$state"; chmod 0700 "$state"
+export STUDIO_XAUTHORITY
+STUDIO_XAUTHORITY=$(mktemp "$state/authority.XXXXXX")
+trap 'rm -f -- "$STUDIO_XAUTHORITY"' EXIT
+xauth nlist "$DISPLAY" | python3 -c 'import sys;print("".join("ffff"+s[4:] for s in sys.stdin),end="")' | xauth -f "$STUDIO_XAUTHORITY" nmerge -
+test -s "$STUDIO_XAUTHORITY"
+chmod 0600 "$STUDIO_XAUTHORITY"
+if [[ $# == 0 ]]; then set -- bash /source/Studio/dev-container/run-ui.sh; fi
+./studio -f compose.yaml -f compose.native.yaml --profile ui run --rm --no-deps ui desktop "$@"

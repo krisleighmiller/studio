@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+cd -- "$(dirname -- "$(readlink -f -- "$0")")"
+./studio up -d --no-build workbench
+./studio exec -T workbench bash -euo pipefail -c '
+  npm ci --no-audit --no-fund
+  # Electron 43 lazily downloads its executable; provision it while online,
+  # before the offline UI container starts. This is dependency cache, not source.
+  node node_modules/electron/install.js
+  npm run build
+  cargo build --locked --manifest-path host/Cargo.toml
+'

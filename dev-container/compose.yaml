@@ -1,0 +1,52 @@
+services:
+  workbench: &workbench
+    image: studio-dev:portable
+    build: .
+    init: true
+    user: "${STUDIO_UID:?Use ./studio}:${STUDIO_GID:?Use ./studio}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./playwright-seccomp.json
+    cpus: 2.0
+    mem_limit: 8g
+    memswap_limit: 8g
+    pids_limit: 512
+    shm_size: 1g
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,exec,size=2g,mode=1777
+    working_dir: /source/Studio/Desktop_App
+    environment:
+      CARGO_HOME: /runtime/cargo
+      CARGO_TARGET_DIR: /runtime/target
+      CARGO_BUILD_JOBS: "2"
+      RAYON_NUM_THREADS: "2"
+      TOKIO_WORKER_THREADS: "2"
+      XDG_CACHE_HOME: /runtime/cache
+      npm_config_cache: /runtime/npm
+      WORKBENCH_DEV: "1"
+      WORKBENCH_HOST_BIN: /runtime/target/debug/workbench-host
+    volumes:
+      - type: bind
+        source: ${STUDIO_SOURCE:?Set Content_Creation path}
+        target: /source
+        bind:
+          create_host_path: false
+      - runtime:/runtime
+      - node_modules:/source/Studio/Desktop_App/node_modules
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+  ui:
+    <<: *workbench
+    # Chromium must not run as namespace-root, even with rootless Docker.
+    user: "1000:1000"
+    network_mode: none
+    profiles: [ui]
+    command: [desktop, sleep, infinity]
+volumes:
+  runtime:
+  node_modules:

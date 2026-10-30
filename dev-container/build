@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+cd -- "$(dirname -- "$(readlink -f -- "$0")")"
+# Both tested Docker engines retain the legacy builder. Unlike default BuildKit,
+# this path honors these per-build resource limits without a privileged builder.
+# Docker prints its deprecation warning; fail rather than silently build unbounded
+# on a future engine that removes this interface.
+DOCKER_BUILDKIT=0 docker build --cpu-period=100000 --cpu-quota=200000 --memory=8g --memory-swap=8g -t studio-dev:portable .

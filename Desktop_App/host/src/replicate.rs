@@ -200,7 +200,7 @@ pub fn collect_media(
     let polled = get_prediction(api, prediction_id, wait_seconds, app)?;
     let parsed: Value = serde_json::from_str(&polled).unwrap_or(json!({}));
     if parsed.get("status").and_then(|v| v.as_str()) == Some("failed") {
-        return Err(format!("Replicate prediction failed: {parsed}"));
+        return Err("provider-failed: Replicate prediction ended with status=failed; do not resume".into());
     }
     let url = parsed
         .get("output_url")

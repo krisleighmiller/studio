@@ -405,7 +405,8 @@ mod tests {
             Some(4.36)
         );
         let d = v.handoff.derived.as_ref().unwrap();
-        assert_eq!(d.minimum_source_duration_seconds, 10.0);
+        assert_eq!(d.minimum_source_duration_seconds, 6.36);
+        assert_eq!(v.handoff.editing.estimated_screen_duration_seconds, 5.36);
         assert_eq!(d.render_duration_seconds, 10.0);
         assert_eq!(v.handoff.editing.pace, Pace::Natural);
         assert_eq!(v.handoff.provider, "atlascloud");

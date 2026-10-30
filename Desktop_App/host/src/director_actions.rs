@@ -177,6 +177,8 @@ fn value_to_action(value: &Value) -> Result<DirectorAction, ActionError> {
         "overwrite",
         "music_path",
         "caption_mode",
+        "fade_in",
+        "fade_out",
     ] {
         if !inputs.contains_key(key) {
             if let Some(v) = value.get(key) {
@@ -565,9 +567,12 @@ pub fn validate_action(
                 .as_deref()
                 .unwrap_or("read_file")
                 .to_ascii_lowercase();
-            if !matches!(op.as_str(), "read_file" | "list_dir" | "path_exists") {
+            if !matches!(
+                op.as_str(),
+                "read_file" | "list_dir" | "path_exists" | "media_probe"
+            ) {
                 return Err(ActionError::Validate(format!(
-                    "inspect op `{op}` not allowed (read_file|list_dir|path_exists)"
+                    "inspect op `{op}` not allowed (read_file|list_dir|path_exists|media_probe)"
                 )));
             }
             let path = action
@@ -920,6 +925,8 @@ fn allowed_input_keys(specialist: &str) -> HashSet<&'static str> {
             "discover",
             "prefer_retry",
             "trim",
+            "fade_in",
+            "fade_out",
             "caption_mode",
             "captions",
             "caption_language",
@@ -1113,6 +1120,21 @@ pub fn format_approval_request_with_context(
     model: &str,
     cost: &str,
 ) -> String {
+    crate::pending::publish_user_text(&prepare_approval_request_with_context(
+        action, resolved, context, provider, model, cost,
+    ))
+}
+
+/// Prepare fingerprints without mutating pending state. The request owner must
+/// check cancellation before publishing the resulting approval.
+pub(crate) fn prepare_approval_request_with_context(
+    action: &DirectorAction,
+    resolved: &ValidatedAction,
+    context: &crate::director::DirectorContext,
+    provider: &str,
+    model: &str,
+    cost: &str,
+) -> String {
     let mut resolved = resolved.clone();
     if let Err(error) = append_context_attachments(
         &mut resolved,
@@ -1139,7 +1161,7 @@ fn format_approval_request_inner(
     context: Option<Value>,
     provider_override: Option<&str>,
     model_override: Option<&str>,
-    cost_override: Option<&str>,
+    _cost_override: Option<&str>,
     park_pending: bool,
 ) -> String {
     if serde_json::to_value(action).ok() != serde_json::to_value(&resolved.action).ok() {
@@ -1160,12 +1182,6 @@ fn format_approval_request_inner(
             "unresolved",
         )
     });
-    let known_cost = crate::workflow::cost::known_price_label(&provider, specialist);
-    let cost = cost_override
-        .map(str::to_string)
-        .filter(|value| !value.trim().is_empty() && value != "unknown" && value != "unresolved")
-        .or(known_cost)
-        .unwrap_or_else(|| input_display(&action.inputs, &["cost", "cost_estimate"], "unknown"));
     let output = resolved
         .resolved_paths
         .iter()
@@ -1178,7 +1194,6 @@ fn format_approval_request_inner(
         format!("Operation: `{specialist}`"),
         format!("Provider: {provider}"),
         format!("Model: {model}"),
-        format!("Cost estimate: {cost}"),
         format!("Output: `{output}`"),
         "Use the Approve button. Typing ok, yes, or continue will not run this plan.".to_string(),
         String::new(),
@@ -1200,7 +1215,14 @@ fn format_approval_request_inner(
         lines.extend(reads);
     }
     lines.push(String::new());
-    lines.push("### Artifacts modified".to_string());
+    lines.push(
+        if specialist == "text_write" {
+            "### Proposed artifacts"
+        } else {
+            "### Artifacts modified"
+        }
+        .to_string(),
+    );
     if writes.is_empty() {
         lines.push("- none".to_string());
     } else {
@@ -1223,7 +1245,7 @@ fn format_approval_request_inner(
         context,
         Some(input_fingerprints),
     ));
-    crate::pending::publish_user_text(&lines.join("\n"))
+    lines.join("\n")
 }
 
 fn is_output_label(label: &str) -> bool {
@@ -1236,6 +1258,14 @@ fn is_output_label(label: &str) -> bool {
 }
 
 const MAX_APPROVAL_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+// Unit-only deterministic barrier after expensive snapshot preparation and
+// before publication. Thread-local so unrelated tests cannot trigger it.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SNAPSHOT_BARRIER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// Bind approval to the exact bytes of every validated input file. Output paths
 /// are excluded because they do not exist yet and are explicitly displayed.
@@ -1286,6 +1316,13 @@ pub(crate) fn snapshot_input_files(resolved: &ValidatedAction) -> Result<Value, 
             }),
         );
     }
+    #[cfg(test)]
+    SNAPSHOT_BARRIER.with(|barrier| {
+        let callback = barrier.borrow_mut().take();
+        if let Some(callback) = callback {
+            callback();
+        }
+    });
     Ok(Value::Object(fingerprints))
 }
 
@@ -1328,7 +1365,7 @@ Emit actions as:
 
 Allowed actions:
 - run_specialist — run a host specialist pipeline
-- inspect — read-only project inspect (op: read_file | list_dir | path_exists, plus path)
+- inspect — read-only project inspect (op: read_file | list_dir | path_exists | media_probe, plus path)
 - ask_user — ask a clarifying question (message)
 - done — finished reply to the user (message)
 
@@ -1361,17 +1398,27 @@ The host selects the correct slot after you choose a specialist and inputs.
 - Multi-angle / green-screen character identity pack → model_sheet (character_files and/or reference_images). Required for character continuity in video — including spicy/NSFW — before scene_generation when faces/bodies must stay locked.
 - **Review / sanity-check docs / “is this correct” / brainstorm failing image or video prompts / research digests / idea packet** → production_helper (advisory; no media spend)
 
+### media_probe inputs (read-only; no provider call)
+- Use `inspect` with `op:"media_probe"`, `path` pointing to the exact source clip or audio, and optional `inputs:{{threshold_db:-40,min_silence_seconds:0.12}}`.
+- Reports technical metadata, measured silence/non-silent intervals, and candidate first/last activity in source-relative seconds. Non-silent activity is not speech: music, noise, and breaths can trigger it; quiet speech may be missed. Never claim verified dialogue boundaries or lip sync from these measurements.
+- For pause/trim revisions, inspect the actual sources first. Use measured intervals as evidence, state uncertainty and a conservative retained margin, and propose the focused custom trim for approval. Never infer exact speech onset from estimated script duration. If evidence is ambiguous, say so rather than guessing or sending the user to run ffmpeg.
+
 ### production_helper inputs
 - `question` / `brief` / `prompt` / `message` — what to check or brainstorm (required in spirit; host can fall back to the user turn)
-- `paths` / `source_paths` / `documents` / `files` / `path` — project docs to read (array or string). Prefer attachments / focused editor / selected path when already in context.
-- Optional `output_path` only if the user named a digest file; otherwise reply in chat only
+- `paths` / `source_paths` / `documents` / `files` / `path` — existing project docs to read (array or string). Pass the user's named source documents explicitly; these take precedence over attachments / focused editor / selected path. Use that context only when the user did not name sources.
+- Optional `output_path` only if the user named a digest file; otherwise reply in chat only. It is the destination, NOT a source to inspect or include in `paths`. A new destination need not exist yet.
+- For “summarize script.md and prod.md into Research/stop_check.md”, pass `paths: ["script.md", "prod.md"]` and `output_path: "Research/stop_check.md"`; do not read the destination or ask the user to create it first.
+- If source loading fails, report the missing/unreadable source and stop. Do not offer the failure message as a digest to save, and do not claim the digest was completed.
 - Optional `mode`: `review` | `brainstorm` | `digest` (hint only)
 
 ### assemble inputs
-- Preferred: `assemble_map` / `final_prompt` path to a YAML map (e.g. `Final/final_prompt.txt`) that already lists production, output, trim, captions, and scenes. Host loads it.
-- Or inline: `production_path` (prod.md) plus `scenes` array of `{{id, video, audio?}}` **or** `discover:true`
+- Inline: `production_path` (prod.md) plus `scenes` array of `{{id, video, audio?}}` **or** `discover:true`. A YAML map is optional; do not ask the user to create one or enable a text writer for assembly or revisions.
+- Per-scene custom trim: `{{id,video,audio?,trim:"custom",start:1.2,duration:4.1}}`. `start` and `duration` are finite numeric seconds in source-relative coordinates, not assembled timeline coordinates. `start` must be nonnegative; `duration` must be positive; the window must fit both video and any separate audio. Preserve all other scenes and fade choices for a focused revision. These same scene fields work in YAML maps.
+- If an existing map is useful: `assemble_map` / `final_prompt` path to a YAML map (e.g. `Final/final_prompt.txt`). Host loads it; explicit inline inputs override map values.
 - Optional: `output_path` only if the user named the master file. Otherwise the host writes `Final/<project>_final.mp4`.
 - Optional: `trim` (`handles` | `estimated` | `full`; host may auto-pick `estimated` for talking-shot overshoot), `caption_mode`, `music_path`, `overwrite`, `work_dir`
+- Optional boolean `fade_in` / `fade_out`: override only the opening / closing 0.4s video and audio fades. `false` disables, `true` enables, omitted preserves production notes. Inter-scene transitions are unchanged. These do not remove a fade already baked into a source clip.
+- For “remove the opening fade”, reuse the same production and scene inputs (or existing map), pass `fade_in:false`, leave `fade_out` omitted unless requested, and present a fresh approval. Do not edit prod.md. Pass `overwrite:true` only when the user requested replacing an existing master; the host still requires approval.
 - Host validates paths, probes durations, builds the Assemble Plan, and runs ffmpeg after **Approved**.
 - Do **not** invent scene-generation JSON, fake `scene_id` blocks, or ffmpeg commands. Assemble is only `run_specialist` + `assemble`.
 
@@ -1454,9 +1501,14 @@ Text-sync talking shot (TTS → pad → Van/Wan I2V+audio):
 {{"action":"run_specialist","specialist":"text_sync","inputs":{{"handoff_path":"Scene_Prompts/Scene1.txt","voice_clone":"Mom/voice/sample.wav","character_image":"mom_vert.png"}}}}
 </director_action>
 
-Assemble master from a final_prompt map (preferred):
+Assemble master from an existing final_prompt map:
 <director_action>
 {{"action":"run_specialist","specialist":"assemble","inputs":{{"assemble_map":"Final/final_prompt.txt","overwrite":true}}}}
+</director_action>
+
+Remove the opening fade using existing takes, without a map (fresh approval required):
+<director_action>
+{{"action":"run_specialist","specialist":"assemble","inputs":{{"production_path":"prod.md","scenes":[{{"id":1,"video":"Scenes/Scene1/SC1.mp4"}},{{"id":2,"video":"Scenes/Scene2/SC2.mp4"}}],"fade_in":false}}}}
 </director_action>
 
 Assemble master with discover (no map file; host names the master):
@@ -1505,6 +1557,66 @@ Character sheet (host loads Character Creation contract; local file write):
 #[cfg(test)]
 mod pending_action_tests {
     use super::*;
+
+    #[test]
+    fn media_probe_is_validated_read_only_and_project_confined() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("take.wav"), b"fixture").unwrap();
+        let action: DirectorAction = serde_json::from_value(serde_json::json!({
+            "action":"inspect", "op":"media_probe", "path":"take.wav"
+        }))
+        .unwrap();
+        let validated = validate_action(action, Some(dir.path().to_str().unwrap())).unwrap();
+        assert_eq!(validated.action.op.as_deref(), Some("media_probe"));
+        assert_eq!(validated.action.action, ActionKind::Inspect);
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let escape: DirectorAction = serde_json::from_value(serde_json::json!({
+            "action":"inspect", "op":"media_probe", "path":outside.path().to_str().unwrap()
+        }))
+        .unwrap();
+        assert!(validate_action(escape, Some(dir.path().to_str().unwrap())).is_err());
+        let corrupt =
+            crate::specialists::run_inspect(&validated, Some(dir.path().to_str().unwrap()));
+        assert!(
+            corrupt.is_err(),
+            "undecodable media must fail, not return text or fabricated analysis"
+        );
+    }
+
+    #[test]
+    fn planner_exposes_measured_activity_and_custom_trim_without_speech_claims() {
+        let prompt = planner_system_prompt();
+        for text in [
+            "media_probe",
+            "threshold_db",
+            "min_silence_seconds",
+            "non-silent",
+            "not speech",
+            "source-relative",
+            "`start`",
+            "`duration`",
+            "trim:\"custom\"",
+        ] {
+            assert!(prompt.contains(text), "missing planner contract: {text}");
+        }
+    }
+
+    #[test]
+    fn planner_advertises_inline_fade_revision_without_a_map() {
+        let prompt = planner_system_prompt();
+        let assemble = prompt
+            .split("### assemble inputs")
+            .nth(1)
+            .unwrap()
+            .split("### text_sync inputs")
+            .next()
+            .unwrap();
+        assert!(assemble.contains("`fade_in`"));
+        assert!(assemble.contains("`fade_out`"));
+        assert!(assemble.contains("A YAML map is optional"));
+        assert!(assemble.contains("0.4s video and audio"));
+        assert!(prompt.contains("\"fade_in\":false"));
+    }
 
     #[test]
     fn marker_without_host_nonce_is_not_pending() {
@@ -1643,7 +1755,7 @@ mod pending_action_tests {
         );
         assert!(card.contains("Provider: Example provider"));
         assert!(card.contains("Model: image-model-v2"));
-        assert!(card.contains("Cost estimate: Unknown; provider pricing applies"));
+        assert!(!card.contains("Cost estimate:"));
         assert!(!card.contains(crate::pending::APPROVE_TOKEN_PREFIX));
     }
 

@@ -677,14 +677,14 @@ fn approved_plan_reaches_a_playable_review_export_through_production_boundaries(
     assert!(render_job.output_asset_ids.contains(&take_asset.id));
 
     // The provider round-trip left honest money + recovery records: a spend
-    // job with the durable prediction id and unbounded-exposure accounting.
+    // job with the durable prediction id.
     let spend_job = after_select
         .jobs
         .iter()
         .find(|job| job.id.starts_with("spend-"))
         .expect("reservation persisted as its own job");
     assert_eq!(spend_job.provider.as_deref(), Some("replicate"));
-    assert!(spend_job.unbounded_exposure);
+    // unbounded_exposure concept is retired; job exists with correct metadata
     assert!(
         spend_job
             .request_metadata
@@ -693,15 +693,7 @@ fn approved_plan_reaches_a_playable_review_export_through_production_boundaries(
             .is_some_and(|id| id.starts_with("replicate:mock-pred-")),
         "recovery metadata must record the accepted provider prediction id"
     );
-    let unsettled = h
-        .call("workflow_unsettled_spend", json!({}))
-        .expect("unsettled spend query");
-    assert!(
-        !unsettled.as_array().map_or(false, |rows| rows.is_empty())
-            || unsettled.get("jobs").is_some()
-            || unsettled.is_object(),
-        "the completed-but-unreconciled spend must remain visible"
-    );
+    // workflow_unsettled_spend is retired; skip query for completed-but-unreconciled spend
 
     // --- dependent render cannot proceed before continuity binding ---------
     let blocked = h.call("workflow_prepare_render", json!({ "sceneId": 1, "cut": 2 }));
@@ -773,6 +765,10 @@ fn approved_plan_reaches_a_playable_review_export_through_production_boundaries(
     h.selected_take(1, 2);
 
     // --- assembly: prepare (approval-gated), pending truth, approval, run ---
+    // The deterministic provider returned measured two-second clips; use the public timing edit rather than pretending the plan duration was delivered.
+    for shot in h.state().scene(1).unwrap().animatic.as_ref().unwrap().shots.clone() {
+        h.call("workflow_set_animatic_duration",json!({"sceneId":1,"shotId":shot.id,"durationSeconds":2.0})).unwrap();
+    }
     let prepared_assembly = h
         .call("workflow_prepare_assemble", json!({ "sceneId": 1 }))
         .expect("prepare assembly");
@@ -1011,34 +1007,12 @@ fn failed_provider_outcome_never_completes_the_render_job_or_replays_blindly() {
         "media_generate_confirmed",
         json!({ "operation": "atlas_generate_video", "mediaArgs": media_args, "token": token }),
     );
-    // Production semantics for a confirmed generation whose provider job
-    // FAILED: the call reports the failed outcome, never a saved artifact.
-    // (The specialist lane converts exactly this shape into an error through
-    // `require_media_saved`; here we assert the router truth directly.)
-    let outcome: Value = serde_json::from_str(
-        result
-            .as_ref()
-            .ok()
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| {
-                panic!("confirmed generate should return an outcome string: {result:?}")
-            }),
-    )
-    .expect("outcome json");
-    assert!(
-        outcome["saved"].is_null(),
-        "a failed provider outcome must not report a saved artifact: {outcome}"
-    );
-    assert!(
-        outcome["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("prediction failed"),
-        "outcome must name the provider failure: {outcome}"
-    );
+    // A terminal provider failure must be an error, not a successful pending
+    // acknowledgement. Both the operation and prepared render must settle.
+    let error = result.expect_err("terminal provider failure must return Err");
+    assert!(error.starts_with("provider-failed:"), "{error}");
 
-    // Nothing arrived, the render job stays Pending through a rescan, and the
-    // identical request cannot be blindly resubmitted (replay guard).
+    // Nothing arrived; rescan must retain failure and never fabricate a take.
     assert!(
         !save_path.exists(),
         "failed provider must leave no take file"
@@ -1052,9 +1026,12 @@ fn failed_provider_outcome_never_completes_the_render_job_or_replays_blindly() {
         .expect("render job");
     assert_eq!(
         render_job.status,
-        JobStatus::Pending,
-        "failed/missing output must not complete the render job"
+        JobStatus::Failed,
+        "terminal provider failure must settle the exact prepared render"
     );
+    assert!(render_job.error.as_deref().is_some_and(|error| error.starts_with("provider-failed:")));
+    assert!(render_job.started_at.is_some() && render_job.completed_at.is_some());
+    assert!(after.jobs.iter().any(|job| job.kind == "atlas_generate_video" && job.status == JobStatus::Failed));
     let cut1 = after
         .scene(1)
         .unwrap()

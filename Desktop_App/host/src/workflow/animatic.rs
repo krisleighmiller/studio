@@ -96,6 +96,10 @@ pub fn set_duration(scene: &mut SceneRecord, shot_id: &str, seconds: f64) -> Res
             .iter()
             .position(|shot| shot.id == shot_id)
             .ok_or_else(|| format!("animatic shot {shot_id} not found"))?;
+        let shot = &animatic.shots[index];
+        if shot.trim_in_seconds.unwrap_or(0.0) + shot.trim_out_seconds.unwrap_or(0.0) >= seconds {
+            return Err("Trim points leave the shot with no runtime. Set a longer duration or smaller trim.".into());
+        }
         if (animatic.shots[index].duration_seconds - seconds).abs() < 0.001 {
             return Ok(());
         }
@@ -246,6 +250,16 @@ pub fn approve(scene: &mut SceneRecord) -> Result<(), String> {
     }) {
         return Err("Every shot needs a duration before the rough cut can be approved.".into());
     }
+    if animatic.shots.iter().any(|shot| {
+        [shot.trim_in_seconds, shot.trim_out_seconds]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.is_finite() || value < 0.0)
+            || shot.trim_in_seconds.unwrap_or(0.0) + shot.trim_out_seconds.unwrap_or(0.0)
+                >= shot.duration_seconds
+    }) {
+        return Err("Trim points leave a shot with invalid runtime. Set a longer duration or smaller trim.".into());
+    }
     animatic.approved = true;
     Ok(())
 }
@@ -258,6 +272,11 @@ pub fn attach_scratch(
 ) -> Result<String, String> {
     if !source.is_file() {
         return Err(format!("scratch audio not found: {}", source.display()));
+    }
+    // Validate shot_id: nonempty ASCII alphanumeric / _ / - only. Any
+    // slash, backslash, dot, or other path-bearing input is rejected.
+    if shot_id.is_empty() || !shot_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err("invalid shot id: only ASCII alphanumeric, '_', and '-' are allowed".into());
     }
     let ext = source
         .extension()
@@ -276,14 +295,41 @@ pub fn attach_scratch(
         .iter_mut()
         .find(|shot| shot.id == shot_id)
         .ok_or_else(|| format!("animatic shot {shot_id} not found"))?;
+    // Build the known relative path from validated components.
     let rel = format!("Preproduction/Scene{}/animatic/{shot_id}.{ext}", scene.id);
-    let dest = project_root.join(&rel);
+    let root_str = project_root.to_string_lossy().into_owned();
+    // Confine destination BEFORE create_dir_all: resolve against the
+    // project root and enforce the exact Preproduction/SceneN/animatic bucket.
+    let dest = crate::project_path::resolve(&rel, Some(&root_str), crate::project_path::PathIntent::Write)
+        .map(|resolved| resolved.into_path_buf())
+        .map_err(|error| format!("scratch destination outside project: {error}"))?;
+    crate::project_path::under_scene_bucket(project_root, &dest, "animatic")
+        .map_err(|error| format!("scratch destination outside animatic bucket: {error}"))?;
+    if crate::project_path::relative_to_root(project_root, &dest)?.parent()
+        != Path::new(&rel).parent()
+    {
+        return Err("scratch destination is outside this scene animatic bucket".into());
+    }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
     }
-    if source != dest.as_path() {
-        fs::copy(source, &dest)
+    // Re-confine AFTER create_dir_all — fs::copy follows the parent chain,
+    // so the final destination must still be inside the exact animatic bucket
+    // of this scene. This blocks directory or existing-file symlinks that
+    // could redirect the write outside root.
+    let dest_again = crate::project_path::resolve(&rel, Some(&root_str), crate::project_path::PathIntent::Write)
+        .map(|resolved| resolved.into_path_buf())
+        .map_err(|error| format!("scratch destination outside project: {error}"))?;
+    crate::project_path::under_scene_bucket(project_root, &dest_again, "animatic")
+        .map_err(|error| format!("scratch destination outside animatic bucket: {error}"))?;
+    if crate::project_path::relative_to_root(project_root, &dest_again)?.parent()
+        != Path::new(&rel).parent()
+    {
+        return Err("scratch destination is outside this scene animatic bucket".into());
+    }
+    if source != dest_again.as_path() {
+        fs::copy(source, &dest_again)
             .map_err(|error| format!("could not copy scratch audio: {error}"))?;
     }
     shot.scratch_audio_path = Some(rel.clone());

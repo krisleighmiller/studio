@@ -33,7 +33,7 @@ describe("direct voice spend authorization (host mocked; no provider calls)", ()
     async (policy) => {
       const { run, invoke, confirm } = setup(policy);
       await expect(run()).resolves.toEqual({ projectRoot: "/project", confirmation: "one-use-token" });
-      expect(confirm).toHaveBeenCalledWith(expect.stringContaining("no verified USD maximum"));
+      expect(confirm).toHaveBeenCalledWith(expect.stringContaining("elevenlabs_tts_preview"));
       expect(invoke).toHaveBeenNthCalledWith(1, "elevenlabs_quote_voice_spend", {
         projectRoot: "/project",
         operation: "elevenlabs_tts_preview",
@@ -50,6 +50,20 @@ describe("direct voice spend authorization (host mocked; no provider calls)", ()
       });
     },
   );
+
+  it("no-budget approval keeps host disclosure without inventing a budget", async () => {
+    const disclosure = "No project budget is configured. Actual provider cost is unknown.";
+    const invoke = vi.fn(async (command: string) => command === "elevenlabs_quote_voice_spend"
+      ? { ...quote("approval_required"), disclosure } : "one-use-token");
+    const confirm = vi.fn((_message: string) => true);
+    await authorizeVoiceSpendWith(
+      { invoke, confirm, projectRoot: () => "/project" },
+      "elevenlabs_tts_preview", "eleven_multilingual_v2",
+      JSON.stringify({ text: "hello", voice_id: "voice-a" }),
+    );
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("elevenlabs_tts_preview"));
+    expect(confirm.mock.calls[0][0]).not.toContain("more than the project budget");
+  });
 
   it("decline issues no confirmation token and therefore no paid provider command", async () => {
     const { run, invoke } = setup("approval_required", false);

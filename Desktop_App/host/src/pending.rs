@@ -29,6 +29,8 @@ struct Parked {
     context: Option<Value>,
     input_fingerprints: Option<Value>,
     at: Instant,
+    workflow_key: Option<String>,
+    workflow_continuation: bool,
 }
 
 pub struct PendingApproval {
@@ -36,9 +38,13 @@ pub struct PendingApproval {
     pub project_root: Option<std::path::PathBuf>,
     pub context: Option<Value>,
     pub input_fingerprints: Option<Value>,
+    pub publication_generation: u64,
+    pub workflow_key: Option<String>,
+    pub workflow_continuation: bool,
 }
 
 struct Store {
+    generation: u64,
     items: HashMap<String, Parked>,
 }
 
@@ -46,6 +52,7 @@ fn store() -> &'static Mutex<Store> {
     static STORE: OnceLock<Mutex<Store>> = OnceLock::new();
     STORE.get_or_init(|| {
         Mutex::new(Store {
+            generation: 0,
             items: HashMap::new(),
         })
     })
@@ -69,6 +76,7 @@ pub fn park(
         .items
         .retain(|_, item| now.duration_since(item.at) < TTL);
     guard.items.clear();
+    guard.generation = guard.generation.wrapping_add(1);
     guard.items.insert(
         id.clone(),
         Parked {
@@ -77,6 +85,8 @@ pub fn park(
             context,
             input_fingerprints,
             at: now,
+            workflow_key: None,
+            workflow_continuation: false,
         },
     );
     id
@@ -87,6 +97,7 @@ pub fn take(id: &str) -> Result<PendingApproval, String> {
     let Some(item) = guard.items.remove(id) else {
         return Err("That approval is no longer active. Ask for a new plan.".into());
     };
+    guard.generation = guard.generation.wrapping_add(1);
     if item.at.elapsed() > TTL {
         return Err("That approval expired. Ask for a new plan.".into());
     }
@@ -95,6 +106,9 @@ pub fn take(id: &str) -> Result<PendingApproval, String> {
         project_root: item.project_root,
         context: item.context,
         input_fingerprints: item.input_fingerprints,
+        publication_generation: guard.generation,
+        workflow_key: item.workflow_key,
+        workflow_continuation: item.workflow_continuation,
     })
 }
 
@@ -114,6 +128,27 @@ pub fn current() -> Option<DirectorAction> {
 pub fn cancel_all() {
     let mut guard = store().lock().expect("pending store");
     guard.items.clear();
+    guard.generation = guard.generation.wrapping_add(1);
+}
+
+pub(crate) fn cancel_workflow() {
+    let mut guard = store().lock().expect("pending store");
+    guard.items.retain(|_, item| !item.workflow_continuation);
+    guard.generation = guard.generation.wrapping_add(1);
+}
+
+pub(crate) fn generation() -> u64 { store().lock().expect("pending store").generation }
+
+/// Atomically refuse a late continuation rather than replacing a newer card.
+pub(crate) fn publish_guarded(text: &str, expected: u64, workflow_key: Option<String>, valid: impl FnOnce() -> bool) -> Result<String, String> {
+    let (action, context, input_fingerprints) = host_marker_payload(text).ok_or("Native continuation has no valid prepared approval")?;
+    let mut guard = store().lock().expect("pending store");
+    if guard.generation != expected || !valid() { return Err("Continuation superseded by a newer approval, Stop or project change".into()); }
+    let id = random_id();
+    guard.generation = guard.generation.wrapping_add(1);
+    guard.items.clear();
+    guard.items.insert(id.clone(), Parked { action, project_root: crate::session::root(), context, input_fingerprints, at: Instant::now(), workflow_key, workflow_continuation: true });
+    Ok(format!("{}\n\n{APPROVE_TOKEN_PREFIX}{id}]]", strip_markers(text)))
 }
 
 /// Turn a host reply into user-visible text. A nonce-matched marker is parked

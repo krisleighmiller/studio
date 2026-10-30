@@ -9,7 +9,7 @@ use workbench_host::workflow::import::{import_project, load_state, ImportOptions
 use workbench_host::workflow::sources::{resolve_render_source, RenderSourceResolution};
 use workbench_host::workflow::state::{AssetRole, AssetStatus, StageStatus, TakeStatus};
 use workbench_host::workflow::{
-    cmd_bind_continuity_frame, cmd_prepare_assemble, cmd_set_take_status, cmd_set_visual_source,
+    cmd_bind_continuity_frame, cmd_set_take_status, cmd_set_visual_source,
 };
 
 fn write_clip(path: &std::path::Path) {
@@ -135,7 +135,10 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
         RenderSourceResolution::Bound(_)
     ));
 
-    let prepared = cmd_prepare_assemble(&project_args(root, json!({ "sceneId": 1 }))).unwrap();
+    for shot in load_state(root).unwrap().scene(1).unwrap().animatic.as_ref().unwrap().shots.clone() {
+        workbench_host::workflow::cmd_set_animatic_duration(&project_args(root,json!({"sceneId":1,"shotId":shot.id,"durationSeconds":2.0}))).unwrap();
+    }
+    let prepared = workbench_host::workflow::cmd_prepare_assemble_with_host(&workbench_host::ctx::HostCtx::new(dir.path().join("settings")), &project_args(root, json!({ "sceneId": 1 }))).unwrap();
     assert!(prepared["pendingAction"]
         .as_str()
         .unwrap()
@@ -158,15 +161,15 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
         job.scope.as_ref().map(|scope| scope.kind.as_str()),
         Some("scene")
     );
-    fs::create_dir_all(root.join("Final")).unwrap();
-    fs::write(root.join(&output), b"master").unwrap();
-
-    let refreshed = import_project(root, ImportOptions { persist: true }).unwrap();
-    let scene = refreshed.state.scene(1).unwrap();
+    let token=prepared["pendingAction"].as_str().unwrap().split(workbench_host::pending::APPROVE_TOKEN_PREFIX).nth(1).unwrap().split("]]").next().unwrap().to_string();
+    let result=workbench_host::director::director_approve(workbench_host::ctx::HostCtx::new(dir.path().join("settings")),token).unwrap();
+    assert!(result.tool_events.iter().any(|e|e=="approve:assemble"),"{:?}",result);
+    let finished_state = workbench_host::workflow::import_project(root, workbench_host::workflow::ImportOptions { persist: true }).unwrap();
+    let scene = finished_state.state.scene(1).unwrap();
     assert_eq!(scene.stages.assemble, StageStatus::Present);
     let version = &scene.post.as_ref().unwrap().versions[0];
     assert_eq!(version.assembly_path.as_deref(), Some(output.as_str()));
-    let finished = refreshed
+    let finished = finished_state
         .state
         .jobs
         .iter()
@@ -182,7 +185,7 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
         assert_eq!(take.status, TakeStatus::UsedInAssembly);
         assert_eq!(cut.selected_take.as_deref(), Some(take.id.as_str()));
     }
-    let assemble = refreshed
+    let assemble = finished_state
         .report
         .scenes
         .iter()
@@ -195,7 +198,7 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
     assert_eq!(assemble.status, "present");
     assert!(assemble.available);
 
-    let again = cmd_prepare_assemble(&project_args(root, json!({ "sceneId": 1 }))).unwrap();
+    let again = workbench_host::workflow::cmd_prepare_assemble_with_host(&workbench_host::ctx::HostCtx::new(dir.path().join("settings")), &project_args(root, json!({ "sceneId": 1 }))).unwrap();
     assert!(
         again["pendingAction"]
             .as_str()
@@ -205,8 +208,10 @@ fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
         again["pendingAction"]
     );
     let second = "Final/Scene1_master_v2.mp4";
-    fs::write(root.join(second), b"master-2").unwrap();
-    let reassembled = import_project(root, ImportOptions { persist: true }).unwrap();
+    let token=again["pendingAction"].as_str().unwrap().split(workbench_host::pending::APPROVE_TOKEN_PREFIX).nth(1).unwrap().split("]]").next().unwrap().to_string();
+    let second_result=workbench_host::director::director_approve(workbench_host::ctx::HostCtx::new(dir.path().join("settings")),token).unwrap();
+    assert!(second_result.tool_events.iter().any(|e|e=="approve:assemble"),"{:?}",second_result);
+    let reassembled = workbench_host::workflow::import_project(root, workbench_host::workflow::ImportOptions { persist: true }).unwrap();
     let versions = &reassembled
         .state
         .scene(1)

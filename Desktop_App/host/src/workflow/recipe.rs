@@ -761,7 +761,7 @@ mod tests {
         );
         assert_eq!(
             state.scene(1).unwrap().cuts[0].takes[0].status,
-            TakeStatus::UsedInAssembly
+            TakeStatus::Selected // historical path alone is not execution proof
         );
         apply_stages(&mut state);
         assert_eq!(

@@ -746,6 +746,39 @@ fn prepare_render_inner(
     Ok((card, note))
 }
 
+
+/// Explicit recovery of a pending shot. Never allocate a take or infer old consent.
+pub fn prepare_saved_audio_with_host(app: &crate::ctx::HostCtx, root: &Path, state: &ProjectState, scene_id: u32, cut_number: u32) -> Result<(String,String),String> {
+    let epoch=crate::pending::generation();
+    let cut=state.scene(scene_id).and_then(|s|s.cuts.iter().find(|c|c.id.cut==cut_number)).ok_or("Saved-audio recovery shot not found")?;
+    if cut.speech_mode!=Some(SpeechMode::SourceVideoLipsync) { return Err("Saved-audio recovery is only for a talking shot".into()); }
+    if state.jobs.iter().any(|j|j.kind.starts_with("atlas_generate_") && matches!(j.status,JobStatus::Running|JobStatus::Pending)) {
+        return Err("A provider operation is unsettled. Collect/reconcile the existing prediction before preparing recovery; do not resubmit.".into());
+    }
+    let jobs:Vec<_>=state.jobs.iter().filter(|j|j.kind=="render" && j.status==JobStatus::Pending && j.scope.as_ref().is_some_and(|s|s.kind=="shot" && s.id==cut.stable_id)).collect();
+    if jobs.len()!=1 { return Err("Saved-audio recovery needs one unambiguous existing pending render for this shot".into()); }
+    let output=jobs[0].output_path.as_deref().ok_or("Pending render has no output")?;
+    let _binding=crate::workflow::render_jobs::pending_binding(root,output)?.ok_or("No prepared render binding")?;
+    let video=crate::project_path::resolve(output,Some(root.to_str().ok_or("invalid root")?),crate::project_path::PathIntent::Write).map_err(|e|e.to_string())?.into_path_buf();
+    let expected_audio=video.with_extension("wav");
+    let audio=resolve(root,expected_audio.to_str().ok_or("invalid audio path")?)?;
+    if audio!=expected_audio || audio.parent()!=video.parent() || !audio.is_file() { return Err("Saved performance WAV is missing or redirected; no speech will be regenerated".into()); }
+    let inspection=crate::media_inspect::inspect_media(&audio,&Map::new())?;
+    if inspection.get("has_audio").and_then(Value::as_bool)!=Some(true) || !inspection.get("video_stream").is_some_and(Value::is_null) { return Err("Saved performance must be valid audio-only media".into()); }
+    let source=match resolve_render_source(state,cut.id)? { RenderSourceResolution::Bound(p)=>p,_=>return Err("Saved-audio recovery requires the existing approved image binding".into()) };
+    let mut inputs=Map::new();
+    inputs.insert("handoff_path".into(),Value::String(cut.production_note_path.clone().ok_or("Shot has no handoff")?));
+    inputs.insert("source_frame".into(),Value::String(source));
+    inputs.insert("performance_wav".into(),Value::String(audio.to_string_lossy().into_owned()));
+    inputs.insert("output_audio".into(),Value::String(audio.to_string_lossy().into_owned()));
+    inputs.insert("output_path".into(),Value::String(output.into()));
+    let action=DirectorAction{action:ActionKind::RunSpecialist,specialist:Some("text_sync".into()),inputs,message:None,op:None,path:None};
+    let context=crate::director::current_workflow_context(app,&root.to_path_buf())?;
+    let raw=crate::director::prepare_workflow_approval(app,&context,&action)?;
+    let card=crate::pending::publish_guarded(&raw,epoch,None,||!app.director_cancelled() && crate::session::root().as_deref()==Some(root))?;
+    Ok((format!("Resume the existing pending shot using saved audio. Historical approval context is not inferred: review the current image, prompt, model and exact WAV below. No speech synthesis is included.\n\n{card}"),"Saved-audio recovery prepared; use its fresh native approval, not the original voice-clone card.".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,42 @@
 //! Host-owned routing: scene intent and cut sketches are not production notes.
 use crate::script::requested_scene_number;
 
+fn contains_word_phrase(text: &str, phrase: &str) -> bool {
+    if phrase.is_empty() {
+        return false;
+    }
+    // Use str::find to locate phrase occurrences and check word boundaries
+    let mut pos: usize = 0;
+    while let Some(start) = text[pos..].find(phrase) {
+        let start = start + pos;
+        let end = start + phrase.len();
+        // Check character before match (if any)
+        let before_ok = if start == 0 {
+            true
+        } else {
+            text[..start].chars().next_back().map(|c| !c.is_alphanumeric()).unwrap_or(true)
+        };
+        // Check character after match (if any)
+        let after_ok = if end == text.len() {
+            true
+        } else {
+            text[end..].chars().next().map(|c| !c.is_alphanumeric()).unwrap_or(true)
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+        pos = end;
+    }
+    false
+}
+
+fn has_token_boundary(text: &str, token: &str) -> bool {
+    // Split on non-alphanumeric boundaries (Unicode-aware)
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .any(|t| t == token)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanningKind {
     SceneIntent,
@@ -73,8 +109,8 @@ fn asks_for_scene_intent(t: &str) -> bool {
         "draft scene intent",
         "draft the scene intent",
     ];
-    KEYS.iter().any(|k| t.contains(k))
-        || (t.contains("draft") && t.contains("intent") && t.contains("scene"))
+    KEYS.iter().any(|k| contains_word_phrase(t, k))
+        || (has_token_boundary(t, "draft") && has_token_boundary(t, "intent") && has_token_boundary(t, "scene"))
 }
 
 fn asks_for_scene_look(t: &str) -> bool {
@@ -173,6 +209,92 @@ mod tests {
         assert_eq!(
             classify_planning("Please draft the scene look for Scene 1", None),
             PlanningKind::SceneLook
+        );
+    }
+}
+
+#[cfg(test)]
+mod a04_regression_tests {
+    use super::*;
+
+    #[test]
+    fn intent_substring_does_not_override_production_notes() {
+        // A04 regression: "intentional" must not trigger SceneIntent
+        assert_eq!(
+            classify_planning(
+                "Draft production notes for Scene 1. Car to cemetery is an intentional location change.",
+                None,
+            ),
+            PlanningKind::ProductionNotes
+        );
+        // Unintentional non-trigger
+        assert_eq!(
+            classify_planning(
+                "This is an unintentional mistake.",
+                None,
+            ),
+            PlanningKind::ProductionNotes
+        );
+    }
+
+    #[test]
+    fn explicit_intent_request_kept_alongside_prod_md() {
+        assert_eq!(
+            classify_planning(
+                "Draft the scene intent for Scene 1. prod.md already has 9 cuts.",
+                Some("production_notes"),
+            ),
+            PlanningKind::SceneIntent
+        );
+    }
+
+    #[test]
+    fn punctuation_and_case_covered() {
+        assert_eq!(
+            classify_planning("SCENE INTENT for scene 2!", None),
+            PlanningKind::SceneIntent
+        );
+    }
+
+    #[test]
+    fn draft_intent_statement_for_scene_scene_intent_priority() {
+        // A04: "Draft an intent statement for this scene." should route to SceneIntent,
+        // not ProductionNotes (regressed due to split_whitespace token mismatch with trailing punctuation).
+        assert_eq!(
+            classify_planning("Draft an intent statement for this scene.", None),
+            PlanningKind::SceneIntent
+        );
+    }
+
+    #[test]
+    fn draft_intent_colon_explain_scene() {
+        // A04: "Draft an intent: explain this scene" should route to SceneIntent.
+        assert_eq!(
+            classify_planning("Draft an intent: explain this scene", None),
+            PlanningKind::SceneIntent
+        );
+    }
+
+    #[test]
+    fn draft_intent_statement_with_prod_md_already_exists() {
+        // A04: "Draft an intent statement for this scene; prod.md already exists."
+        // should route to SceneIntent even when prod.md context is present.
+        assert_eq!(
+            classify_planning(
+                "Draft an intent statement for this scene; prod.md already exists.",
+                None
+            ),
+            PlanningKind::SceneIntent
+        );
+    }
+
+    #[test]
+    fn scene_intentionally_must_not_match_scene_intent() {
+        // A04: "scene intentionally" must NOT trigger SceneIntent via substring match.
+        // The literal 'scene intent' phrase must respect word-boundary endpoints.
+        assert_eq!(
+            classify_planning("Draft production notes: scene intentionally moves location", None),
+            PlanningKind::ProductionNotes
         );
     }
 }

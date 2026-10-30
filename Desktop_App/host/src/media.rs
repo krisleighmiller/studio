@@ -196,7 +196,9 @@ fn generate(
         height: numeric("height", 16384),
         prediction_id: None,
     };
-    let result = crate::workflow::spend::run_scoped_with_submission(
+    let save_path_str = arg_str(args, &["save_path", "savePath"]);
+    if confirmation.is_some() { crate::workflow_continuation::before_confirmation(&root, &request_hash)?; }
+    let result = crate::workflow::spend::run_scoped_with_submission_outcome(
         &root,
         &api.kind,
         "media",
@@ -207,8 +209,20 @@ fn generate(
         arg_str(args, &["retry_of", "retryOf"]).as_deref(),
         Some(metadata),
         None, // Registry estimates are not contractually verified maxima.
-        |_, submitted| generate_unchecked(name, args, root.to_str(), app, &api, submitted),
+        |_, submitted| {
+            if name == "atlas_generate_video" && save_path_str.is_some() {
+                crate::workflow::render_jobs::with_render_job_outcome(
+                    &root,
+                    save_path_str.as_deref().unwrap(),
+                    || generate_unchecked(name, args, root.to_str(), app, &api, submitted),
+                )
+            } else {
+                generate_unchecked(name, args, root.to_str(), app, &api, submitted)
+            }
+        },
     );
+    if confirmation.is_none() && matches!(&result, Err(e) if e == "unbounded request approval required" || e == "budget confirmation required; generation blocked") { crate::workflow_continuation::defer(app, &root, &request_hash, name, save_path_str.as_deref())?; }
+    if confirmation.is_some() { crate::workflow_continuation::after_generation(app, &root, &request_hash, &result); }
     // Only a host-confirmed soft-limit gate exposes a quote. A failed replay
     // must not open another prompt or mint another token automatically.
     if matches!(&result, Err(error) if error == "budget confirmation required; generation blocked")
@@ -238,7 +252,27 @@ fn generate(
             );
         }
     }
-    result
+    result.map(|outcome| match outcome {
+        crate::workflow::spend::DispatchOutcome::Completed(s) => s,
+        crate::workflow::spend::DispatchOutcome::AwaitingResult(s) => s,
+    })
+}
+
+/// A remote acknowledgement is not delivery. Match the terminal aliases already
+/// supported by Atlas polling; persist only a fixed status error, never its body.
+fn submission_without_local_save(
+    generated: String,
+    status: &str,
+) -> Result<crate::workflow::spend::DispatchOutcome, String> {
+    use crate::workflow::spend::DispatchOutcome;
+    let status = status.to_ascii_lowercase();
+    if matches!(status.as_str(), "failed" | "canceled" | "cancelled" | "timeout" | "error") {
+        return Err(format!("provider-failed: prediction ended with status={status}; do not resume"));
+    }
+    if matches!(status.as_str(), "succeeded" | "completed" | "success") {
+        return Ok(DispatchOutcome::Completed(generated));
+    }
+    Ok(DispatchOutcome::AwaitingResult(generated))
 }
 
 fn generate_unchecked(
@@ -248,7 +282,7 @@ fn generate_unchecked(
     app: &HostCtx,
     api: &ApiEntry,
     submitted: &dyn Fn(&str) -> Result<(), String>,
-) -> Result<String, String> {
+) -> Result<crate::workflow::spend::DispatchOutcome, String> {
     let model = arg_str(args, &["model"]).ok_or_else(|| "missing model".to_string())?;
     let params = args.get("params").cloned().unwrap_or(json!({}));
     let save_path = arg_str(args, &["save_path", "savePath"]);
@@ -337,7 +371,7 @@ fn generate_unchecked(
 
     // Sync adapters already applied save_path.
     if matches!(api.kind.as_str(), "openai-chat" | "gemini" | "stability") {
-        return Ok(generated);
+        return Ok(crate::workflow::spend::DispatchOutcome::Completed(generated));
     }
 
     let parsed: Value = serde_json::from_str(&generated).unwrap_or(json!({ "raw": generated }));
@@ -347,7 +381,10 @@ fn generate_unchecked(
         submitted(id)?;
     }
     let Some(save_path) = save_path else {
-        return Ok(generated);
+        return submission_without_local_save(
+            generated,
+            parsed.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+        );
     };
 
     // Record as soon as the adapter returns, before a best-effort download or GET.
@@ -356,12 +393,12 @@ fn generate_unchecked(
         if !url.is_empty() {
             match crate::media_util::download_url(url, &save_path, project_root, Some(app)) {
                 Ok(saved) => {
-                    return Ok(json!({
+                    return Ok(crate::workflow::spend::DispatchOutcome::Completed(json!({
                         "submitted": parsed,
                         "saved": serde_json::from_str::<Value>(&saved).unwrap_or(json!({ "raw": saved })),
                         "note": format!("Generated and downloaded via {}.", api.name),
                     })
-                    .to_string());
+                    .to_string()));
                 }
                 Err(_) => { /* fall through to collect */ }
             }
@@ -373,9 +410,9 @@ fn generate_unchecked(
         .and_then(|v| v.as_str())
         .map(str::to_string)
     else {
-        return Ok(format!(
+        return Ok(crate::workflow::spend::DispatchOutcome::AwaitingResult(format!(
             "{generated}\n\n(note: save_path was set but no prediction_id was returned)"
-        ));
+        )));
     };
 
     emit_progress(
@@ -395,7 +432,7 @@ fn generate_unchecked(
     for window in 1..=max_windows {
         match collect_by_api(&api, &prediction_id, &save_path, project_root, wait, app) {
             Ok(saved) => {
-                return Ok(json!({
+                return Ok(crate::workflow::spend::DispatchOutcome::Completed(json!({
                     "submitted": {
                         "prediction_id": prediction_id,
                         "status": "accepted",
@@ -406,7 +443,7 @@ fn generate_unchecked(
                         api.name
                     ),
                 })
-                .to_string());
+                .to_string()));
             }
             Err(error) => {
                 last_error = error.clone();
@@ -441,7 +478,7 @@ fn generate_unchecked(
         return Err(last_error);
     }
 
-    Ok(json!({
+    Ok(crate::workflow::spend::DispatchOutcome::AwaitingResult(json!({
         "submitted": {
             "prediction_id": prediction_id,
             "status": parsed.get("status").cloned().unwrap_or(json!("processing")),
@@ -450,7 +487,7 @@ fn generate_unchecked(
         "error": last_error,
         "note": "Generation was submitted but download did not finish after extended polling. Resume with atlas_collect_media using this prediction_id — do not re-generate unless it failed.",
     })
-    .to_string())
+    .to_string()))
 }
 
 fn collect_by_api(
@@ -591,6 +628,7 @@ fn collect(
                 .map(|m| (m * 60).min(300))
         })
         .unwrap_or(240);
+    if let Some(root) = project_root { crate::workflow_continuation::before_collect(std::path::Path::new(root), &prediction_id, &path)?; }
     let api = resolve_api_for_prediction(app, &prediction_id)?;
 
     // Resume collects also get multi-window patience — Atlas edit models can sit
@@ -625,6 +663,7 @@ fn collect(
         result = Err(last_error);
     }
 
+    if let Some(root) = project_root { crate::workflow_continuation::after_collect(app, std::path::Path::new(root), &prediction_id, &path, &result); }
     if name == "watch_atlas_video" {
         result.map(|saved| {
             json!({
@@ -636,5 +675,35 @@ fn collect(
         })
     } else {
         result
+    }
+}
+
+#[cfg(test)]
+mod dispatch_outcome_tests {
+    use super::submission_without_local_save;
+    use crate::workflow::spend::DispatchOutcome;
+
+    #[test]
+    fn terminal_failure_aliases_never_publish_provider_body_as_error() {
+        for status in ["failed", "canceled", "cancelled", "timeout", "error", "ERROR"] {
+            let error = submission_without_local_save("synthetic-secret-and-untrusted-provider-body".into(), status).unwrap_err();
+            assert!(error.starts_with("provider-failed:"));
+            assert!(!error.contains("synthetic-secret"));
+            assert!(!error.contains("untrusted-provider-body"));
+        }
+    }
+
+    #[test]
+    fn terminal_success_aliases_complete_remote_generation() {
+        for status in ["succeeded", "completed", "success", "SUCCESS"] {
+            assert_eq!(submission_without_local_save("remote result".into(), status).unwrap(), DispatchOutcome::Completed("remote result".into()));
+        }
+    }
+
+    #[test]
+    fn incomplete_and_unknown_submissions_stay_nonterminal() {
+        for status in ["starting", "processing", "queued", "unknown", "", "PROCESSING"] {
+            assert_eq!(submission_without_local_save("accepted original prediction".into(), status).unwrap(), DispatchOutcome::AwaitingResult("accepted original prediction".into()));
+        }
     }
 }

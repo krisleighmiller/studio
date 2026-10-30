@@ -7,9 +7,7 @@
 //! An overwrite, or a path nested deeper than that directory, is staged until
 //! the user approves the change summary.
 
-use crate::director_actions::{
-    format_approval_request_with_context, validate_action, ActionKind, DirectorAction,
-};
+use crate::director_actions::{validate_action, ActionKind, DirectorAction};
 use crate::project_path::{self, PathIntent};
 use serde_json::{json, Map};
 use std::collections::HashMap;
@@ -113,7 +111,7 @@ pub fn approval_summary(write: &AuthorizedWrite, previous: Option<&str>, next: &
     }
     if write.replacing {
         parts.push(change_summary(previous, next));
-    } else if !write.unusual {
+    } else {
         parts.push(change_summary(None, next));
     }
     format!("`{}`: {}", write.relative, parts.join("; "))
@@ -227,6 +225,15 @@ pub fn text_write_approval_card(
     summaries: &[String],
     project_root: Option<&str>,
 ) -> Result<String, String> {
+    prepare_text_write_approval_card(staged_id, summaries, project_root)
+        .map(|card| crate::pending::publish_user_text(&card))
+}
+
+pub(crate) fn prepare_text_write_approval_card(
+    staged_id: &str,
+    summaries: &[String],
+    project_root: Option<&str>,
+) -> Result<String, String> {
     let mut inputs = Map::new();
     inputs.insert("staged_id".into(), json!(staged_id));
     let action = DirectorAction {
@@ -245,7 +252,7 @@ pub fn text_write_approval_card(
         project_root: Some(project_root.to_string()),
         ..Default::default()
     };
-    let mut card = format_approval_request_with_context(
+    let mut card = crate::director_actions::prepare_approval_request_with_context(
         &validated.action,
         &validated,
         &context,
@@ -257,9 +264,7 @@ pub fn text_write_approval_card(
     for summary in summaries {
         changes.push_str(&format!("- {summary}\n"));
     }
-    let insert_at = card
-        .find(crate::pending::APPROVE_TOKEN_PREFIX)
-        .unwrap_or(card.len());
+    let insert_at = card.find("<!--DIRECTOR_ACTION:").unwrap_or(card.len());
     card.insert_str(insert_at, &changes);
     Ok(card)
 }
@@ -283,7 +288,9 @@ pub fn commit_staged_text_write(
             0,
             0,
         )?;
-        if authorized.replacing != file.replacing {
+        // Re-resolving a parent symlink must not move an approved write to a
+        // different destination, even if both paths are inside allowed scope.
+        if authorized.path != file.resolved_path || authorized.replacing != file.replacing {
             return Err(format!(
                 "Staged target `{}` changed after approval. Request a new plan.",
                 authorized.path.display()
@@ -455,6 +462,31 @@ mod tests {
     }
 
     #[test]
+    fn an_unusual_new_file_approval_summary_describes_creation() {
+        let (_dir, root) = project();
+        let body = "new digest\n";
+        let write = authorize_text_write(
+            "production_helper",
+            "Research/notes/digest.md",
+            Some(&root),
+            body.len(),
+            0,
+            0,
+        )
+        .unwrap();
+        assert!(write.unusual);
+        assert!(!write.replacing);
+        assert!(approval_required(&write));
+
+        let summary = approval_summary(&write, None, body);
+        assert!(summary.contains("unusual path `Research/notes/digest.md`"));
+        assert!(summary.contains("new file, 11 characters"), "{summary}");
+        assert!(!summary.contains("overwrite"), "{summary}");
+        assert!(commit_text_write(&write, body, false).is_err());
+        assert!(!write.path.exists());
+    }
+
+    #[test]
     fn a_new_file_in_the_specialist_directory_writes_without_approval() {
         let (_dir, root) = project();
         let write = authorize_text_write(
@@ -472,6 +504,85 @@ mod tests {
             fs::read_to_string(Path::new(&root).join("Research/digest.md")).unwrap(),
             "digest\n"
         );
+    }
+
+    #[test]
+    fn a_pending_new_file_card_lists_proposed_artifacts_without_writing() {
+        let _pending_guard = crate::pending::test_pending_lock();
+        let (_dir, root) = project();
+        let relative = "Research/notes/digest.md";
+        let body = "new digest\n";
+        let write =
+            authorize_text_write("production_helper", relative, Some(&root), body.len(), 0, 0)
+                .unwrap();
+        let path = write.path.clone();
+        let summary = approval_summary(&write, None, body);
+        let id = stage_authorized_text_writes("production_helper", vec![(write, body.into())]);
+        let card = text_write_approval_card(&id, &[summary], Some(&root)).unwrap();
+        let approval_id = card
+            .split(crate::pending::APPROVE_TOKEN_PREFIX)
+            .nth(1)
+            .and_then(|rest| rest.strip_suffix("]]"))
+            .expect("approval id");
+        let pending = crate::pending::take(approval_id).unwrap();
+        assert_eq!(pending.action.specialist.as_deref(), Some("text_write"));
+        assert_eq!(pending.action.inputs.get("staged_id"), Some(&json!(id)));
+        assert_eq!(
+            pending
+                .context
+                .as_ref()
+                .and_then(|value| value.get("projectRoot")),
+            Some(&json!(root))
+        );
+        assert_eq!(pending.input_fingerprints, Some(json!({})));
+        assert!(card.contains("new file, 11 characters"), "{card}");
+        assert!(!card.contains("overwrite"), "{card}");
+        assert!(!card.contains("existing_file"), "{card}");
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
+        assert!(card.contains("### Proposed artifacts"), "{card}");
+        assert!(!card.contains("### Artifacts modified"), "{card}");
+        let proposed = card.split("### Proposed artifacts").nth(1).unwrap();
+        assert!(proposed.contains("output_path"));
+        assert!(proposed.contains(&path.display().to_string()));
+
+        let written = commit_staged_text_write(&id, Some(&root)).unwrap();
+        assert_eq!(written, vec![relative.to_string()]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), body);
+        assert!(commit_staged_text_write(&id, Some(&root)).is_err());
+    }
+
+    #[test]
+    fn a_staged_new_file_cannot_overwrite_a_target_created_while_pending() {
+        let _pending_guard = crate::pending::test_pending_lock();
+        let (_dir, root) = project();
+        let relative = "Research/notes/digest.md";
+        let body = "proposed digest\n";
+        let write =
+            authorize_text_write("production_helper", relative, Some(&root), body.len(), 0, 0)
+                .unwrap();
+        let path = write.path.clone();
+        let summary = approval_summary(&write, None, body);
+        let id = stage_authorized_text_writes("production_helper", vec![(write, body.into())]);
+        let card = text_write_approval_card(&id, &[summary], Some(&root)).unwrap();
+        let approval_id = card
+            .split(crate::pending::APPROVE_TOKEN_PREFIX)
+            .nth(1)
+            .and_then(|rest| rest.strip_suffix("]]"))
+            .expect("approval id");
+        let pending = crate::pending::take(approval_id).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "created independently").unwrap();
+
+        let mut validated = validate_action(pending.action, None).unwrap();
+        let error = append_staged_paths_for_action(&mut validated).unwrap_err();
+        assert!(
+            error.contains("changed between preparation and approval"),
+            "{error}"
+        );
+        let error = commit_staged_text_write(&id, Some(&root)).unwrap_err();
+        assert!(error.contains("changed after approval"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "created independently");
     }
 
     #[test]
@@ -511,9 +622,10 @@ mod tests {
         assert!(pending.input_fingerprints.is_some());
         assert!(card.contains("Provider: Local filesystem"));
         assert!(card.contains("Model: None (host-side text write)"));
-        assert!(card.contains("No provider charge for this write"));
+        assert!(!card.contains("Cost estimate:"));
         assert!(card.contains("### Files read or uploaded"));
-        assert!(card.contains("### Artifacts modified"));
+        assert!(card.contains("### Proposed artifacts"));
+        assert!(!card.contains("### Artifacts modified"));
         assert!(card.contains(&path.display().to_string()));
         assert!(card.contains("existing_file"));
         assert!(card.contains("output_path"));

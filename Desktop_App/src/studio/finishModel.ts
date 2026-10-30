@@ -1,3 +1,4 @@
+import { assemblySnapshotMatches } from "./assemblySnapshot";
 import type { DeliverableRecord, JobRecord, ProjectState, SceneRecord } from "../workflowTypes";
 import { audioRoleLabel, buildAudioStatus } from "./selectors/audio";
 
@@ -257,9 +258,17 @@ function qcItem(scene: SceneRecord, deliverables: DeliverableRecord[]): FinishIt
   if (!check.passed) {
     return item("qc", "QC", "blocked", detail ? `${name} failed. ${detail}` : `${name} failed`);
   }
-  const lockedId = scene.post?.picture_locked_id;
+  const lockedId = scene.post?.picture_locked_id ?? null;
+  const versions = scene.post?.versions ?? [];
+  const checkedVersion = versions.find(v => v.id === check.version_id);
+  if (!check.version_id || !checkedVersion || !checkedVersion.assembly_path) return item("qc", "QC", "blocked", `${name} has no verified assembly version`);
+  const snapshotMatch = assemblySnapshotMatches(scene, checkedVersion);
+  if (!lockedId && versions[versions.length - 1]?.id !== check.version_id) return item("qc", "QC", "stale", `${name} passed an older cut version`);
   if (lockedId && check.version_id && check.version_id !== lockedId) {
     return item("qc", "QC", "stale", `${name} passed an older cut version`);
+  }
+  if (!snapshotMatch) {
+    return item("qc", "QC", "stale", `${name} passed but selection changed`);
   }
   return item("qc", "QC", "complete", detail ? `${name} passed. ${detail}` : `${name} passed`);
 }

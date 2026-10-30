@@ -11,6 +11,16 @@ use std::time::{Duration, Instant};
 /// an entire 12-shot pack. The frontend / user continues with another turn.
 const TURN_WALL_CLOCK: Duration = Duration::from_secs(110);
 
+#[path = "director_observations.rs"]
+mod observations;
+
+#[derive(Clone, Copy)]
+enum TurnTermination {
+    ElapsedTime,
+    RoundLimit,
+    Terminal,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRef {
@@ -208,13 +218,7 @@ fn approval_route_details(
     }
     let mut providers = Vec::new();
     let mut models = Vec::new();
-    let mut known_cost: Option<String> = None;
     for (slot, model) in routes {
-        if known_cost.is_none() {
-            if let Some(kind) = context.api_kinds.get(&model.api_id) {
-                known_cost = crate::workflow::cost::known_price_label(kind, specialist);
-            }
-        }
         let provider = context
             .api_labels
             .get(&model.api_id)
@@ -234,7 +238,7 @@ fn approval_route_details(
     (
         providers.join(", "),
         models.join("; "),
-        known_cost.unwrap_or_else(|| "Unknown; provider pricing applies".into()),
+        String::new(),
     )
 }
 
@@ -261,28 +265,31 @@ pub struct ActionEstimate {
 /// `None` when there is no route or the price is unknown. Used to stamp a known
 /// estimate onto a workflow job before generation. Unknown stays unknown.
 pub fn estimate_for_action(
-    app: &HostCtx,
-    action: &crate::director_actions::DirectorAction,
-    project_root: Option<&str>,
+    _app: &HostCtx,
+    _action: &crate::director_actions::DirectorAction,
+    _project_root: Option<&str>,
 ) -> Result<Option<ActionEstimate>, String> {
-    let mut context = DirectorContext::default();
-    context.project_root = project_root.map(str::to_string);
-    hydrate_context_from_app(app, &mut context)?;
-    let specialist = action.specialist.as_deref().unwrap_or("");
-    let routes = crate::specialists::approval_model_routes(action, &context, project_root);
-    for (_slot, model) in routes {
-        if let Some(kind) = context.api_kinds.get(&model.api_id) {
-            if let Some((currency, minor)) = crate::workflow::cost::known_price(kind, specialist) {
-                return Ok(Some(ActionEstimate {
-                    kind: kind.clone(),
-                    model: Some(model.model_id.clone()),
-                    currency,
-                    minor,
-                }));
-            }
-        }
-    }
+    // Legacy signature retained; normal work no longer estimates accounting.
     Ok(None)
+}
+
+pub(crate) fn current_workflow_context(app: &HostCtx, root: &PathBuf) -> Result<DirectorContext, String> {
+    let mut context = DirectorContext::default(); context.project_root = Some(root.to_string_lossy().into_owned()); hydrate_context_from_app(app, &mut context)?; Ok(context)
+}
+pub(crate) fn check_workflow_routing(app: &HostCtx, expected: &DirectorContext) -> Result<(), String> {
+    let mut current = DirectorContext::default(); hydrate_context_from_app(app, &mut current)?;
+    if !routing_snapshot_matches(expected, &current) { return Err("Provider/model routing changed while the talking shot was paused".into()); } Ok(())
+}
+pub(crate) fn prepare_workflow_approval(app: &HostCtx, context: &DirectorContext, action: &crate::director_actions::DirectorAction) -> Result<String, String> {
+    check_workflow_routing(app, context)?;
+    let root = context.project_root.as_deref();
+    let validated = crate::director_actions::validate_action(action.clone(), root).map_err(|e| e.to_string())?;
+    let (provider, model, cost) = approval_route_details(action, context, root);
+    if provider == "Not resolved from host settings" { return Err("Workflow route is unresolved".into()); }
+    Ok(crate::director_actions::prepare_approval_request_with_context(action, &validated, context, &provider, &model, &cost))
+}
+pub(crate) fn workflow_response(reply: String) -> DirectorTurnResponse {
+    DirectorTurnResponse { reply, model: "text_sync".into(), tool_events: vec!["workflow:continuation".into()], continue_suggested: false, stopped: false, workflow_continuation: true, completed_work: String::new() }
 }
 
 pub(crate) fn format_approval_request_for_app(
@@ -335,6 +342,15 @@ pub struct DirectorTurnResponse {
     pub tool_events: Vec<String>,
     /// True when the host stopped early so the UI could unfreeze; user should continue.
     pub continue_suggested: bool,
+    /// Cooperative Stop was observed; completed work is not rolled back.
+    pub stopped: bool,
+    /// True when this response is a workflow continuation (e.g., resume with saved audio).
+    /// Suppresses automatic planner handoff; the renderer must publish the approval card.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub workflow_continuation: bool,
+    /// Internal execution record, never a proposed approval or planner prose.
+    #[serde(skip)]
+    completed_work: String,
 }
 
 fn resolve_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
@@ -850,12 +866,30 @@ fn director_turn_inner(
     request: DirectorTurnRequest,
 ) -> Result<DirectorTurnResponse, String> {
     use crate::director_actions::{
-        format_approval_request_with_context, parse_actions, planner_system_prompt,
-        validate_action, ActionKind,
+        parse_actions, planner_system_prompt, validate_action, ActionKind,
     };
     use crate::specialists::{self, specialist_requires_approval, SpecialistLlm};
 
     let model = request.model.trim().to_string();
+    let mut tool_events = Vec::new();
+    let mut completed_work = Vec::<String>::new();
+    let mut observations = observations::Observations::default();
+    macro_rules! check_stop {
+        () => {
+            if app.director_cancelled() {
+                return Ok(stopped_reply(
+                    model,
+                    tool_events,
+                    format!(
+                        "{}\n\n{}",
+                        observations.render(),
+                        completed_work.join("\n\n")
+                    ),
+                ));
+            }
+        };
+    }
+    check_stop!();
     if model.is_empty() {
         return Err("Select a chat model in the chat dropdown (or Settings) first.".into());
     }
@@ -916,8 +950,6 @@ fn director_turn_inner(
         .map(str::to_string);
     let project_root_ref = project_root.as_deref();
 
-    let mut tool_events = Vec::new();
-
     if context.adult_routing_requested {
         app.emit(
             "director-progress",
@@ -926,6 +958,7 @@ fn director_turn_inner(
         tool_events.push("adult_routing:on".into());
     }
 
+    check_stop!();
     // A question about the parked plan keeps that plan. Any other chat text,
     // including "ok" and "continue", drops it. Only director_approve runs it.
     if let Some(user_text) = last_user_message(&request.messages) {
@@ -940,11 +973,15 @@ fn director_turn_inner(
                         model,
                         tool_events,
                         continue_suggested: false,
+                        stopped: false,
+                        workflow_continuation: false,
+                        completed_work: String::new(),
                     });
                 }
             }
         }
     }
+    check_stop!();
     crate::pending::cancel_all();
 
     let system = format!(
@@ -973,17 +1010,32 @@ fn director_turn_inner(
     let mut continue_suggested = false;
     let turn_started = Instant::now();
     let mut format_nudge_sent = false;
+    let mut termination = TurnTermination::RoundLimit;
     const MAX_ACTION_ROUNDS: usize = 12;
 
     for _round in 0..MAX_ACTION_ROUNDS {
-        if turn_started.elapsed() >= TURN_WALL_CLOCK {
-            continue_suggested = true;
-            final_reply = "Paused to keep the desk responsive. Say **continue** to resume.".into();
+        check_stop!();
+        let elapsed = turn_started.elapsed();
+        // Unit-test-only, clone-local seam. No renderer/config/env override is
+        // compiled into production, and public dispatch still performs the turn.
+        #[cfg(test)]
+        let elapsed = app
+            .test_turn_elapsed
+            .as_ref()
+            .map_or(elapsed, |clock| clock(elapsed));
+        check_stop!();
+        if elapsed >= TURN_WALL_CLOCK {
+            termination = TurnTermination::ElapsedTime;
             break;
         }
 
+        observations.begin_round(_round);
         app.emit("director-progress", "Planner thinking…".to_string());
-        let content = chat::chat_completion(&chat_api, &chat_key, &model, &api_messages)?;
+        check_stop!();
+        let content = chat::chat_completion(&chat_api, &chat_key, &model, &api_messages);
+        // A blocked call may return actions OR an error after Stop.
+        check_stop!();
+        let content = content?;
         api_messages.push(json!({
             "role": "assistant",
             "content": content,
@@ -1014,6 +1066,7 @@ fn director_turn_inner(
                         continue;
                     }
                     final_reply = trimmed.to_string();
+                    termination = TurnTermination::Terminal;
                     break;
                 }
                 if !format_nudge_sent {
@@ -1026,6 +1079,7 @@ fn director_turn_inner(
                     }));
                     continue;
                 }
+                termination = TurnTermination::Terminal;
                 final_reply = format!(
                     "Planner did not emit a valid director action.\n\n{error}\n\nLast reply:\n{content}"
                 );
@@ -1037,10 +1091,26 @@ fn director_turn_inner(
         let mut stop_after = false;
 
         for action in actions {
+            check_stop!();
+            let operation = action
+                .op
+                .as_deref()
+                .or(action.specialist.as_deref())
+                .unwrap_or("action")
+                .to_string();
+            let path = action
+                .path
+                .as_deref()
+                .or_else(|| action.inputs.get("path").and_then(Value::as_str))
+                .unwrap_or("(unspecified)")
+                .to_string();
             let validated = match validate_action(action, project_root_ref) {
                 Ok(v) => v,
                 Err(error) => {
-                    result_chunks.push(format!("### Action rejected\n{error}"));
+                    let observation =
+                        format!("### Action rejected ({operation}) — path: {path}\n{error}");
+                    observations.push(&app, &observation);
+                    result_chunks.push(observation);
                     continue;
                 }
             };
@@ -1056,7 +1126,14 @@ fn director_turn_inner(
                     break;
                 }
                 ActionKind::Inspect => {
+                    let inspected_path = validated
+                        .resolved_paths
+                        .iter()
+                        .find(|(key, _)| key == "path")
+                        .map(|(_, path)| path.to_string_lossy().into_owned())
+                        .unwrap_or(path);
                     app.emit("director-progress", "Inspecting project path…".to_string());
+                    check_stop!();
                     match specialists::run_inspect(&validated, project_root_ref) {
                         Ok(text) => {
                             tool_events.push(format!(
@@ -1064,13 +1141,23 @@ fn director_turn_inner(
                                 validated.action.op.as_deref().unwrap_or("read_file")
                             ));
                             result_chunks.push(format!(
-                                "### Inspect ({})\n{}",
+                                "### Inspect ({}) — path: {}\n{}",
                                 validated.action.op.as_deref().unwrap_or("read_file"),
+                                inspected_path,
                                 text
                             ));
                         }
-                        Err(error) => result_chunks.push(format!("### Inspect error\n{error}")),
+                        Err(error) => result_chunks.push(format!(
+                            "### Inspect error ({}) — path: {}\n{error}",
+                            validated.action.op.as_deref().unwrap_or("read_file"),
+                            inspected_path,
+                        )),
                     }
+                    observations.push(
+                        &app,
+                        result_chunks.last().map(String::as_str).unwrap_or_default(),
+                    );
+                    check_stop!();
                 }
                 ActionKind::RunSpecialist => {
                     let specialist = validated
@@ -1083,54 +1170,28 @@ fn director_turn_inner(
                     // but still plan-gated.
                     let needs_approval = specialist_requires_approval(&specialist);
                     if needs_approval {
-                        // Budget gate: check before creating the approval card.
-                        // Blocked = hard stop (no card).  Confirm / Warn = add
-                        // banner to the card so the user sees the budget status
-                        // before approving.
-                        //
+                        check_stop!();
                         // FAIL CLOSED: if project state cannot be loaded and
-                        // routes are payable, treat as Blocked.  Paid operations
-                        // must never proceed when budget state is unverifiable.
-                        let mut budget_gate = crate::workflow::cost::SpendGate::NoLimit;
+                        // routes are payable, treat as Blocked.
                         if let Some(root) = project_root_ref {
-                            match crate::workflow::import::load_state(std::path::Path::new(root)) {
-                                Ok(state) => {
-                                    budget_gate = worst_gate_for_routes(
-                                        &state,
-                                        &validated,
-                                        &context,
-                                        project_root_ref,
-                                    );
-                                }
-                                Err(_) => {
-                                    // State unreadable — fail closed.
-                                    // We cannot verify whether the
-                                    // operation is payable, so block.
-                                    budget_gate = crate::workflow::cost::SpendGate::Blocked;
-                                }
+                            if crate::workflow::import::load_state(std::path::Path::new(root)).is_err() {
+                                final_reply = "Operation blocked: project state is unreadable; paid operations require verifiable state.".into();
+                                tool_events.push("state_unreadable".into());
+                                stop_after = true;
+                                break;
                             }
-                        }
-                        if matches!(budget_gate, crate::workflow::cost::SpendGate::Blocked) {
-                            final_reply =
-                                "🚫 Budget hard stop: this operation would exceed the project budget limit. Adjust the budget or the operation before retrying."
-                                    .into();
-                            tool_events.push("budget_blocked".into());
-                            stop_after = true;
-                            break;
                         }
                         let (provider, routed_model, cost) =
                             approval_route_details(&validated.action, &context, project_root_ref);
-                        let mut approval = format_approval_request_with_context(
-                            &validated.action,
-                            &validated,
-                            &context,
-                            &provider,
-                            &routed_model,
-                            &cost,
-                        );
-                        if let Some(banner) = budget_gate_banner(&budget_gate) {
-                            approval = format!("{banner}\n\n{approval}");
-                        }
+                        let mut approval =
+                            crate::director_actions::prepare_approval_request_with_context(
+                                &validated.action,
+                                &validated,
+                                &context,
+                                &provider,
+                                &routed_model,
+                                &cost,
+                            );
                         if specialist == "model_sheet" {
                             approval.push_str("\n\n");
                             approval.push_str(&specialists::model_sheet_approval_notes(
@@ -1165,11 +1226,13 @@ fn director_turn_inner(
                                 project_root_ref,
                             ));
                         }
+                        check_stop!();
                         final_reply = approval;
                         tool_events.push(format!("approval_required:{specialist}"));
                         stop_after = true;
                         break;
                     }
+                    check_stop!();
                     match specialists::run_specialist(
                         &app,
                         &context,
@@ -1181,12 +1244,19 @@ fn director_turn_inner(
                             tool_events.push(format!("specialist:{specialist}"));
                             final_reply = result.message;
                             continue_suggested = result.continue_suggested;
+                            completed_work.push(final_reply.clone());
+                            check_stop!();
                             stop_after = true;
                             break;
                         }
                         Err(error) => {
                             result_chunks
                                 .push(format!("### Specialist `{specialist}` error\n{error}"));
+                            observations.push(
+                                &app,
+                                result_chunks.last().map(String::as_str).unwrap_or_default(),
+                            );
+                            check_stop!();
                         }
                     }
                 }
@@ -1194,9 +1264,11 @@ fn director_turn_inner(
         }
 
         if stop_after {
+            termination = TurnTermination::Terminal;
             break;
         }
         if result_chunks.is_empty() {
+            termination = TurnTermination::Terminal;
             final_reply = if content.trim().is_empty() {
                 "No actionable director action produced.".into()
             } else {
@@ -1214,11 +1286,25 @@ fn director_turn_inner(
         }));
     }
 
-    if final_reply.is_empty() {
-        final_reply =
-            "Stopped without a final reply. Try again with a clearer request or say **continue**."
-                .into();
-        continue_suggested = true;
+    match termination {
+        TurnTermination::ElapsedTime | TurnTermination::RoundLimit => {
+            let reason = match termination {
+                TurnTermination::ElapsedTime => "elapsed-time limit",
+                _ => "12-round limit",
+            };
+            tool_events.push(format!("yield:{reason}"));
+            final_reply = format!(
+                "Paused at the host {reason}. The original user task remains pending.\n\n{}",
+                observations.render()
+            );
+            debug_assert!(final_reply.len() <= observations::REPLY_LIMIT);
+            continue_suggested = true;
+        }
+        TurnTermination::Terminal if final_reply.is_empty() => {
+            final_reply =
+                "Director ended without a message. No automatic continuation was requested.".into();
+        }
+        TurnTermination::Terminal => {}
     }
 
     Ok(DirectorTurnResponse {
@@ -1226,6 +1312,13 @@ fn director_turn_inner(
         model,
         tool_events,
         continue_suggested,
+        stopped: false,
+        workflow_continuation: false,
+        completed_work: format!(
+            "{}\n\n{}",
+            observations.render(),
+            completed_work.join("\n\n")
+        ),
     })
 }
 
@@ -1235,82 +1328,11 @@ pub fn director_turn(
     request: DirectorTurnRequest,
 ) -> Result<DirectorTurnResponse, String> {
     app.emit("director-progress", "Director turn started…".to_string());
+    let app = app.for_request();
     finish_director_reply(app.clone(), director_turn_inner(app, request))
 }
 
-/// Gate the aggregate known estimate across all billable routes in an action.
-/// Unknown-cost routes remain unresolved and require separate preflight policy.
-fn worst_gate_for_routes(
-    state: &crate::workflow::state::ProjectState,
-    action: &crate::director_actions::ValidatedAction,
-    context: &DirectorContext,
-    project_root: Option<&str>,
-) -> crate::workflow::cost::SpendGate {
-    let routes = crate::specialists::approval_model_routes(&action.action, context, project_root);
-    let specialist = action.action.specialist.as_deref().unwrap_or("");
-    aggregate_route_gate(
-        state,
-        routes.into_iter().filter_map(|(_slot, model)| {
-            let kind = context.api_kinds.get(&model.api_id)?;
-            crate::workflow::cost::known_spend_minor(kind, specialist)
-        }),
-    )
-}
-
-fn aggregate_route_gate(
-    state: &crate::workflow::state::ProjectState,
-    estimates: impl IntoIterator<Item = i64>,
-) -> crate::workflow::cost::SpendGate {
-    use crate::workflow::cost::SpendGate;
-    let mut total = 0i64;
-    for minor in estimates {
-        match total.checked_add(minor) {
-            Some(sum) if minor >= 0 => total = sum,
-            _ => return SpendGate::Blocked,
-        }
-    }
-    crate::workflow::cost::gate_spend(state, total)
-}
-
-/// Format a budget-gate status banner for injection into the approval card text.
-fn budget_gate_banner(gate: &crate::workflow::cost::SpendGate) -> Option<&'static str> {
-    use crate::workflow::cost::SpendGate;
-    match gate {
-        SpendGate::NoLimit | SpendGate::Allow => None,
-        SpendGate::Warn => Some("💡 Budget: your spend is approaching the warning threshold. "),
-        SpendGate::Confirm => {
-            Some("⚠️  Budget: this operation pushes you near or over the monthly limit. ")
-        }
-        SpendGate::Blocked => {
-            Some("🚫 Budget: this operation would EXCEED the project budget limit. ")
-        }
-    }
-}
-
-fn director_budget_status(ledger: &crate::workflow::cost::BudgetLedger) -> String {
-    let accounted = ledger
-        .committed_minor
-        .saturating_add(ledger.unsettled_estimated_minor)
-        .saturating_add(ledger.completed_minor)
-        .saturating_add(ledger.failed_minor);
-    let limit = ledger
-        .limit_minor
-        .map(|value| {
-            format!(
-                "Configured project limit: {}.",
-                crate::workflow::cost::format_minor(value, &ledger.currency)
-            )
-        })
-        .unwrap_or_else(|| "No configured project limit.".into());
-    format!(
-        "Budget status: {:?} — {} accounted exposure. {limit} {} job(s) have unknown cost; {} job(s) have unverified maximum exposure. Provider charges are not verified.",
-        ledger.gate,
-        crate::workflow::cost::format_minor(accounted, &ledger.currency),
-        ledger.unknown_cost_jobs,
-        ledger.unknown_exposure_jobs,
-    )
-}
-
+/// Surface deferred operation permission separately from host execution failure.
 fn approved_action_error_reply(error: &str) -> (String, &'static str) {
     if matches!(
         error,
@@ -1331,7 +1353,18 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
     use crate::director_actions::{validate_action, ActionKind};
     use crate::specialists::{self, SpecialistLlm};
 
+    let app = app.for_request();
+    if app.director_cancelled() {
+        return Ok(stopped_reply(
+            "approved action".into(),
+            Vec::new(),
+            String::new(),
+        ));
+    }
     let pending = crate::pending::take(id.trim())?;
+    let workflow_continuation = pending.workflow_continuation;
+    let workflow_key = pending.workflow_key.clone();
+    let publication_generation = pending.publication_generation;
     let current_root = crate::session::root();
     if pending.project_root != current_root {
         return Err(
@@ -1353,7 +1386,13 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
             context
         }
     };
-    if has_snapshot {
+    // Staged text writes execute only the already-prepared local bytes. Their
+    // cards intentionally carry no provider routes; comparing that empty map
+    // against configured providers falsely marks every such approval stale.
+    // Keep routing binding for all other actions and project/file binding below.
+    let local_text_write = pending.action.action == ActionKind::RunSpecialist
+        && pending.action.specialist.as_deref() == Some("text_write");
+    if has_snapshot && !local_text_write {
         let mut current_routing = DirectorContext::default();
         hydrate_context_from_app(&app, &mut current_routing)?;
         if !routing_snapshot_matches(&context, &current_routing) {
@@ -1379,6 +1418,9 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
         }
     }
 
+    if let Some(key) = workflow_key.as_deref() { crate::workflow_continuation::admit_collect(key, &app, publication_generation, &validated.action)?; }
+    let workflow_parent = crate::workflow_continuation::attach(&app, &context, &validated, publication_generation)?;
+    let app = app.with_workflow_parent(workflow_parent);
     let specialist = validated.action.specialist.as_deref().unwrap_or("");
     let planner_llm = if specialist_needs_planner_llm(specialist) {
         let planner_model = context.planner_model.as_ref().ok_or_else(|| {
@@ -1407,54 +1449,9 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
         "Host executing approved action…".to_string(),
     );
 
-    // Emit current budget gate status so the frontend can display it.
-    if let Some(root) = project_root_ref {
-        if let Ok(state) = crate::workflow::import::load_state(std::path::Path::new(root)) {
-            let ledger = crate::workflow::cost::compute_ledger(&state);
-            app.emit("director-progress", director_budget_status(&ledger));
-        }
+    if app.director_cancelled() {
+        return Ok(stopped_reply(response_model, Vec::new(), String::new()));
     }
-
-    // Budget gate: veto a strict hard-stop request before any paid provider
-    // call. Unknown-cost operations are also vetoed under strict policy because
-    // v1 cannot prove a provider-backed maximum. This is the one path the
-    // Director cannot bypass.
-    //
-    // FAIL CLOSED: if project state cannot be loaded, paid operations are
-    // blocked — we must be able to verify budget state before spending money.
-    if validated.action.action == ActionKind::RunSpecialist {
-        let gate = if let Some(root) = project_root_ref {
-            match crate::workflow::import::load_state(std::path::Path::new(root)) {
-                Ok(state) => worst_gate_for_routes(&state, &validated, &context, project_root_ref),
-                Err(_) => crate::workflow::cost::SpendGate::Blocked,
-            }
-        } else {
-            crate::workflow::cost::SpendGate::Blocked
-        };
-        match gate {
-            crate::workflow::cost::SpendGate::Blocked => {
-                return Err(
-                    "Budget hard stop: this operation would exceed the project budget limit. Adjust the budget or the operation before retrying."
-                        .into(),
-                );
-            }
-            crate::workflow::cost::SpendGate::Confirm => {
-                app.emit(
-                    "director-progress",
-                    "⚠️ Budget warning: this operation pushes you near or over the monthly limit. You approved the approval card with this warning — proceeding.".to_string(),
-                );
-            }
-            crate::workflow::cost::SpendGate::Warn => {
-                app.emit(
-                    "director-progress",
-                    "ℹ️ Budget notice: your spend is approaching the warning threshold."
-                        .to_string(),
-                );
-            }
-            _ => {}
-        }
-    }
-
     let outcome = match validated.action.action {
         ActionKind::RunSpecialist => {
             let specialist_llm = planner_llm.as_ref().map(|(api, key, model)| SpecialistLlm {
@@ -1482,6 +1479,7 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
             continue_suggested: false,
         }),
     };
+    if let Some(reply) = app.take_workflow_reply() { return finish_director_reply(app.clone(), Ok(workflow_response(reply.get("reply").and_then(Value::as_str).unwrap_or("Workflow result received").to_string()))); }
     let result = match outcome {
         Ok(result) => result,
         Err(error) => {
@@ -1489,10 +1487,13 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
             return finish_director_reply(
                 app,
                 Ok(DirectorTurnResponse {
+                    completed_work: reply.clone(),
                     reply,
                     model: response_model,
                     tool_events: vec![event.into()],
                     continue_suggested: false,
+                    stopped: false,
+                    workflow_continuation: false,
                 }),
             );
         }
@@ -1500,6 +1501,7 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
     finish_director_reply(
         app,
         Ok(DirectorTurnResponse {
+            completed_work: result.message.clone(),
             reply: result.message,
             model: response_model,
             tool_events: vec![format!(
@@ -1511,8 +1513,40 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
                     .unwrap_or_else(|| format!("{:?}", validated.action.action))
             )],
             continue_suggested: result.continue_suggested,
+            stopped: false,
+            workflow_continuation,
         }),
     )
+}
+
+/// Redact a trusted host dispatch result for stdio. Yield observation payloads
+/// have already been redacted BEFORE their fair UTF-8 allocation. Redacting them
+/// twice is not idempotent and can erase later rounds. Capture the host-owned
+/// discriminator before redacting other fields, including tool-event strings.
+/// This function is not an IPC operation and never accepts planner/request text.
+pub fn redact_publication(app: &HostCtx, mut value: Value) -> Value {
+    let yielded = value.get("continueSuggested").and_then(Value::as_bool) == Some(true)
+        && value.get("stopped").and_then(Value::as_bool) == Some(false)
+        && value
+            .get("toolEvents")
+            .and_then(Value::as_array)
+            .is_some_and(|events| {
+                events.iter().any(|event| {
+                    event
+                        .as_str()
+                        .is_some_and(|event| event.starts_with("yield:"))
+                })
+            });
+    let reply = if yielded {
+        value.get_mut("reply").map(Value::take)
+    } else {
+        None
+    };
+    let mut value = crate::secrets::redact_json(app, value);
+    if let Some(Value::String(reply)) = reply {
+        value["reply"] = Value::String(observations::cap_publication(reply));
+    }
+    value
 }
 
 fn finish_director_reply(
@@ -1520,10 +1554,60 @@ fn finish_director_reply(
     response: Result<DirectorTurnResponse, String>,
 ) -> Result<DirectorTurnResponse, String> {
     let mut response = response?;
+    if app.director_cancelled() && !response.stopped {
+        // A proposed approval is not completed work. Do not publish/park it
+        // after Stop; never clear somebody else's parked card on this path.
+        response
+            .tool_events
+            .retain(|e| !e.starts_with("approval_required:"));
+        let completed = response.completed_work;
+        response = stopped_reply(response.model, response.tool_events, completed);
+    }
+    if response.stopped {
+        response.reply = crate::pending::strip_control_text(&response.reply);
+        response.reply = crate::secrets::redact_text(&app, &response.reply);
+        return Ok(response);
+    }
     response.reply = crate::pending::publish_user_text(&response.reply);
-    response.reply = crate::secrets::redact_text(&app, &response.reply);
+    if response.continue_suggested
+        && response
+            .tool_events
+            .iter()
+            .any(|event| event.starts_with("yield:"))
+    {
+        // Controls were stripped, secrets redacted and delimiters neutralized
+        // before retention/allocation. Do not expand placeholders again here.
+        response.reply = observations::cap_publication(response.reply);
+    } else {
+        response.reply = crate::secrets::redact_text(&app, &response.reply);
+    }
     Ok(response)
 }
+
+fn stopped_reply(
+    model: String,
+    tool_events: Vec<String>,
+    completed: String,
+) -> DirectorTurnResponse {
+    let mut reply = "Stopped by user. Work already executed is not rolled back.".to_string();
+    if !completed.is_empty() {
+        reply.push_str("\n\nHost result before Stop:\n");
+        reply.push_str(&completed);
+    }
+    DirectorTurnResponse {
+        reply,
+        model,
+        tool_events,
+        continue_suggested: false,
+        stopped: true,
+        workflow_continuation: false,
+        completed_work: completed,
+    }
+}
+
+#[cfg(test)]
+#[path = "director_yield_tests.rs"]
+mod yield_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1544,43 +1628,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn budget_status_describes_accounted_exposure_without_claiming_verified_spend() {
-        let ledger = crate::workflow::cost::BudgetLedger {
-            currency: "USD".into(),
-            limit_minor: None,
-            warning_at_minor: None,
-            hard_stop: false,
-            committed_minor: 10,
-            unsettled_estimated_minor: 20,
-            completed_minor: 30,
-            failed_minor: 40,
-            remaining_minor: None,
-            unknown_cost_jobs: 2,
-            unknown_exposure_jobs: 3,
-            gate: crate::workflow::cost::SpendGate::NoLimit,
-        };
-        let message = director_budget_status(&ledger);
-        assert!(message.contains("1.00 USD accounted exposure"), "{message}");
-        assert!(message.contains("No configured project limit"), "{message}");
-        assert!(message.contains("2 job(s) have unknown cost"), "{message}");
-        assert!(
-            message.contains("3 job(s) have unverified maximum exposure"),
-            "{message}"
-        );
-        assert!(
-            message.contains("Provider charges are not verified"),
-            "{message}"
-        );
-        assert!(
-            !message.to_ascii_lowercase().contains(" spent"),
-            "{message}"
-        );
-        assert!(
-            !message.to_ascii_lowercase().contains("unlimited"),
-            "{message}"
-        );
-    }
+
 
     #[test]
     fn parses_director_action_block() {
@@ -1915,30 +1963,10 @@ Here is the action:
 
         assert!(provider.contains("Image Provider"), "{provider}");
         assert!(model.contains("host-image-model"), "{model}");
-        assert!(cost.contains("Unknown"), "{cost}");
+        assert!(cost.is_empty(), "{cost}");
     }
 
-    #[test]
-    fn aggregate_budget_gate_blocks_routes_individually_affordable_but_jointly_over_limit() {
-        use crate::workflow::cost::SpendGate;
-        use crate::workflow::state::{ProjectBudget, ProjectState};
-        let mut state = ProjectState::new();
-        state.budget = Some(ProjectBudget {
-            currency: "USD".into(),
-            limit_minor: Some(10),
-            warning_at_minor: None,
-            hard_stop: true,
-            policy: None,
-        });
-        assert_eq!(aggregate_route_gate(&state, [6]), SpendGate::Allow);
-        assert_eq!(aggregate_route_gate(&state, [6, 5]), SpendGate::Blocked);
-        assert_eq!(aggregate_route_gate(&state, [10]), SpendGate::Allow);
-        assert_eq!(aggregate_route_gate(&state, [10, 1]), SpendGate::Blocked);
-        assert_eq!(
-            aggregate_route_gate(&state, [i64::MAX, 1]),
-            SpendGate::Blocked
-        );
-    }
+
 
     #[test]
     fn workflow_card_parks_the_host_resolved_action_and_input_snapshot() {
@@ -1997,7 +2025,7 @@ Here is the action:
         .unwrap();
         assert!(card.contains("Provider: Host Provider (image-provider)"));
         assert!(card.contains("Model: image.text_to_image: `host-image-model`"));
-        assert!(card.contains("Cost estimate: Unknown; provider pricing applies"));
+        assert!(!card.contains("Cost estimate:"));
         assert!(card.contains("Refs/source.png"));
         assert!(card.contains("Stills/output.png"));
 

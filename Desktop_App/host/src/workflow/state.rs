@@ -14,6 +14,17 @@ use std::collections::BTreeMap;
 pub const WORKFLOW_VERSION: u32 = 2;
 pub const STATE_REL: &str = "Preproduction/workflow_state.json";
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssemblyShotSnapshot {
+    pub shot_id: String,
+    pub cut_label: u32,
+    pub take_id: String,
+    pub path: String,
+    pub start_seconds: f64,
+    pub duration_seconds: f64,
+    pub transition: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowStage {
@@ -967,6 +978,11 @@ pub struct CutRecord {
     pub negative_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub production_note_path: Option<String>,
+    /// Provenance of the source this cut depicts: which source scene and cut it
+    /// was generated from. Set by the importer, preserved across reorder, absent
+    /// on originless legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_origin: Option<CutId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_ref_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1007,6 +1023,7 @@ impl CutRecord {
             prompt: None,
             negative_prompt: None,
             production_note_path: None,
+            source_origin: None,
             identity_ref_paths: Vec::new(),
             approved_start_frame: None,
             start_frame_prompt: None,
@@ -1308,6 +1325,9 @@ pub struct JobRecord {
     pub unbounded_exposure: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_metadata: Option<SpendRequestMetadata>,
+    /// Ordered assembly snapshot recorded at preparation, used for parity checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly_snapshot: Option<Vec<AssemblyShotSnapshot>>,
 }
 
 /// Allowlisted nonsecret recovery data, not a raw provider request.
@@ -1403,6 +1423,7 @@ impl JobRecord {
             reconciliation: None,
             unbounded_exposure: false,
             request_metadata: None,
+            assembly_snapshot: None,
             attempts: vec![JobAttempt {
                 id: attempt_id,
                 status: JobStatus::Pending,
@@ -2128,15 +2149,107 @@ impl ProjectState {
         self.scenes.iter().find(|s| s.id == id)
     }
 
+    /// Graph-aware next asset ID that reserves IDs from the entire persisted graph:
+    /// assets, parent_asset_id, takes/selected_take, visual_source (asset_id, source_take_id),
+    /// character asset_ids, look board slots (asset_ids, approved_asset_id) and board.asset_ids,
+    /// job input/output_asset_ids, attempt output_asset_ids, and artifact versions.
     pub fn next_asset_id(&self) -> String {
-        let next = self
-            .assets
-            .iter()
-            .filter_map(|asset| asset.id.strip_prefix("asset_")?.parse::<u64>().ok())
-            .max()
-            .unwrap_or(0)
-            + 1;
-        format!("asset_{next}")
+        let mut max_seq = 0u64;
+        // Existing asset IDs
+        for asset in &self.assets {
+            if let Some(n) = asset.id.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                max_seq = max_seq.max(n);
+            }
+        }
+        // parent_asset_id
+        for asset in &self.assets {
+            if let Some(parent) = &asset.parent_asset_id {
+                if let Some(n) = parent.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                    max_seq = max_seq.max(n);
+                }
+            }
+        }
+        // Scenes: takes, selected_take, visual_source
+        for scene in &self.scenes {
+            for cut in &scene.cuts {
+                for take in &cut.takes {
+                    if let Some(n) = take.id.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                        max_seq = max_seq.max(n);
+                    }
+                }
+                if let Some(sel) = &cut.selected_take {
+                    if let Some(n) = sel.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                        max_seq = max_seq.max(n);
+                    }
+                }
+                if let Some(source) = &cut.visual_source {
+                    if let Some(aid) = &source.asset_id {
+                        if let Some(n) = aid.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                            max_seq = max_seq.max(n);
+                        }
+                    }
+                    if let Some(tid) = &source.source_take_id {
+                        if let Some(n) = tid.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                            max_seq = max_seq.max(n);
+                        }
+                    }
+                }
+            }
+            if let Some(board) = &scene.look_board {
+                for slot in &board.slots {
+                    for aid in &slot.asset_ids {
+                        if let Some(n) = aid.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                            max_seq = max_seq.max(n);
+                        }
+                    }
+                    if let Some(aid) = &slot.approved_asset_id {
+                        if let Some(n) = aid.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                            max_seq = max_seq.max(n);
+                        }
+                    }
+                }
+                for aid in &board.asset_ids {
+                    if let Some(n) = aid.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                        max_seq = max_seq.max(n);
+                    }
+                }
+            }
+        }
+        // Characters
+        for character in &self.characters {
+            for aid in &character.asset_ids {
+                if let Some(n) = aid.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                    max_seq = max_seq.max(n);
+                }
+            }
+        }
+        // Jobs
+        for job in &self.jobs {
+            for aid in &job.input_asset_ids {
+                if let Some(n) = aid.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                    max_seq = max_seq.max(n);
+                }
+            }
+            for aid in &job.output_asset_ids {
+                if let Some(n) = aid.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                    max_seq = max_seq.max(n);
+                }
+            }
+            for attempt in &job.attempts {
+                for aid in &attempt.output_asset_ids {
+                    if let Some(n) = aid.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                        max_seq = max_seq.max(n);
+                    }
+                }
+            }
+        }
+        // Artifact versions
+        for version in &self.versions {
+            if let Some(n) = version.asset_id.strip_prefix("asset_").and_then(|s| s.parse::<u64>().ok()) {
+                max_seq = max_seq.max(n);
+            }
+        }
+        format!("asset_{}", max_seq + 1)
     }
 
     pub fn push_asset(&mut self, mut asset: AssetRecord) -> String {

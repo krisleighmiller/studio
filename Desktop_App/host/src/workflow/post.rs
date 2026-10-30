@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::workflow::qc::{QCFinding, QCSeverity};
 use crate::workflow::state::{
-    CutRecord, ProductionProfile, ProjectState, SceneRecord, TakeRecord, TakeStatus,
+    CutRecord, JobStatus, ProductionProfile, ProjectState, SceneRecord, TakeRecord, TakeStatus,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -169,6 +169,8 @@ pub struct VersionShot {
     pub path: String,
 }
 
+pub use crate::workflow::state::AssemblyShotSnapshot;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CutVersion {
     pub id: String,
@@ -177,6 +179,8 @@ pub struct CutVersion {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assembly_path: Option<String>,
     pub shots: Vec<VersionShot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly_snapshot: Option<Vec<AssemblyShotSnapshot>>,
     #[serde(default)]
     pub editorial_path: EditorialPath,
 }
@@ -227,16 +231,49 @@ pub struct ScenePost {
     pub last_check: Option<DeliverableCheck>,
 }
 
+/// Match the immutable delivered order/identity/window against the current native graph.
+pub fn snapshot_matches_scene(scene: &SceneRecord, saved: &[AssemblyShotSnapshot]) -> bool {
+    if scene.cuts.is_empty() || saved.len() != scene.cuts.len() { return false; }
+    let mut seen = std::collections::HashSet::new();
+    if scene.cuts.iter().any(|c| !seen.insert((c.id.source_scene,c.id.cut))) { return false; }
+    let ordered: Vec<_> = if let Some(animatic) = &scene.animatic {
+        if animatic.shots.len() != scene.cuts.len() { return false; }
+        let mut visited = std::collections::HashSet::new();
+        let mut cuts = Vec::new();
+        for shot in &animatic.shots {
+            if !visited.insert((shot.cut_id.source_scene,shot.cut_id.cut)) { return false; }
+            let Some(cut) = scene.cuts.iter().find(|c| c.id == shot.cut_id) else { return false; };
+            cuts.push(cut);
+        }
+        cuts
+    } else { let mut cuts: Vec<_> = scene.cuts.iter().collect(); cuts.sort_by_key(|c| c.id.cut); cuts };
+    ordered.iter().zip(saved).enumerate().all(|(i,(cut,record))| {
+        let Some(take) = selected_take(cut) else { return false; };
+        if record.shot_id != cut.stable_id || record.cut_label != cut.id.cut || record.take_id != take.id || record.path != take.path || !record.start_seconds.is_finite() || record.start_seconds < 0.0 || !record.duration_seconds.is_finite() || record.duration_seconds <= 0.0 { return false; }
+        if let Some(animatic) = &scene.animatic {
+            let shot = &animatic.shots[i]; let head=shot.trim_in_seconds.unwrap_or(0.0);let tail=shot.trim_out_seconds.unwrap_or(0.0);
+            let transition = match shot.transition.unwrap_or(crate::workflow::state::SequenceTransition::Cut) { crate::workflow::state::SequenceTransition::Cut=>"cut",crate::workflow::state::SequenceTransition::Dissolve=>"dissolve",crate::workflow::state::SequenceTransition::FadeThroughBlack=>"fade_through_black" };
+            head.is_finite() && tail.is_finite() && head >= 0.0 && tail >= 0.0 && shot.duration_seconds.is_finite() && shot.duration_seconds > head+tail && (record.start_seconds-head).abs()<0.000001 && (record.duration_seconds-(shot.duration_seconds-head-tail)).abs()<0.000001 && record.transition==transition
+        } else { record.start_seconds==0.0 && record.transition=="cut" }
+    })
+}
+fn version_matches_scene(scene: &SceneRecord, version: &CutVersion) -> bool {
+    if version.shots.len()!=scene.cuts.len() || !version.assembly_snapshot.as_deref().is_some_and(|s|snapshot_matches_scene(scene,s)) { return false; }
+    scene.cuts.iter().all(|cut| {
+        let claims: Vec<_> = version.shots.iter().filter(|s|if cut.stable_id.is_empty(){s.cut_label==cut.id.cut}else{s.shot_id==cut.stable_id}).collect();
+        let Some(take)=selected_take(cut) else{return false;};
+        claims.len()==1 && claims[0].take_id==take.id && claims[0].path==take.path
+    })
+}
+pub fn snapshot_runtime(saved: &[AssemblyShotSnapshot]) -> f64 {
+    saved.iter().enumerate().map(|(i,s)|s.duration_seconds-if i+1<saved.len() && s.transition!="cut"{0.35}else{0.0}).sum()
+}
+
 pub fn mark_cut_version(state: &mut ProjectState, scene_id: u32) -> Result<String, String> {
-    let assembly_path = state
-        .jobs
-        .iter()
-        .rev()
-        .find(|job| {
-            job.kind == "assemble"
-                && job.raw_provider_id.as_deref() == Some(&format!("scene_{scene_id}"))
-        })
-        .and_then(|job| job.output_path.clone());
+    let current = state.scene(scene_id).ok_or_else(|| format!("Scene {scene_id} not found"))?;
+    let inherited = state.jobs.iter().rev().find(|j| j.kind=="assemble" && j.status==JobStatus::Completed && j.raw_provider_id.as_deref()==Some(&format!("scene_{scene_id}")) && j.scope.as_ref().is_some_and(|scope|scope.kind=="scene" && scope.id==current.stable_id) && j.assembly_snapshot.as_deref().is_some_and(|snap|snapshot_matches_scene(current,snap)))
+        .map(|j|(j.output_path.clone(),j.assembly_snapshot.clone()));
+    let (assembly_path,assembly_snapshot)=inherited.unwrap_or_default();
     let scene = scene_mut(state, scene_id)?;
     if scene.cuts.is_empty() {
         return Err(format!("Scene {scene_id} has no cuts to version"));
@@ -286,6 +323,7 @@ pub fn mark_cut_version(state: &mut ProjectState, scene_id: u32) -> Result<Strin
         stage: CutVersionStage::Selects,
         assembly_path,
         shots,
+        assembly_snapshot,
         editorial_path: editorial,
     });
     Ok(id)
@@ -298,6 +336,8 @@ pub fn attach_review_export(
     scene_id: u32,
     assembly_path: &str,
 ) -> Result<String, String> {
+    // Prefer matching prepared assembly job snapshot over mutable selection.
+    let job_snapshot = state.jobs.iter().find(|j| j.kind == "assemble" && j.status == JobStatus::Completed && j.raw_provider_id.as_deref() == Some(&format!("scene_{scene_id}")) && j.output_path.as_deref() == Some(assembly_path)).and_then(|j| j.assembly_snapshot.clone());
     if let Some(existing) = state.scene(scene_id).and_then(|scene| {
         scene.post.as_ref().and_then(|post| {
             post.versions
@@ -306,21 +346,34 @@ pub fn attach_review_export(
                 .map(|version| version.id.clone())
         })
     }) {
-        mark_selected_takes_used(state, scene_id)?;
+        if let Some(ref snap) = job_snapshot {
+            mark_snapshot_takes_used(state, scene_id, snap)?;
+        }
         return Ok(existing);
     }
     let scene = scene_mut(state, scene_id)?;
     let mut shots = Vec::new();
-    let mut ordered = scene.cuts.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|cut| cut.id.cut);
-    for cut in ordered {
-        if let Some(take) = selected_take(cut) {
+    if let Some(ref snap) = job_snapshot {
+        for entry in snap {
             shots.push(VersionShot {
-                shot_id: cut.stable_id.clone(),
-                cut_label: cut.id.cut,
-                take_id: take.id.clone(),
-                path: take.path.clone(),
+                shot_id: entry.shot_id.clone(),
+                cut_label: entry.cut_label,
+                take_id: entry.take_id.clone(),
+                path: entry.path.clone(),
             });
+        }
+    } else {
+        let mut ordered = scene.cuts.iter().collect::<Vec<_>>();
+        ordered.sort_by_key(|cut| cut.id.cut);
+        for cut in ordered {
+            if let Some(take) = selected_take(cut) {
+                shots.push(VersionShot {
+                    shot_id: cut.stable_id.clone(),
+                    cut_label: cut.id.cut,
+                    take_id: take.id.clone(),
+                    path: take.path.clone(),
+                });
+            }
         }
     }
     let editorial = scene
@@ -342,31 +395,30 @@ pub fn attach_review_export(
     let id = next_version_id(state);
     let scene = scene_mut(state, scene_id)?;
     let post = scene.post.get_or_insert_with(ScenePost::default);
+    let assembly_snapshot = job_snapshot.clone();
     post.versions.push(CutVersion {
         id: id.clone(),
         label: format!("Assembly {number}"),
         stage: CutVersionStage::Assembly,
         assembly_path: Some(assembly_path.to_string()),
         shots,
+        assembly_snapshot,
         editorial_path: editorial,
     });
-    mark_selected_takes_used(state, scene_id)?;
+    if let Some(ref snap) = job_snapshot { mark_snapshot_takes_used(state, scene_id, snap)?; }
     Ok(id)
 }
 
-fn mark_selected_takes_used(state: &mut ProjectState, scene_id: u32) -> Result<(), String> {
+fn mark_snapshot_takes_used(state: &mut ProjectState, scene_id: u32, snap: &[crate::workflow::state::AssemblyShotSnapshot]) -> Result<(), String> {
     let scene = scene_mut(state, scene_id)?;
-    for cut in &mut scene.cuts {
-        let Some(selected) = cut.selected_take.clone() else {
-            continue;
-        };
-        if let Some(take) = cut
-            .takes
-            .iter_mut()
-            .find(|take| take.id == selected || take.path == selected)
-        {
-            if take.status == TakeStatus::Selected {
-                take.status = TakeStatus::UsedInAssembly;
+    for entry in snap {
+        for cut in &mut scene.cuts {
+            if if cut.stable_id.is_empty() {cut.id.cut == entry.cut_label} else {cut.stable_id == entry.shot_id} {
+                if let Some(take_ref) = cut.takes.iter_mut().find(|t| t.id == entry.take_id && t.path == entry.path) {
+                    if take_ref.status == TakeStatus::Selected {
+                        take_ref.status = TakeStatus::UsedInAssembly;
+                    }
+                }
             }
         }
     }
@@ -456,7 +508,7 @@ pub fn check_deliverable(
         .find(|item| item.id == deliverable_id)
         .cloned()
         .ok_or_else(|| format!("deliverable `{deliverable_id}` not found"))?;
-    let (missing, version_id, assembly_path) = {
+    let (missing, version_id, assembly_path, snapshot_ok, expected_runtime) = {
         let scene = state
             .scene(scene_id)
             .ok_or_else(|| format!("Scene {scene_id} not found"))?;
@@ -470,27 +522,56 @@ pub fn check_deliverable(
         let assembly_path = version.and_then(|version| version.assembly_path.clone());
         let mut missing = Vec::new();
         for cut in &scene.cuts {
-            let covered = version.is_some_and(|version| {
-                version.shots.iter().any(|shot| {
-                    (!cut.stable_id.is_empty() && shot.shot_id == cut.stable_id)
-                        || (cut.stable_id.is_empty() && shot.cut_label == cut.id.cut)
-                })
-            });
-            if version.is_some() && !covered {
+            if version.is_none() {
+                if selected_take(cut).is_some() {
+                    missing.push(MissingShot {
+                        shot_id: cut.stable_id.clone(),
+                        cut_label: cut.id.cut,
+                        reason: "no version selected".into(),
+                    });
+                } else {
+                    missing.push(MissingShot {
+                        shot_id: cut.stable_id.clone(),
+                        cut_label: cut.id.cut,
+                        reason: "no selected take".into(),
+                    });
+                }
+                continue;
+            }
+            let version_shot = version
+                .unwrap()
+                .shots
+                .iter()
+                .find(|shot| {
+                    if !cut.stable_id.is_empty() {
+                        shot.shot_id == cut.stable_id
+                    } else {
+                        shot.cut_label == cut.id.cut
+                    }
+                });
+            if version_shot.is_none() {
                 missing.push(MissingShot {
                     shot_id: cut.stable_id.clone(),
                     cut_label: cut.id.cut,
                     reason: "not in the cut version".into(),
                 });
-            } else if version.is_none() && selected_take(cut).is_none() {
-                missing.push(MissingShot {
-                    shot_id: cut.stable_id.clone(),
-                    cut_label: cut.id.cut,
-                    reason: "no selected take".into(),
+            } else if let Some(shot) = version_shot {
+                let selected = selected_take(cut);
+                let matches = selected.is_some_and(|take| {
+                    take.id == shot.take_id && take.path == shot.path
                 });
+                if !matches {
+                    missing.push(MissingShot {
+                        shot_id: cut.stable_id.clone(),
+                        cut_label: cut.id.cut,
+                        reason: "selection changed".into(),
+                    });
+                }
             }
         }
-        (missing, version_id, assembly_path)
+        let snapshot_ok = version.is_some_and(|v| version_matches_scene(scene,v));
+        let expected_runtime = version.and_then(|v|v.assembly_snapshot.as_deref()).map(snapshot_runtime);
+        (missing, version_id, assembly_path, snapshot_ok, expected_runtime)
     };
     let (resolution_ok, resolution_message) = resolution_gate(&profile, &deliverable.resolution);
     let (aspect_ok, aspect_message) = aspect_gate(
@@ -513,35 +594,148 @@ pub fn check_deliverable(
                 .join(", ")
         ));
     }
-    let media_findings = assembly_path
-        .as_deref()
-        .map(|relative| {
-            let absolute = if Path::new(relative).is_absolute() {
-                Path::new(relative).to_path_buf()
+    let mut media_findings = if version_id.is_none() || assembly_path.is_none() {
+        vec![crate::workflow::qc::QCFinding {
+            id: "absent_assembly".into(),
+            severity: crate::workflow::qc::QCSeverity::Error,
+            check: "Assembly".into(),
+            message: if version_id.is_none() {
+                "No cut version selected; assembly file absent.".into()
             } else {
-                project_root.join(relative)
-            };
-            let mut findings = crate::workflow::qc::check_media_file_against_spec(
-                &absolute,
-                None,
-                0.3,
-                deliverable.resolution.as_deref(),
-                deliverable.aspect_ratio.as_deref(),
-                deliverable.frame_rate.as_deref(),
-            );
-            findings.extend(crate::workflow::captions::check_captions(
-                project_root,
-                relative,
-            ));
-            findings
-                .into_iter()
-                .map(|mut finding| {
-                    finding.artifact_id = version_id.clone();
-                    finding
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+                "Cut version has no assembly file.".into()
+            },
+            artifact_id: version_id.clone(),
+        }]
+    } else {
+        let relative = assembly_path.as_ref().unwrap();
+        let absolute = {
+            use crate::project_path::{resolve, PathIntent};
+            match resolve(relative, Some(project_root.to_str().unwrap_or("")), PathIntent::Read) {
+                Ok(project_path) => project_path.into_path_buf(),
+                Err(_) => {
+                    // If confinement fails (absolute outside / traversal / symlink escape),
+                    // treat as a failed media finding so it does not silently pass.
+                    return Err(format!(
+                        "Assembly path `{}` escapes the project root",
+                        relative
+                    ));
+                }
+            }
+        };
+        let mut findings = crate::workflow::qc::check_media_file_against_spec(
+            &absolute,
+            expected_runtime,
+            0.15,
+            deliverable.resolution.as_deref(),
+            deliverable.aspect_ratio.as_deref(),
+            deliverable.frame_rate.as_deref(),
+        );
+        findings.extend(crate::workflow::qc::check_full_video_decode(&absolute));
+        findings.extend(crate::workflow::captions::check_captions(
+            project_root,
+            relative,
+        ));
+        findings
+            .into_iter()
+            .map(|mut finding| {
+                finding.artifact_id = version_id.clone();
+                finding
+            })
+            .collect::<Vec<_>>()
+    };
+    if !snapshot_ok {
+        media_findings.push(QCFinding { id:"assembly_snapshot".into(), severity:QCSeverity::Error, check:"Assembly snapshot".into(), message:"Assembly does not verify the current ordered shot/take/timing snapshot. Reassemble and check again.".into(), artifact_id:version_id.clone() });
+    }
+    // Dependency gap repair: actual selected source, required audio, master audio stream.
+    {
+        use crate::project_path::{resolve, PathIntent};
+        let root_str = project_root.to_str().unwrap_or("");
+        if let Some(scene) = state.scene(scene_id) {
+            for cut in &scene.cuts {
+                let Some(take) = selected_take(cut) else { continue };
+                // Resolve selected source under root; fail closed on escape.
+                let source_rel = &take.path;
+                let source_abs = match resolve(source_rel, Some(root_str), PathIntent::Read) {
+                    Ok(p) => p.into_path_buf(),
+                    Err(_) => {
+                        media_findings.push(QCFinding { id:"selected_source_escape".into(), severity:QCSeverity::Error, check:"Source".into(), message:format!("Selected source `{}` escapes project root.",source_rel), artifact_id:version_id.clone() });
+                        continue;
+                    }
+                };
+                // Window from assembly snapshot if available, else just decode check.
+                let (start_secs, duration_secs) = if let Some(snap) = scene.post.as_ref().and_then(|p| p.versions.iter().find(|v| v.id == version_id.as_deref().unwrap_or(""))).and_then(|v| v.assembly_snapshot.as_ref()) {
+                    let record = snap.iter().find(|r| {
+                        if !cut.stable_id.is_empty() { r.shot_id == cut.stable_id } else { r.cut_label == cut.id.cut }
+                    });
+                    record.map(|r| (r.start_seconds, r.duration_seconds)).unwrap_or((0.0, 0.0))
+                } else { (0.0, 0.0) };
+                let mut src_findings = if start_secs > 0.0 || duration_secs > 0.0 {
+                    crate::workflow::qc::check_video_source_window(&source_abs, start_secs, duration_secs)
+                } else {
+                    crate::workflow::qc::check_video_source_window(&source_abs, 0.0, 0.0)
+                };
+                src_findings.iter_mut().for_each(|f| f.artifact_id = version_id.clone());
+                // Identify cut/path in message for actionable findings
+                for f in &mut src_findings {
+                    if f.severity == QCSeverity::Error && (f.id == "source_exists" || f.id == "source_window" || f.id == "no_video" || f.id == "full_decode") {
+                        f.message = format!("Cut {} take `{}`: {}", cut.id.cut, take.id, f.message);
+                    }
+                }
+                media_findings.extend(src_findings);
+            }
+            // Required audio roles / asset bytes / output stream.
+            if let Some(audio_status) = crate::workflow::audio::scene_audio_status(state, scene_id) {
+                let required_roles = &audio_status.required;
+                if !required_roles.is_empty() {
+                    // Resolve required audio assets (exclude voice_profile from required audio roles)
+                    for role in required_roles {
+                        if role == &crate::workflow::state::AssetRole::VoiceProfile { continue; }
+                        let assets = crate::workflow::audio::scene_audio_assets(state, scene_id).iter().filter(|a| a.role == *role).cloned().collect::<Vec<_>>();
+                        if assets.is_empty() {
+                            media_findings.push(QCFinding { id:"audio_role_missing".into(), severity:QCSeverity::Error, check:"Audio".into(), message:format!("Required audio role `{}` missing for scene.",role.label()), artifact_id:version_id.clone() });
+                        } else {
+                            for asset in &assets {
+                                if asset.status != crate::workflow::state::AssetStatus::Approved {
+                                    media_findings.push(QCFinding { id:"audio_unapproved".into(), severity:QCSeverity::Error, check:"Audio".into(), message:format!("Required audio role `{}` asset `{}` not approved.",role.label(),asset.id), artifact_id:version_id.clone() });
+                                }
+                                let asset_abs = match resolve(&asset.path, Some(root_str), PathIntent::Read) {
+                                    Ok(p) => p.into_path_buf(),
+                                    Err(_) => {
+                                        media_findings.push(QCFinding { id:"audio_asset_escape".into(), severity:QCSeverity::Error, check:"Audio".into(), message:format!("Audio asset `{}` path escapes root.",asset.id), artifact_id:version_id.clone() });
+                                        continue;
+                                    }
+                                };
+                                let mut audio_findings = crate::workflow::qc::check_audio_decode(&asset_abs);
+                                audio_findings.iter_mut().for_each(|f| f.artifact_id = version_id.clone());
+                                for f in &mut audio_findings {
+                                    if f.severity == QCSeverity::Error && (f.id == "audio_decode" || f.id == "audio_stream" || f.id == "file_exists") {
+                                        f.message = format!("Audio role `{}` asset `{}`: {}", role.label(), asset.id, f.message);
+                                    }
+                                }
+                                media_findings.extend(audio_findings);
+                            }
+                        }
+                    }
+                }
+                // Master output must contain audio stream when any required role exists.
+                if !required_roles.is_empty() {
+                    if let Some(master_abs) = assembly_path.as_ref().and_then(|rel| resolve(rel, Some(root_str), PathIntent::Read).ok()).map(|p| p.into_path_buf()) {
+                        match crate::workflow::qc::probe_media(&master_abs) {
+                            Ok(probe) => {
+                                if probe.audio.is_none() {
+                                    media_findings.push(QCFinding { id:"master_audio_missing".into(), severity:QCSeverity::Error, check:"Master audio".into(), message:"Master output lacks required audio stream.".into(), artifact_id:version_id.clone() });
+                                }
+                            }
+                            Err(_) => {
+                                // If master itself unprobeable, already handled by assembly media findings.
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for finding in &mut media_findings { if finding.id=="runtime" && expected_runtime.is_some() {finding.severity=QCSeverity::Error;} }
     let media_ok = !media_findings
         .iter()
         .any(|finding| finding.severity == QCSeverity::Error);
@@ -703,8 +897,21 @@ mod tests {
     #[test]
     fn selected_takes_mark_a_cut_version_and_the_deliverable_checks() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("a.mp4"), b"take-a").unwrap();
-        fs::write(dir.path().join("b.mp4"), b"take-b").unwrap();
+        let a_path = dir.path().join("a.mp4");
+        let b_path = dir.path().join("b.mp4");
+        // Generate real brief videos so media QC passes, preserving original intent.
+        for p in [&a_path, &b_path] {
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y", "-f", "lavfi", "-i", "color=c=black:s=320x240:d=0.5:r=24",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5",
+                    "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                ])
+                .arg(p)
+                .status()
+                .unwrap();
+            assert!(status.success(), "ffmpeg failed for {}", p.display());
+        }
         let mut state = ProjectState::new();
         state.settings.aspect_ratio = Some("9:16".into());
         state.profile = Some(ProductionProfile {
@@ -745,8 +952,17 @@ mod tests {
         assert_eq!(version.shots[0].shot_id, "shot_a");
         assert_eq!(version.shots[0].path, "a.mp4");
         assert_eq!(version.shots[1].path, "b.mp4");
-        assert_eq!(fs::read(dir.path().join("a.mp4")).unwrap(), b"take-a");
-        assert_eq!(fs::read(dir.path().join("b.mp4")).unwrap(), b"take-b");
+        // Give the locked version the real assembly file so media QC passes.
+        let version = version_mut(&mut state, 1, &version_id).unwrap();
+        let master=dir.path().join("master.mp4");
+        let generated=std::process::Command::new("ffmpeg").args(["-v","error","-y","-f","lavfi","-i","color=black:s=320x240:r=24:d=1","-c:v","libx264","-threads","1"]).arg(&master).output().unwrap();
+        assert!(generated.status.success());
+        version.assembly_path = Some("master.mp4".into());
+        version.assembly_snapshot=Some(version.shots.iter().map(|s|AssemblyShotSnapshot{shot_id:s.shot_id.clone(),cut_label:s.cut_label,take_id:s.take_id.clone(),path:s.path.clone(),start_seconds:0.0,duration_seconds:0.5,transition:"cut".into()}).collect());
+        assert!(fs::metadata(&a_path).is_ok());
+        assert!(fs::metadata(&b_path).is_ok());
+        let a_bytes_before = fs::read(&a_path).unwrap();
+        let b_bytes_before = fs::read(&b_path).unwrap();
 
         let check = check_deliverable(&mut state, 1, "del_scene", dir.path()).unwrap();
         assert!(check.passed, "{:?}", check.messages);
@@ -790,6 +1006,7 @@ mod tests {
             .unwrap()
             .contains("external NLE"));
         assert_eq!(post.versions.len(), 1);
-        assert_eq!(fs::read(dir.path().join("b.mp4")).unwrap(), b"take-b");
+        assert_eq!(fs::read(&a_path).unwrap(), a_bytes_before, "a.mp4 bytes changed");
+        assert_eq!(fs::read(&b_path).unwrap(), b_bytes_before, "b.mp4 bytes changed");
     }
 }

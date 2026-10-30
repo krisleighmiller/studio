@@ -25,7 +25,7 @@ function paintAssembleStage(scene: SceneRecord, emit: (intent: AssembleIntent) =
         ? `Select one take for every cut before assembly. Missing: ${missing
             .map((cut) => `Cut ${cut}`)
             .join(", ")}.`
-        : `${selected.length} selected takes are ready to assemble in cut order.`,
+        : `${selected.length} selected takes are ready to assemble in animatic order.`,
     ),
   );
 
@@ -35,13 +35,17 @@ function paintAssembleStage(scene: SceneRecord, emit: (intent: AssembleIntent) =
   heading.textContent = `Scene ${scene.id} master`;
   const list = document.createElement("ol");
   list.className = "workflow-readiness";
-  for (const cut of scene.cuts) {
+  const timedCuts = scene.animatic?.shots?.map(shot => scene.cuts.find(cut => cut.id.source_scene === shot.cut_id.source_scene && cut.id.cut === shot.cut_id.cut));
+  const displayCuts = timedCuts && timedCuts.length === scene.cuts.length && new Set(timedCuts).size === scene.cuts.length && timedCuts.every(Boolean) ? timedCuts as typeof scene.cuts : scene.cuts;
+  for (const cut of displayCuts) {
     const entry = document.createElement("li");
     const take = selected.find((item) => item.cut === cut.id.cut)?.take;
     entry.className = take ? "ready" : "missing";
     entry.textContent = take
       ? `Cut ${cut.id.cut} · ${take.path.split("/").pop() ?? take.id}`
       : `Cut ${cut.id.cut} · no selected take`;
+    const timing = scene.animatic?.shots?.find(shot => shot.cut_id.source_scene === cut.id.source_scene && shot.cut_id.cut === cut.id.cut);
+    if (timing) entry.textContent += ` · start ${(timing.trim_in_seconds ?? 0).toFixed(2)}s · ${(timing.duration_seconds - (timing.trim_in_seconds ?? 0) - (timing.trim_out_seconds ?? 0)).toFixed(2)}s · ${(timing.transition ?? "cut").replace(/_/g, " ")}`;
     list.append(entry);
   }
 
@@ -67,7 +71,7 @@ function paintAssembleStage(scene: SceneRecord, emit: (intent: AssembleIntent) =
   const note = document.createElement("p");
   note.className = "workflow-field-hint";
   note.textContent =
-    "Assembly joins the complete reviewed takes in cut order, runs locally with ffmpeg after approval, and writes a versioned master to Final/.";
+    "Assembly follows saved animatic order, trims and transitions when present. The approval card shows host-validated source windows; FFmpeg writes a versioned local master to Final/.";
   summary.append(heading, list, controls, note);
   wrap.append(summary, renderPostPanel(scene, missing.length > 0, emit));
   return wrap;

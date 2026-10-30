@@ -791,10 +791,40 @@ pub fn attach_image(
         .filter(|value| is_image_ext(value))
         .unwrap_or("png");
     let rel = next_frame_rel(root, state, scene_id, cut_number, ext);
-    let dest = root.join(&rel);
-    if source != dest {
-        create_parent(root, &rel)?;
-        fs::copy(&source, &dest).map_err(|error| format!("could not copy image: {error}"))?;
+    let root_str = root.to_string_lossy().into_owned();
+    // Confine destination BEFORE create_dir_all: resolve against the
+    // project root and enforce the exact Preproduction/SceneN/start_frames bucket.
+    let dest = crate::project_path::resolve(&rel, Some(&root_str), crate::project_path::PathIntent::Write)
+        .map(|resolved| resolved.into_path_buf())
+        .map_err(|error| format!("start-frame destination outside project: {error}"))?;
+    crate::project_path::under_scene_bucket(root, &dest, "start_frames")
+        .map_err(|error| format!("start-frame destination outside start_frames bucket: {error}"))?;
+    if crate::project_path::relative_to_root(root, &dest)?.parent()
+        != Path::new(&rel).parent()
+    {
+        return Err("start-frame destination is outside this scene start_frames bucket".into());
+    }
+    if source != dest.as_path() {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("could not create start-frame folder: {error}"))?;
+        }
+    }
+    // Re-confine AFTER create_dir_all — fs::copy follows parent chain,
+    // so the final destination must still be inside the exact start_frames
+    // bucket of this scene. This blocks directory or existing-file symlinks.
+    let dest_again = crate::project_path::resolve(&rel, Some(&root_str), crate::project_path::PathIntent::Write)
+        .map(|resolved| resolved.into_path_buf())
+        .map_err(|error| format!("start-frame destination outside project: {error}"))?;
+    crate::project_path::under_scene_bucket(root, &dest_again, "start_frames")
+        .map_err(|error| format!("start-frame destination outside start_frames bucket: {error}"))?;
+    if crate::project_path::relative_to_root(root, &dest_again)?.parent()
+        != Path::new(&rel).parent()
+    {
+        return Err("start-frame destination is outside this scene start_frames bucket".into());
+    }
+    if source != dest_again.as_path() {
+        fs::copy(&source, &dest_again).map_err(|error| format!("could not copy image: {error}"))?;
     }
     let parent_asset_id =
         latest_cut_asset(state, scene_id, cut_number).map(|asset| asset.id.clone());
@@ -1092,7 +1122,7 @@ fn stem_exists(root: &Path, rel: &str) -> bool {
     fs::read_dir(parent).ok().is_some_and(|entries| {
         entries.filter_map(Result::ok).any(|entry| {
             let path = entry.path();
-            path.is_file() && path.file_stem() == Some(stem) && is_image_path(&path)
+            path.is_file() && !path.is_symlink() && path.file_stem() == Some(stem) && is_image_path(&path)
         })
     })
 }
@@ -1536,6 +1566,7 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            assembly_snapshot: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,

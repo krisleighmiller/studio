@@ -1,5 +1,4 @@
 import { REQUIREMENT_KINDS, REQUIREMENT_STATUSES } from "../../workflowTypes";
-import { minorToMoney, moneyToMinor } from "../money";
 import { getSurfaceHost, isProfileOpen, setProfileOpen } from "./session";
 import { presentSurface } from "./shared";
 import { buildProfileModel } from "./surfaceModels";
@@ -37,7 +36,6 @@ function paintProjectProfile(emit: (intent: ProfileIntent) => void): HTMLElement
   bar.append(recipe, summary, edit);
   wrap.append(bar);
   if (isProfileOpen()) wrap.append(renderProfileForm(emit));
-  if (isProfileOpen()) wrap.append(renderBudgetEditor(emit));
   wrap.append(renderRequirements(emit));
   return wrap;
 }
@@ -109,7 +107,6 @@ function renderProfileForm(emit: (intent: ProfileIntent) => void): HTMLElement {
       value: (profile?.safety_constraints ?? []).join("\n"),
       wide: true,
     },
-    { key: "budget", label: "Budget", value: profile?.budget ?? "" },
     { key: "schedule", label: "Schedule", value: profile?.schedule ?? "" },
     { key: "rights_notes", label: "Rights notes", value: profile?.rights_notes ?? "", wide: true },
   ];
@@ -182,121 +179,13 @@ function renderProfileForm(emit: (intent: ProfileIntent) => void): HTMLElement {
         audio_plan: blank(read("audio_plan")),
         continuity_rules: lines(read("continuity_rules")),
         safety_constraints: lines(read("safety_constraints")),
-        budget: blank(read("budget")),
+        budget: profile?.budget ?? null,
         schedule: blank(read("schedule")),
         rights_notes: blank(read("rights_notes")),
       },
     });
   });
   return form;
-}
-
-function renderBudgetEditor(emit: (intent: ProfileIntent) => void): HTMLElement {
-  const budget = getSurfaceHost().state?.budget ?? null;
-  const section = document.createElement("section");
-  section.className = "workflow-budget-editor";
-  section.setAttribute("aria-label", "Spend budget");
-  const heading = document.createElement("h2");
-  heading.textContent = "Spend budget";
-  const form = document.createElement("form");
-  form.className = "workflow-profile-form";
-
-  const currency = document.createElement("label");
-  currency.textContent = "Currency";
-  const currencyInput = document.createElement("input");
-  currencyInput.name = "budget_currency";
-  currencyInput.value = budget?.currency ?? "USD";
-
-  const limit = document.createElement("label");
-  limit.textContent = "Limit";
-  const limitInput = document.createElement("input");
-  limitInput.name = "budget_limit";
-  limitInput.placeholder = "e.g. 50.00";
-  limitInput.value = budget?.limit_minor != null ? minorToMoney(budget.limit_minor) : "";
-
-  const warning = document.createElement("label");
-  warning.textContent = "Warning at";
-  const warningInput = document.createElement("input");
-  warningInput.name = "budget_warning";
-  warningInput.placeholder = "e.g. 40.00";
-  warningInput.value = budget?.warning_at_minor != null ? minorToMoney(budget.warning_at_minor) : "";
-
-  const policyLabel = document.createElement("label");
-  policyLabel.className = "wide";
-  policyLabel.textContent = "Spending policy";
-  const policySelect = document.createElement("select");
-  policySelect.name = "budget_policy";
-  for (const [value, label] of [
-    ["strict_hard_stop", "Strict block for v1 — paid generation unavailable without verified maxima"],
-    ["approval_required", "Approval required — authorize each paid request after unknown-cost disclosure"],
-    ["warn_only", "Warn policy — v1 still requires authorization for each paid request"],
-  ]) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    policySelect.append(option);
-  }
-  policySelect.value = budget?.policy ?? (budget?.hard_stop ? "strict_hard_stop" : "approval_required");
-  policyLabel.append(policySelect);
-
-  const note = document.createElement("p");
-  note.className = "workflow-budget-note";
-  note.textContent = "Studio v1 does not guarantee or verify provider charges. Strict policy remains fail-closed and blocks paid generation until the user explicitly changes it; Approval Required and Warn policies require per-request authorization after unknown-cost disclosure. LLM/chat requests remain blocked and are not covered by this budget.";
-
-  currency.append(currencyInput);
-  limit.append(limitInput);
-  warning.append(warningInput);
-  form.append(currency, limit, warning, policyLabel, note);
-
-  const actions = document.createElement("span");
-  actions.className = "workflow-budget-actions";
-  const save = document.createElement("button");
-  save.type = "submit";
-  save.className = "ghost-button";
-  save.textContent = "Save budget";
-  save.disabled = Boolean(getSurfaceHost().busy);
-  const clear = document.createElement("button");
-  clear.type = "button";
-  clear.className = "ghost-button";
-  clear.textContent = "Clear budget";
-  clear.disabled = Boolean(getSurfaceHost().busy) || !budget;
-  clear.addEventListener("click", () => emit({ type: "set-budget", budget: null }));
-  actions.append(save, clear);
-  form.append(actions);
-
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const currencyValue = currencyInput.value.trim() || "USD";
-    const limitText = limitInput.value.trim();
-    const warningText = warningInput.value.trim();
-    const limitMinor = limitText ? moneyToMinor(limitText) : null;
-    const warningMinor = warningText ? moneyToMinor(warningText) : null;
-    if (limitText && limitMinor == null) {
-      note.textContent = "Limit must be a dollar amount like 50 or 50.00.";
-      return;
-    }
-    if (warningText && warningMinor == null) {
-      note.textContent = "Warning level must be a dollar amount like 40 or 40.00.";
-      return;
-    }
-    if (limitMinor != null && warningMinor != null && warningMinor > limitMinor) {
-      note.textContent = "Warning level cannot exceed the limit.";
-      return;
-    }
-    emit({
-      type: "set-budget",
-      budget: {
-        currency: currencyValue,
-        limit_minor: limitMinor,
-        warning_at_minor: warningMinor,
-        hard_stop: policySelect.value === "strict_hard_stop",
-        policy: policySelect.value as "strict_hard_stop" | "approval_required" | "warn_only",
-      },
-    });
-  });
-
-  section.append(heading, form);
-  return section;
 }
 
 function renderRequirements(emit: (intent: ProfileIntent) => void): HTMLElement {

@@ -1,5 +1,3 @@
-import { minorToMoney } from "./studio/money";
-
 type BoundedQuote = {
   provider: string;
   category: string;
@@ -11,7 +9,7 @@ type BoundedQuote = {
   ledgerRevision: string;
 };
 type UnboundedQuote = { currency: string; requestHash: string; ledgerRevision: string; disclosure: string };
-type Request = { quote: BoundedQuote | UnboundedQuote; provider: string; operation: string; model: string; projectRoot: string; args: Record<string, unknown> };
+type Request = { quote: BoundedQuote | UnboundedQuote; provider: string; operation: string; model: string; projectRoot: string; args: Record<string, unknown>; epoch: number; ownerRequestId?: string; workflowBound: boolean };
 type Invoke = (command: string, args: Record<string, unknown>) => Promise<unknown>;
 
 const operations = new Set(["atlas_generate_image", "atlas_generate_video", "atlas_generate_audio"]);
@@ -25,9 +23,9 @@ function parseRequest(value: unknown): Request | null {
   const provider = bounded ? q.provider : value.provider;
   const operation = bounded ? q.operation : value.operation;
   const model = bounded ? q.model : value.model;
-  if ([provider, operation, model, q.currency, q.ledgerRevision].some((field) => typeof field !== "string" || !field) ||
+  if ([provider, operation, model, q.ledgerRevision].some((field) => typeof field !== "string" || !field) ||
       !operations.has(operation as string) ||
-      (bounded ? q.category !== "media" || typeof q.capability !== "string" ||
+      (bounded ? typeof q.currency !== "string" || !q.currency || q.category !== "media" || typeof q.capability !== "string" ||
         !Number.isSafeInteger(q.amountMinor) || (q.amountMinor as number) <= 0 :
         value.category !== "media" || typeof q.requestHash !== "string" || !/^[0-9a-f]{64}$/.test(q.requestHash) ||
         typeof q.disclosure !== "string" || !q.disclosure) ||
@@ -35,7 +33,7 @@ function parseRequest(value: unknown): Request | null {
       value.args.model !== model || "spend_confirmation" in value.args ||
       "spendConfirmation" in value.args) return null;
   return { quote: q as BoundedQuote | UnboundedQuote, provider: provider as string,
-    operation: operation as string, model: model as string, projectRoot: value.projectRoot, args: value.args };
+    operation: operation as string, model: model as string, projectRoot: value.projectRoot, args: value.args, epoch: 0, workflowBound: value.workflowContinuationBound === true, ownerRequestId: typeof value.ownerRequestId === "string" && value.ownerRequestId.length <= 128 ? value.ownerRequestId : undefined };
 }
 
 /** The only renderer path to a paid media replay; the quote comes from the host event. */
@@ -43,23 +41,21 @@ export function createSpendConfirmationHandler(deps: {
   invoke: Invoke;
   ask: (message: string, options: { title: string; kind: "warning" }) => Promise<boolean>;
   projectRoot: () => string | null;
+  projectEpoch?: () => number;
+  ownerIsCurrent?: (ownerRequestId: string | undefined) => boolean;
   status: (message: string) => void;
-  onSubmitted?: (result: unknown) => void | Promise<void>;
+  onSubmitted?: (result: unknown, isCurrent: () => boolean, ownerRequestId?: string) => void | Promise<void>;
+  onProgress?: (isCurrent: () => boolean) => void | Promise<void>;
+  onSettled?: (outcome: { success: boolean; result?: unknown; error?: unknown }, isCurrent: () => boolean) => void | Promise<void>;
 }): (payload: unknown) => Promise<void> {
-  // Authorization events can arrive while a previous dialog is still open.
-  // Never drop them silently: distinct requests queue (bounded), duplicates
-  // and overflow are rejected with an observable status and a resume path.
   const MAX_QUEUED = 4;
   const queue: Request[] = [];
   const seen = new Set<string>();
   let active = false;
 
+  const getEpoch = () => typeof deps.projectEpoch === "function" ? deps.projectEpoch() : 0;
+
   const keyOf = (request: Request): string => {
-    // Bounded quotes share a ledger revision until something settles, so the
-    // revision alone cannot distinguish two different operations quoted at
-    // the same revision. The request args (model, params, save_path) are the
-    // operation's identity for dedup purposes: an exact re-emission of the
-    // same event serializes identically, a distinct operation does not.
     const identity =
       "requestHash" in request.quote ? request.quote.requestHash : request.quote.ledgerRevision;
     let argsKey = "";
@@ -68,22 +64,28 @@ export function createSpendConfirmationHandler(deps: {
     } catch {
       argsKey = "<unserializable>";
     }
-    return `${request.projectRoot}|${request.operation}|${request.model}|${identity}|${argsKey}`;
+    return `${request.projectRoot}|${request.epoch}|${request.operation}|${request.model}|${identity}|${argsKey}`;
   };
 
   async function processOne(request: Request): Promise<void> {
-    const { quote, projectRoot, args, provider, operation, model } = request;
+    const { quote, projectRoot, args, provider, operation, model, epoch } = request;
     const unbounded = "requestHash" in quote;
     let dispatchAttempted = false;
+    let settled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const isCurrent = (): boolean => {
+      const root = deps.projectRoot();
+      const currentEpoch = getEpoch();
+      return Boolean(root) && root === projectRoot && currentEpoch === epoch && (!request.workflowBound || Boolean(deps.ownerIsCurrent?.(request.ownerRequestId)));
+    };
+
     try {
       const accepted = await deps.ask(
-        `${operation} · ${model}\n` +
-        (unbounded ? `${quote.disclosure}\nThis is NOT a guaranteed hard stop.\n` :
-          `Estimated charge (not a verified maximum): ${minorToMoney(quote.amountMinor)} ${quote.currency}\n`) +
-        `Ledger revision: ${quote.ledgerRevision}\n\nAuthorize this single media generation?`,
+        `${provider} · ${operation} · ${model}\n\nAuthorize this single media generation?`,
         { title: "Confirm paid generation", kind: "warning" },
       );
-      if (!accepted || deps.projectRoot() !== projectRoot) {
+      if (!accepted || !isCurrent()) {
         if (!accepted) deps.status("Paid generation was not authorized; no provider request was sent.");
         else deps.status(`Paid generation (${operation} · ${model}) was dropped: the open project changed while its authorization was pending. It was not dispatched.`);
         return;
@@ -99,25 +101,62 @@ export function createSpendConfirmationHandler(deps: {
           amountMinor: quote.amountMinor, ledgerRevision: quote.ledgerRevision,
         });
       if (typeof token !== "string" || !token) throw new Error("Host did not issue a spend token");
-      // Never retry this call: even if the response fails, the host may have consumed the token.
+      if (!isCurrent()) return; // Never dispatch into a replaced project session.
       dispatchAttempted = true;
+      const startPoll = () => {
+        const tick = async () => {
+          if (settled || !isCurrent()) {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            return;
+          }
+          try {
+            if (deps.onProgress) {
+              await deps.onProgress(() => !settled && isCurrent());
+            }
+          } catch { /* poll errors never resubmit or replace */ }
+          if (!settled && isCurrent()) {
+            pollTimer = setTimeout(tick, 500);
+          } else {
+            if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+          }
+        };
+        pollTimer = setTimeout(tick, 500);
+      };
+      startPoll();
       const result = await deps.invoke("media_generate_confirmed", {
         projectRoot, operation, mediaArgs: args, token,
       });
+      settled = true;
+      if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+      if (!isCurrent()) {
+        // Scope changed after result; suppress final status/callbacks into replacement.
+        return;
+      }
       deps.status(`Media generation submitted: ${String(result)}`);
       if (deps.onSubmitted) {
         try {
-          await deps.onSubmitted(result);
+          if (request.ownerRequestId !== undefined) await deps.onSubmitted(result, isCurrent, request.ownerRequestId);
+          else await deps.onSubmitted(result, isCurrent);
         } catch {
-          deps.status(`Media generation submitted: ${String(result)} (Jobs refresh failed)`);
+          if (isCurrent()) deps.status(`Media generation submitted: ${String(result)} (Jobs refresh failed)`);
         }
       }
+      if (deps.onSettled && isCurrent()) {
+        try { await deps.onSettled({ success: true, result }, isCurrent); } catch { /* never replace outcome */ }
+      }
     } catch (error) {
+      settled = true;
+      if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+      if (!isCurrent()) {
+        // Suppress stale final callbacks/status when scope changed.
+        return;
+      }
       const detail = error instanceof Error ? error.message : String(error);
+      if (deps.onSettled && isCurrent()) {
+        try { await deps.onSettled({ success: false, error }, isCurrent); } catch { /* never replace original outcome */ }
+      }
+      if (!isCurrent()) return;
       if (!dispatchAttempted && /stale/i.test(detail)) {
-        // Another completed operation changed the ledger revision after this
-        // quote was issued. The host rejected the quote; nothing was charged
-        // or dispatched, and only a fresh quote can proceed.
         deps.status(`Paid generation (${request.operation} · ${request.model}) was NOT dispatched: its authorization expired when another operation settled first. Re-run the operation from its Studio surface (Scene Look → Generate still → Approve) to get a fresh quote.`);
         return;
       }
@@ -132,10 +171,7 @@ export function createSpendConfirmationHandler(deps: {
     active = true;
     try {
       for (let next = queue.shift(); next; next = queue.shift()) {
-        // Revalidate before dispatch: a queued quote is only ever presented
-        // against the project it was issued for, and confirm_spend itself
-        // rejects a stale ledger revision or reused token.
-        if (deps.projectRoot() !== next.projectRoot) {
+        if (!isCurrentForQueue(next)) {
           seen.delete(keyOf(next));
           deps.status(`Paid generation (${next.operation} · ${next.model}) was discarded: it belongs to a different project. Re-run it from that project.`);
           continue;
@@ -148,6 +184,12 @@ export function createSpendConfirmationHandler(deps: {
     }
   }
 
+  const isCurrentForQueue = (request: Request): boolean => {
+    const root = deps.projectRoot();
+    const currentEpoch = getEpoch();
+    return Boolean(root) && root === request.projectRoot && currentEpoch === request.epoch;
+  };
+
   return (payload) => {
     const request = parseRequest(payload);
     if (!request) return Promise.resolve();
@@ -155,6 +197,7 @@ export function createSpendConfirmationHandler(deps: {
       deps.status(`Ignored a paid-generation authorization for a different project (${request.operation}); nothing was dispatched.`);
       return Promise.resolve();
     }
+    request.epoch = getEpoch();
     const key = keyOf(request);
     if (seen.has(key)) {
       deps.status(`Ignored a duplicate paid-generation authorization event (${request.operation} · ${request.model}); the original is still being handled.`);

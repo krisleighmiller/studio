@@ -89,6 +89,15 @@ impl TransitionKind {
         }
     }
 
+    fn parse_strict(raw: &str) -> Result<Self, String> {
+        match raw.trim() {
+            "cut" => Ok(Self::Cut),
+            "dissolve" => Ok(Self::Dissolve),
+            "fade_through_black" => Ok(Self::Fade),
+            _ => Err(format!("Unknown transition_out: '{}' (expected cut, dissolve, fade_through_black)", raw.trim())),
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Cut => "cut",
@@ -107,6 +116,7 @@ struct SpeechCue {
 #[derive(Debug, Clone)]
 struct SceneMeta {
     id: u32,
+    cut: Option<u32>,
     head_s: f64,
     tail_s: f64,
     estimated_s: f64,
@@ -119,11 +129,13 @@ struct SceneMeta {
 #[derive(Debug, Clone)]
 struct SceneAsset {
     id: u32,
+    cut: Option<u32>,
     video: PathBuf,
     audio: Option<PathBuf>,
     trim_override: Option<TrimMode>,
     custom_start: Option<f64>,
     custom_duration: Option<f64>,
+    outgoing_transition: Option<TransitionKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,18 +255,17 @@ fn parse_assemble_map_text(text: &str) -> Result<Map<String, Value>, String> {
     let mut scenes: Vec<Value> = Vec::new();
     let mut in_scenes = false;
     let mut in_captions = false;
-    let mut pending_scene_id: Option<u32> = None;
+    let mut current_scene: Option<usize> = None;
+    let mut scenes_indent = 0;
 
-    let flush_scene_path = |scenes: &mut Vec<Value>, id: Option<u32>, path: &str| {
-        let Some(id) = id else { return };
-        let path = path.trim();
-        if path.is_empty() {
-            return;
-        }
+    let begin_scene = |scenes: &mut Vec<Value>, id: u32, path: &str| {
         let mut obj = Map::new();
         obj.insert("id".into(), Value::from(id));
-        obj.insert("video".into(), Value::String(unquote_yaml(path)));
+        if !path.trim().is_empty() {
+            obj.insert("video".into(), Value::String(unquote_yaml(path)));
+        }
         scenes.push(Value::Object(obj));
+        scenes.len() - 1
     };
 
     for raw_line in text.lines() {
@@ -277,7 +288,8 @@ fn parse_assemble_map_text(text: &str) -> Result<Map<String, Value>, String> {
         if trimmed.starts_with("scenes:") {
             in_scenes = true;
             in_captions = false;
-            pending_scene_id = None;
+            current_scene = None;
+            scenes_indent = indent;
             let rest = trimmed["scenes:".len()..].trim();
             if !rest.is_empty() && rest != "|" && rest != ">" {
                 // inline not supported
@@ -287,7 +299,7 @@ fn parse_assemble_map_text(text: &str) -> Result<Map<String, Value>, String> {
         if trimmed.starts_with("captions:") {
             in_scenes = false;
             in_captions = true;
-            pending_scene_id = None;
+            current_scene = None;
             continue;
         }
         if indent == 0
@@ -307,6 +319,8 @@ fn parse_assemble_map_text(text: &str) -> Result<Map<String, Value>, String> {
                     | "discover"
                     | "prefer_retry"
                     | "overwrite"
+                    | "fade_in"
+                    | "fade_out"
                     | "music"
                     | "music_path"
                     | "music_volume"
@@ -344,48 +358,85 @@ fn parse_assemble_map_text(text: &str) -> Result<Map<String, Value>, String> {
             }
         }
 
+        if in_scenes && indent <= scenes_indent && !trimmed.starts_with('-') {
+            in_scenes = false;
+            current_scene = None;
+        }
         if in_scenes {
             // List form: - id: 1
             if let Some(rest) = trimmed.strip_prefix("- id:") {
-                pending_scene_id = rest.trim().parse().ok();
+                current_scene = rest
+                    .trim()
+                    .parse()
+                    .ok()
+                    .map(|id| begin_scene(&mut scenes, id, ""));
                 continue;
             }
             if trimmed.starts_with("- ") && trimmed.contains("id:") {
                 if let Some(pos) = trimmed.find("id:") {
-                    pending_scene_id = trimmed[pos + 3..].trim().parse().ok();
+                    current_scene = trimmed[pos + 3..]
+                        .trim()
+                        .parse()
+                        .ok()
+                        .map(|id| begin_scene(&mut scenes, id, ""));
+                }
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("cut:") {
+                if let Some(Value::Object(obj)) = current_scene.and_then(|i| scenes.get_mut(i)) {
+                    let cut = unquote_yaml(rest).parse::<u32>().ok().filter(|n| *n > 0)
+                        .ok_or("assemble cut must be a positive integer")?;
+                    obj.insert("cut".into(), Value::from(cut));
                 }
                 continue;
             }
             if let Some(rest) = trimmed.strip_prefix("video:") {
-                if let Some(id) = pending_scene_id {
-                    flush_scene_path(&mut scenes, Some(id), rest);
-                    pending_scene_id = None;
+                if let Some(Value::Object(obj)) = current_scene.and_then(|i| scenes.get_mut(i)) {
+                    obj.insert("video".into(), Value::String(unquote_yaml(rest)));
                 }
                 continue;
             }
             if let Some(rest) = trimmed.strip_prefix("audio:") {
-                if let Some(Value::Object(obj)) = scenes.last_mut() {
+                if let Some(Value::Object(obj)) = current_scene.and_then(|i| scenes.get_mut(i)) {
                     obj.insert("audio".into(), Value::String(unquote_yaml(rest)));
                 }
                 continue;
             }
             if let Some(rest) = trimmed.strip_prefix("trim:") {
-                if let Some(Value::Object(obj)) = scenes.last_mut() {
+                if let Some(Value::Object(obj)) = current_scene.and_then(|i| scenes.get_mut(i)) {
                     obj.insert("trim".into(), Value::String(unquote_yaml(rest)));
                 }
                 continue;
+            }
+            for key in ["start", "duration"] {
+                if let Some(rest) = trimmed.strip_prefix(&format!("{key}:")) {
+                    if let Some(Value::Object(obj)) = current_scene.and_then(|i| scenes.get_mut(i))
+                    {
+                        let value = unquote_yaml(rest)
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|n| {
+                                n.is_finite() && if key == "start" { *n >= 0.0 } else { *n > 0.0 }
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "assemble scene {key} must be a finite {} number",
+                                    if key == "start" {
+                                        "nonnegative"
+                                    } else {
+                                        "positive"
+                                    }
+                                )
+                            })?;
+                        obj.insert(key.into(), Value::from(value));
+                    }
+                }
             }
             // Map form: "1: /path/to.mp4" or "1:" then nested video
             if let Some((key, val)) = trimmed.split_once(':') {
                 let key = key.trim();
                 if let Ok(id) = key.parse::<u32>() {
-                    let val = val.trim();
-                    if val.is_empty() {
-                        pending_scene_id = Some(id);
-                    } else {
-                        flush_scene_path(&mut scenes, Some(id), val);
-                        pending_scene_id = None;
-                    }
+                    current_scene = Some(begin_scene(&mut scenes, id, val));
                     continue;
                 }
             }
@@ -394,7 +445,7 @@ fn parse_assemble_map_text(text: &str) -> Result<Map<String, Value>, String> {
                 let key = trimmed.split(':').next().unwrap_or("").trim();
                 if key.parse::<u32>().is_err() && key != "id" && key != "video" && key != "audio" {
                     in_scenes = false;
-                    pending_scene_id = None;
+                    current_scene = None;
                 } else {
                     continue;
                 }
@@ -428,6 +479,11 @@ fn parse_assemble_map_text(text: &str) -> Result<Map<String, Value>, String> {
                     if let Some(b) = yaml_bool(&val) {
                         out.insert("prefer_retry".into(), Value::Bool(b));
                     }
+                }
+                "fade_in" | "fade_out" => {
+                    let b = yaml_bool(&val)
+                        .ok_or_else(|| format!("assemble {key} must be a boolean"))?;
+                    out.insert(key.into(), Value::Bool(b));
                 }
                 "overwrite" => {
                     if let Some(b) = yaml_bool(&val) {
@@ -612,6 +668,7 @@ fn parse_prod_scene_meta(production_text: &str) -> Vec<SceneMeta> {
         }
         metas.push(SceneMeta {
             id,
+            cut: yaml_string_field(&body, "cut").and_then(|v| v.parse().ok()),
             head_s: yaml_f64_field(&body, "head_handle_seconds").unwrap_or(0.0),
             tail_s: yaml_f64_field(&body, "tail_handle_seconds").unwrap_or(0.0),
             estimated_s: yaml_f64_field(&body, "estimated_screen_duration_seconds").unwrap_or(0.0),
@@ -834,19 +891,43 @@ fn parse_scene_assets(
                 .get("trim")
                 .and_then(|v| v.as_str())
                 .map(TrimMode::parse);
-            let custom_start = obj
-                .get("start")
-                .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|n| n as f64)));
-            let custom_duration = obj
-                .get("duration")
-                .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|n| n as f64)));
+            let trim_number = |key: &str| -> Result<Option<f64>, String> {
+                obj.get(key)
+                    .map(|value| {
+                        value
+                            .as_f64()
+                            .filter(|n| {
+                                n.is_finite() && if key == "start" { *n >= 0.0 } else { *n > 0.0 }
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "Scene {id} custom {key} must be a finite {} number",
+                                    if key == "start" {
+                                        "nonnegative"
+                                    } else {
+                                        "positive"
+                                    }
+                                )
+                            })
+                    })
+                    .transpose()
+            };
+            let custom_start = trim_number("start")?;
+            let custom_duration = trim_number("duration")?;
+            let outgoing_transition = match obj.get("transition_out") {
+                Some(Value::String(s)) => Some(TransitionKind::parse_strict(s)?),
+                Some(_) => return Err(format!("Scene {id} transition_out must be a string")),
+                None => None,
+            };
             assets.push(SceneAsset {
                 id,
+                cut: obj.get("cut").map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0).ok_or("assemble cut must be a positive integer")).transpose()?,
                 video,
                 audio,
                 trim_override,
                 custom_start,
                 custom_duration,
+                outgoing_transition,
             });
         }
     }
@@ -894,16 +975,19 @@ fn parse_scene_assets(
             };
             assets.push(SceneAsset {
                 id,
+                cut: None,
                 video,
                 audio,
                 trim_override: None,
                 custom_start: None,
                 custom_duration: None,
+                outgoing_transition: None,
             });
         }
     }
 
-    assets.sort_by_key(|a| a.id);
+    // Explicit scene arrays are editorial order, not a discovery set.
+    if !inputs.get("scenes").and_then(Value::as_array).is_some_and(|s| !s.is_empty()) { assets.sort_by_key(|a| a.id); }
     Ok(assets)
 }
 
@@ -919,12 +1003,16 @@ fn compute_trim(
     match mode {
         TrimMode::Full => Ok((0.0, d)),
         TrimMode::Custom => {
-            let start = custom_start.unwrap_or(0.0).max(0.0);
-            let dur = custom_duration.unwrap_or((d - start).max(0.0));
-            if start >= d {
-                return Err(format!("custom start {start} exceeds source duration {d}"));
+            let start = custom_start.unwrap_or(0.0);
+            if !start.is_finite() || start < 0.0 || start >= d {
+                return Err(format!("custom start {start} must be finite, nonnegative, and less than source duration {d}"));
             }
-            Ok((start, dur.min(d - start)))
+            let available = d - start;
+            let dur = custom_duration.unwrap_or(available);
+            if !dur.is_finite() || dur <= 0.0 || dur > available {
+                return Err(format!("custom duration {dur} must be finite, positive, and at most {available} seconds (source duration {d}, start {start})"));
+            }
+            Ok((start, dur))
         }
         TrimMode::Estimated => {
             let start = h.max(0.0);
@@ -963,6 +1051,11 @@ fn build_plan(
     let mut inputs = inputs.clone();
     merge_assemble_map_into_inputs(&mut inputs, project_root)?;
     let inputs = &inputs;
+    for key in ["fade_in", "fade_out"] {
+        if inputs.get(key).is_some_and(|value| !value.is_boolean()) {
+            return Err(format!("assemble {key} must be a boolean"));
+        }
+    }
 
     let production_raw = input_str(
         inputs,
@@ -982,8 +1075,21 @@ fn build_plan(
     let production_text = fs::read_to_string(&production_path)
         .map_err(|e| format!("Could not read production notes: {e}"))?;
     let metas = parse_prod_scene_meta(&production_text);
-    let meta_by_id: std::collections::HashMap<u32, &SceneMeta> =
-        metas.iter().map(|m| (m.id, m)).collect();
+    // Scene labels are not unique in a multi-cut master. Never let the last
+    // sibling's timing, speech mode or transitions silently win.
+    let metadata = |asset: &SceneAsset| -> Result<Option<&SceneMeta>, String> {
+        let candidates: Vec<_> = metas.iter().filter(|m| m.id == asset.id).collect();
+        let matches: Vec<_> = candidates.iter().copied().filter(|m| {
+            asset.cut.is_none() || m.cut == asset.cut
+        }).collect();
+        if matches.len() == 1 { return Ok(Some(matches[0])); }
+        // Older scene-only production documents remain usable when unambiguous.
+        if matches.is_empty() && candidates.len() == 1 && candidates[0].cut.is_none() {
+            return Ok(Some(candidates[0]));
+        }
+        if candidates.is_empty() { return Ok(None); }
+        Err(format!("Scene {} cut {:?}: missing or ambiguous production metadata; specify the exact cut", asset.id, asset.cut))
+    };
 
     let output_raw =
         input_str(inputs, &["output_path", "output", "save_path"]).ok_or_else(|| {
@@ -1043,7 +1149,7 @@ fn build_plan(
         let mut talking = 0usize;
         let mut overshoot = 0usize;
         for asset in &assets {
-            let meta = meta_by_id.get(&asset.id).copied();
+            let meta = metadata(asset)?;
             let speech = meta.map(|m| m.speech_mode.as_str()).unwrap_or("none");
             if is_talking_speech(speech) {
                 talking += 1;
@@ -1074,7 +1180,7 @@ fn build_plan(
     let mut sum_estimated = 0.0;
 
     for (idx, asset) in assets.iter().enumerate() {
-        let meta = meta_by_id.get(&asset.id).copied();
+        let meta = metadata(asset)?;
         let head_s = meta.map(|m| m.head_s).unwrap_or(0.0);
         let tail_s = meta.map(|m| m.tail_s).unwrap_or(0.0);
         let estimated_s = meta.map(|m| m.estimated_s).unwrap_or(0.0);
@@ -1099,6 +1205,26 @@ fn build_plan(
                 return Err(format!("Scene {}: {e}", asset.id));
             }
         };
+        // The renderer seeks the same source-relative window in a separate
+        // voiceover/WAV when used. Valid picture bounds alone are insufficient:
+        // -shortest would otherwise truncate the approved scene at audio EOF.
+        if matches!(mode, TrimMode::Custom)
+            && (speech_mode.to_ascii_lowercase().contains("voiceover") || !has_audio)
+        {
+            if let Some(audio) = asset.audio.as_ref() {
+                let audio_duration = probe_duration_seconds(&audio.to_string_lossy())?;
+                compute_trim(
+                    TrimMode::Custom,
+                    audio_duration,
+                    0.0,
+                    0.0,
+                    0.0,
+                    Some(trim_start),
+                    Some(trim_duration),
+                )
+                .map_err(|e| format!("Scene {} separate audio: {e}", asset.id))?;
+            }
+        }
         if estimated_s > 0.0 && trim_duration + 0.5 < estimated_s {
             warnings.push(format!(
                 "Scene {}: trim duration {trim_duration:.2}s is shorter than estimated S={estimated_s:.1}s",
@@ -1120,9 +1246,10 @@ fn build_plan(
                 }
             }
         }
-        let transition_to_next = if idx + 1 < assets.len() {
-            let next_id = assets[idx + 1].id;
-            match (meta, meta_by_id.get(&next_id).copied()) {
+        let transition_to_next = if idx + 1 == assets.len() { TransitionKind::Cut } else if let Some(over) = asset.outgoing_transition {
+            over
+        } else if idx + 1 < assets.len() {
+            match (meta, metadata(&assets[idx + 1])?) {
                 (Some(a), Some(b)) => transition_between(a, b),
                 _ => TransitionKind::Cut,
             }
@@ -1155,14 +1282,16 @@ fn build_plan(
         return Err("assemble plan has zero scenes".into());
     }
 
-    let fade_in_open = assets
+    let default_fade_in = assets
         .first()
-        .and_then(|a| meta_by_id.get(&a.id).copied())
+        .map(&metadata).transpose()?.flatten()
         .is_some_and(|m| matches!(m.transition_in, TransitionKind::Fade));
-    let fade_out_close = assets
+    let default_fade_out = assets
         .last()
-        .and_then(|a| meta_by_id.get(&a.id).copied())
+        .map(&metadata).transpose()?.flatten()
         .is_some_and(|m| matches!(m.transition_out, TransitionKind::Fade));
+    let fade_in_open = input_bool(inputs, &["fade_in"], default_fade_in);
+    let fade_out_close = input_bool(inputs, &["fade_out"], default_fade_out);
 
     let planned_runtime: f64 = scenes.iter().map(|s| s.trim_duration).sum();
     if matches!(trim_mode, TrimMode::Handles)
@@ -1628,16 +1757,20 @@ fn execute_plan(app: &HostCtx, plan: &AssemblePlan) -> Result<String, String> {
     let mut durations = Vec::new();
     let last_idx = plan.scenes.len().saturating_sub(1);
     for (idx, scene) in plan.scenes.iter().enumerate() {
+        // Sibling cuts share a scene id; their intermediate files must not.
+        let stem = if plan.scenes.iter().filter(|s| s.id == scene.id).count() > 1 {
+            format!("scene_{:02}_shot_{:02}", scene.id, idx + 1)
+        } else { format!("scene_{:02}", scene.id) };
         let raw = plan
             .work_dir
-            .join(format!("scene_{:02}_trim.mp4", scene.id));
+            .join(format!("{stem}_trim.mp4"));
         trim_scene(app, scene, &raw)?;
         let fade_in = idx == 0 && plan.fade_in_open;
         let fade_out = idx == last_idx && plan.fade_out_close;
         let out = if fade_in || fade_out {
             let faded = plan
                 .work_dir
-                .join(format!("scene_{:02}_edge.mp4", scene.id));
+                .join(format!("{stem}_edge.mp4"));
             apply_edge_fade(app, &raw, fade_in, fade_out, &faded)?;
             faded
         } else {
@@ -1785,12 +1918,10 @@ pub fn approval_notes(inputs: &Map<String, Value>, project_root: Option<&str>) -
             body.push('\n');
             body.push_str(&format!("- output: `{}`\n", plan.output_path.display()));
             body.push_str(&format!("- work dir: `{}`\n", plan.work_dir.display()));
-            if plan.fade_in_open || plan.fade_out_close {
-                body.push_str(&format!(
-                    "- edge fades: in={} out={}\n",
-                    plan.fade_in_open, plan.fade_out_close
-                ));
-            }
+            body.push_str(&format!(
+                "- edge fades: in={} out={}\n",
+                plan.fade_in_open, plan.fade_out_close
+            ));
             if let Some(ref music) = plan.music_path {
                 body.push_str(&format!(
                     "- music: `{}` @ {:.2} (duck={})\n",
@@ -1828,7 +1959,7 @@ pub fn approval_notes(inputs: &Map<String, Value>, project_root: Option<&str>) -
                 }
             }
             body.push_str(
-                "\nLocal ffmpeg only (no provider spend). Use the Approve button to render this plan.",
+                "\nLocal ffmpeg operation. Use the Approve button to render this plan.",
             );
             body
         }
@@ -1870,6 +2001,281 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn yaml_map_retains_exact_cut_identity() {
+        let map=parse_assemble_map_text("scenes:
+  - id: 3
+    cut: 2
+    video: Scenes/Scene3/Cut2/take.mp4
+    trim: custom
+    start: 0.5
+    duration: 6.5
+").unwrap();
+        assert_eq!(map["scenes"][0]["cut"],2);
+    }
+
+    #[test]
+    fn same_scene_cut_metadata_does_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        fs::write(dir.path().join("prod.md"), "### Scene 1 — Cut 1
+```yaml
+source_scene: 1
+cut: 1
+head_handle_seconds: 0.5
+estimated_screen_duration_seconds: 0.25
+```
+### Scene 1 — Cut 2
+```yaml
+source_scene: 1
+cut: 2
+head_handle_seconds: 0.1
+estimated_screen_duration_seconds: 0.7
+```
+").unwrap();
+        let generated = Command::new("ffmpeg").args(["-v","error","-f","lavfi","-i","color=white:s=64x64:r=24:d=1","-c:v","libx264","-pix_fmt","yuv420p"]).arg(dir.path().join("take.mp4")).output().unwrap();
+        assert!(generated.status.success());
+        for (cut,start,duration) in [(1,0.5,0.25),(2,0.1,0.7)] {
+            let inputs=json!({"production_path":"prod.md","output_path":"Final/test.mp4","trim":"estimated","scenes":[{"id":1,"cut":cut,"video":"take.mp4"}]});
+            let plan=build_plan(inputs.as_object().unwrap(),Some(root)).unwrap();
+            assert_eq!(plan.scenes[0].trim_start,start,"cut {cut} head");
+            assert_eq!(plan.scenes[0].trim_duration,duration,"cut {cut} duration");
+        }
+        let ambiguous=json!({"production_path":"prod.md","output_path":"Final/test.mp4","trim":"estimated","scenes":[{"id":1,"video":"take.mp4"}]});
+        assert!(build_plan(ambiguous.as_object().unwrap(),Some(root)).is_err(),"ambiguous cut must not silently choose last");
+    }
+
+    #[test]
+    fn director_can_override_edge_fades_without_a_map_or_editing_production() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let production = "### Scene 1\n```yaml\ntransition_in: fade\ntransition_out: fade\n```\n";
+        fs::write(dir.path().join("prod.md"), production).unwrap();
+        let video = dir.path().join("take.mp4");
+        let generated = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=white:s=64x64:r=25:d=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&video)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let base = json!({"production_path":"prod.md", "trim":"full", "scenes":[{"id":1,"video":"take.mp4"}]});
+        for (overrides, expected_in, expected_out) in [
+            (json!({}), true, true),
+            (json!({"fade_in":false}), false, true),
+            (json!({"fade_out":false}), true, false),
+            (json!({"fade_in":true,"fade_out":false}), true, false),
+            (json!({"fade_in":false,"fade_out":false}), false, false),
+        ] {
+            let mut inputs = base.as_object().unwrap().clone();
+            inputs.extend(overrides.as_object().unwrap().clone());
+            let action =
+                json!({"action":"run_specialist", "specialist":"assemble", "inputs":inputs});
+            let parsed = crate::director_actions::parse_actions(&format!(
+                "<director_action>{action}</director_action>"
+            ))
+            .unwrap();
+            let validated =
+                crate::director_actions::validate_action(parsed[0].clone(), Some(root)).unwrap();
+            let plan = build_plan(&validated.action.inputs, Some(root)).unwrap();
+            assert_eq!(
+                (plan.fade_in_open, plan.fade_out_close),
+                (expected_in, expected_out),
+                "{overrides}"
+            );
+            assert!(crate::specialists::specialist_requires_approval("assemble"));
+            assert_eq!(
+                fs::read_to_string(dir.path().join("prod.md")).unwrap(),
+                production
+            );
+        }
+        // Enabling a fade must also override production notes that specify cuts.
+        fs::write(
+            dir.path().join("prod.md"),
+            production.replace("fade", "cut"),
+        )
+        .unwrap();
+        let mut inputs = base.as_object().unwrap().clone();
+        inputs.insert("output_path".into(), json!("Final/test.mp4"));
+        inputs.insert("fade_in".into(), json!(true));
+        inputs.insert("fade_out".into(), json!(true));
+        let plan = build_plan(&inputs, Some(root)).unwrap();
+        assert!(plan.fade_in_open && plan.fade_out_close);
+    }
+
+    #[test]
+    fn yaml_custom_trims_preserve_asymmetric_scene_windows() {
+        // Dropping either field or leaking one scene's values into the next is wrong.
+        for entries in [
+            "    - id: 2\n      video: two.mp4\n      trim: custom\n      start: 0.25\n      duration: 1.75\n    - id: 7\n      video: seven.mp4\n      trim: custom\n      start: 1.5\n      duration: 0.625\n",
+            "    2:\n      video: two.mp4\n      trim: custom\n      start: 0.25\n      duration: 1.75\n    7:\n      video: seven.mp4\n      trim: custom\n      start: 1.5\n      duration: 0.625\n",
+        ] {
+            let parsed = parse_assemble_map_text(&format!("assemble:\n  scenes:\n{entries}")).unwrap();
+            assert_eq!(parsed["scenes"], json!([
+                {"id":2,"video":"two.mp4","trim":"custom","start":0.25,"duration":1.75},
+                {"id":7,"video":"seven.mp4","trim":"custom","start":1.5,"duration":0.625}
+            ]));
+        }
+    }
+
+    #[test]
+    fn yaml_custom_trim_fields_reject_invalid_numbers() {
+        for (key, invalid) in [
+            (
+                "start",
+                vec![
+                    "-0.01", "NaN", ".nan", "inf", "-inf", "1e999", "oops", "", "true", "null",
+                ],
+            ),
+            (
+                "duration",
+                vec![
+                    "-0.01", "0", "-0", "NaN", ".inf", "inf", "1e999", "oops", "", "false", "null",
+                ],
+            ),
+        ] {
+            for value in invalid {
+                let text = format!("assemble:\n  scenes:\n    - id: 2\n      video: two.mp4\n      trim: custom\n      {key}: {value}\n");
+                let error =
+                    parse_assemble_map_text(&text).expect_err(&format!("accepted {key}={value}"));
+                assert!(error.contains(key), "{key}={value}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn yaml_custom_trims_belong_to_their_scene_regardless_of_field_order() {
+        for entries in [
+            "    - id: 2\n      trim: custom\n      duration: 1.75\n      start: 0.25\n      video: two.mp4\n    - id: 7\n      start: 1.5\n      duration: 0.625\n      trim: custom\n      video: seven.mp4\n",
+            "    2:\n      trim: custom\n      duration: 1.75\n      start: 0.25\n      video: two.mp4\n    7:\n      start: 1.5\n      duration: 0.625\n      trim: custom\n      video: seven.mp4\n",
+        ] {
+            let parsed = parse_assemble_map_text(&format!("assemble:\n  scenes:\n{entries}  trim: handles\n")).unwrap();
+            assert_eq!(parsed["scenes"], json!([
+                {"id":2,"video":"two.mp4","trim":"custom","start":0.25,"duration":1.75},
+                {"id":7,"video":"seven.mp4","trim":"custom","start":1.5,"duration":0.625}
+            ]));
+            assert_eq!(parsed.get("trim"), Some(&json!("handles")));
+        }
+    }
+
+    #[test]
+    fn custom_trim_rejects_invalid_or_out_of_source_ranges() {
+        for (start, duration) in [
+            (-0.01, 1.0),
+            (f64::NAN, 1.0),
+            (f64::INFINITY, 1.0),
+            (f64::NEG_INFINITY, 1.0),
+            (0.25, 0.0),
+            (0.25, -0.01),
+            (0.25, f64::NAN),
+            (0.25, f64::INFINITY),
+            (0.25, f64::NEG_INFINITY),
+            (4.0, 0.25),
+            (4.01, 0.25),
+            (1.25, 2.750001),
+            (f64::MAX, f64::MAX),
+        ] {
+            assert!(
+                compute_trim(
+                    TrimMode::Custom,
+                    4.0,
+                    0.5,
+                    0.75,
+                    2.0,
+                    Some(start),
+                    Some(duration)
+                )
+                .is_err(),
+                "accepted start={start}, duration={duration}"
+            );
+        }
+        // Exact endpoints and omitted fields retain source-relative semantics.
+        assert_eq!(
+            compute_trim(
+                TrimMode::Custom,
+                4.0,
+                0.5,
+                0.75,
+                2.0,
+                Some(1.25),
+                Some(2.75)
+            )
+            .unwrap(),
+            (1.25, 2.75)
+        );
+        assert_eq!(
+            compute_trim(TrimMode::Custom, 4.0, 0.5, 0.75, 2.0, Some(0.0), Some(4.0)).unwrap(),
+            (0.0, 4.0)
+        );
+        assert_eq!(
+            compute_trim(TrimMode::Custom, 4.0, 0.5, 0.75, 2.0, Some(1.25), None).unwrap(),
+            (1.25, 2.75)
+        );
+        assert_eq!(
+            compute_trim(TrimMode::Custom, 4.0, 0.5, 0.75, 2.0, None, Some(1.5)).unwrap(),
+            (0.0, 1.5)
+        );
+    }
+
+    #[test]
+    fn inline_custom_trim_fields_reject_malformed_values_instead_of_defaulting() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("video.mp4"), []).unwrap();
+        for key in ["start", "duration"] {
+            let mut invalid = vec![
+                json!(null),
+                json!(false),
+                json!([]),
+                json!({}),
+                json!("oops"),
+                json!("NaN"),
+                json!("Infinity"),
+                json!("0.25"),
+                json!(-0.25),
+            ];
+            if key == "duration" {
+                invalid.push(json!(0.0));
+            }
+            for value in invalid {
+                let mut inputs = json!({"scenes":[{"id":2,"video":"video.mp4","trim":"custom"}]});
+                inputs["scenes"][0][key] = value.clone();
+                let error = parse_scene_assets(
+                    inputs.as_object().unwrap(),
+                    Some(dir.path().to_str().unwrap()),
+                    &[],
+                )
+                .expect_err(&format!("accepted {key}={value}"));
+                assert!(
+                    error.contains("2") && error.contains(key),
+                    "{key}={value}: {error}"
+                );
+            }
+        }
+        let inputs = json!({"scenes":[{"id":2,"video":"video.mp4","trim":"custom","start":0,"duration":0.25}]});
+        let assets = parse_scene_assets(
+            inputs.as_object().unwrap(),
+            Some(dir.path().to_str().unwrap()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(assets[0].custom_start, Some(0.0));
+        assert_eq!(assets[0].custom_duration, Some(0.25));
+    }
+
+    #[test]
     fn parses_list_style_assemble_map() {
         let text = r#"
 assemble:
@@ -1906,6 +2312,50 @@ assemble:
             scenes[1].get("video").and_then(|v| v.as_str()),
             Some("/tmp/Scenes/Scene2/SC2.mp4")
         );
+    }
+
+    #[test]
+    fn assemble_map_fades_are_loaded_but_explicit_revision_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("map.yaml"),
+            "assemble:\n  fade_in: true\n  fade_out: false\n",
+        )
+        .unwrap();
+        let mut inputs = json!({"assemble_map":"map.yaml", "fade_in":false})
+            .as_object()
+            .unwrap()
+            .clone();
+        merge_assemble_map_into_inputs(&mut inputs, Some(dir.path().to_str().unwrap())).unwrap();
+        assert_eq!(inputs["fade_in"], json!(false));
+        assert_eq!(inputs.get("fade_out"), Some(&json!(false)));
+        let map =
+            parse_assemble_map_text("assemble:\n  fade_in: false\n  fade_out: true\n").unwrap();
+        assert_eq!(map.get("fade_in"), Some(&json!(false)));
+        assert_eq!(map.get("fade_out"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn rejects_malformed_fade_overrides_instead_of_silently_using_production() {
+        for key in ["fade_in", "fade_out"] {
+            for value in [Value::Null, json!(0), json!("false"), json!({}), json!([])] {
+                let mut inputs = Map::new();
+                inputs.insert(key.into(), value.clone());
+                let error = build_plan(&inputs, None).unwrap_err();
+                assert!(
+                    error.contains(&format!("{key} must be a boolean")),
+                    "{key}={value}: {error}"
+                );
+            }
+            let error = parse_assemble_map_text(&format!(
+                "assemble:\n  production: prod.md\n  {key}: maybe\n"
+            ))
+            .unwrap_err();
+            assert!(
+                error.contains(&format!("{key} must be a boolean")),
+                "{error}"
+            );
+        }
     }
 
     #[test]

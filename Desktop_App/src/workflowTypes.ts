@@ -219,6 +219,7 @@ export type CutRecord = {
   prompt?: string | null;
   negative_prompt?: string | null;
   production_note_path?: string | null;
+  source_origin?: CutId | null;
   identity_ref_paths?: string[];
   approved_start_frame?: string | null;
   start_frame_prompt?: string | null;
@@ -269,6 +270,16 @@ export type PostField =
   | "mastering"
   | "qc";
 
+export type AssemblyShotSnapshot = {
+  shot_id: string;
+  cut_label: number;
+  take_id: string;
+  path: string;
+  start_seconds: number;
+  duration_seconds: number;
+  transition: string;
+};
+
 export type VersionShot = {
   shot_id: string;
   cut_label: number;
@@ -282,6 +293,7 @@ export type CutVersion = {
   stage: CutVersionStage;
   assembly_path?: string | null;
   shots: VersionShot[];
+  assembly_snapshot?: AssemblyShotSnapshot[] | null;
   editorial_path?: EditorialPath;
 };
 
@@ -424,6 +436,8 @@ export type JobRecord = {
   retry_of?: string | null;
   /** Host spend category; absent on legacy jobs. Not evidence of chat accounting. */
   spend_category?: string | null;
+  /** Ordered assembly snapshot for timing/order parity checks. Absent on legacy jobs. */
+  assembly_snapshot?: AssemblyShotSnapshot[] | null;
   /** Human-reviewed provider evidence; not independently provider-verified. */
   reconciliation?: {
     source: "manual_evidence_review";

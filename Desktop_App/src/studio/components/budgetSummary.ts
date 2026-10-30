@@ -22,13 +22,19 @@ export function renderBudgetSummary(model: BudgetModel): HTMLElement {
       ? "Remaining cannot be guaranteed (unknown exposure)"
       : `${model.remaining} ${model.currency} left against known exposure`);
   } else {
-    parts.push(`No budget · ${model.jobCount === 0 ? "no spend yet" : `${model.spent} ${model.currency} spent`}`);
+    parts.push("No project budget limit · testing without budget enforcement");
+    if (model.jobCount === 0) parts.push("No accounted generation jobs yet");
   }
-  if (model.hasLimit) {
-    parts.push(`${model.spent} ${model.currency} spent`);
-    parts.push(`${model.committed} ${model.currency} committed`);
-  } else if (model.jobCount > 0) {
-    parts.push(`${model.committed} ${model.currency} committed`);
+  const hasUnknownCosts = model.unknownJobs > 0 || model.unknownExposureJobs > 0;
+  if (model.hasLimit || model.jobCount > 0) {
+    // Zero in the numeric ledger is not evidence that an unknown provider charged nothing.
+    if (!hasUnknownCosts || model.spent !== "0.00") {
+      parts.push(`${model.spent} ${model.currency} recorded spend`);
+    }
+    if (!hasUnknownCosts || model.committed !== "0.00") {
+      parts.push(`${model.committed} ${model.currency} recorded commitments`);
+    }
+    if (hasUnknownCosts) parts.push("Provider costs unknown/unverified. Recorded amounts exclude unknown costs.");
   }
   if (model.unknownJobs > 0) {
     parts.push(`${model.unknownJobs} unverified/unknown-cost ${model.unknownJobs === 1 ? "job" : "jobs"}`);
@@ -40,6 +46,7 @@ export function renderBudgetSummary(model: BudgetModel): HTMLElement {
     parts.push(model.hardStop ? "over hard-stop limit" : "over budget");
   }
   parts.push("Accounted jobs only; LLM/chat costs are not included; chat is not budget-enforced.");
+  parts.push("Unknown provider costs remain unknown, not zero. Provider charges may still apply. Generation still requires approval.");
   line.textContent = parts.join(" · ");
   if (model.overLimit) line.classList.add("studio-budget-over");
   return line;

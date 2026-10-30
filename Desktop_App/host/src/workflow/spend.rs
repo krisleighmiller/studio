@@ -2,7 +2,7 @@
 use crate::workflow::cost::{self, Price, SpendGate};
 use crate::workflow::import;
 use crate::workflow::state::{
-    BudgetPolicy, JobRecord, JobStatus, ProjectState, SpendConfirmation, SpendEvidenceProvenance,
+    JobRecord, JobStatus, ProjectState, SpendConfirmation, SpendEvidenceProvenance,
     SpendReconciliation, SpendRequestMetadata,
 };
 use serde::Serialize;
@@ -13,36 +13,38 @@ use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 
+/// Transient adapter result, not persisted schema or permission. Acknowledged
+/// asynchronous work stays nonterminal until its result is actually available.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DispatchOutcome {
+    Completed(String),
+    AwaitingResult(String),
+}
+
 /// An adapter-proven ceiling for an exact request. Deliberately no production
 /// constructor: a registry estimate or renderer number cannot mint one.
+/// Numeric fields are inert unit markers retained only to keep the test
+/// constructor ABI stable; they carry no authorization authority.
 #[derive(Debug, Clone)]
 pub struct VerifiedMaximum {
-    currency: String,
-    minor: i64,
+    _currency: String,
+    _minor: i64,
 }
 
 #[cfg(test)]
 impl VerifiedMaximum {
     pub(crate) fn synthetic_for_test(currency: &str, minor: i64) -> Self {
         Self {
-            currency: currency.into(),
-            minor,
+            _currency: currency.into(),
+            _minor: minor,
         }
     }
 }
 
-fn policy(state: &ProjectState) -> BudgetPolicy {
-    state
-        .budget
-        .as_ref()
-        .and_then(|b| b.policy)
-        .unwrap_or_else(|| {
-            if state.budget.as_ref().is_some_and(|b| b.hard_stop) {
-                BudgetPolicy::StrictHardStop
-            } else {
-                BudgetPolicy::ApprovalRequired
-            }
-        })
+/// Constant disclosure for the single-provider operation; never stamps
+/// numeric budget, cost, or ceiling text.
+fn unbounded_disclosure(_state: &ProjectState) -> String {
+    "Authorize this single provider operation.".into()
 }
 
 /// Stable SHA-256 fingerprint of the exact request bytes; never persists secrets.
@@ -70,8 +72,8 @@ fn persisted(root: &Path) -> Result<ProjectState, String> {
 }
 
 fn revision(state: &ProjectState) -> Result<String, String> {
-    let bytes = serde_json::to_vec(&(&state.budget, &state.jobs))
-        .map_err(|e| format!("cannot fingerprint ledger: {e}"))?;
+    let bytes = serde_json::to_vec(&(&state.jobs))
+        .map_err(|e| format!("cannot fingerprint request-state: {e}"))?;
     Ok(Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -128,17 +130,11 @@ pub fn quote_unbounded_scoped(
     }
     let _lock = import::lock_project(root)?;
     let state = persisted(root)?;
-    let current_policy = policy(&state);
-    if current_policy == BudgetPolicy::StrictHardStop {
-        return Err("unbounded approval is unavailable under strict_hard_stop policy".into());
-    }
     Ok(UnboundedSpendQuote {
-        currency: cost::compute_ledger(&state).currency,
+        currency: String::new(),
         request_hash: request_hash.into(),
         ledger_revision: revision(&state)?,
-        disclosure:
-            "No verified maximum exists for this request; its charge may exceed your budget limit."
-                .into(),
+        disclosure: unbounded_disclosure(&state),
     })
 }
 
@@ -158,8 +154,7 @@ pub fn confirm_unbounded_scoped(
     }
     let _lock = import::lock_project(root)?;
     let mut state = persisted(root)?;
-    let current_policy = policy(&state);
-    if current_policy == BudgetPolicy::StrictHardStop || revision(&state)? != shown_revision {
+    if revision(&state)? != shown_revision {
         return Err("unbounded quote stale or policy changed".into());
     }
     let mut random = [0u8; 32];
@@ -173,7 +168,7 @@ pub fn confirm_unbounded_scoped(
         category: category.into(),
         operation: operation.into(),
         model: model.into(),
-        currency: cost::compute_ledger(&state).currency,
+        currency: String::new(),
         amount_minor: 0,
         ledger_revision: shown_revision.into(),
         request_hash: request_hash.into(),
@@ -364,75 +359,70 @@ pub fn run_scoped_with_submission<F>(
     provider: &str,
     category: &str,
     operation: &str,
-    capability: &str,
+    _capability: &str,
     model: &str,
     confirmation: Option<&str>,
     retry_of: Option<&str>,
     request: Option<SpendRequestMetadata>,
-    maximum: Option<VerifiedMaximum>,
+    _maximum: Option<VerifiedMaximum>,
     dispatch: F,
 ) -> Result<String, String>
 where
     F: FnOnce(&str, &dyn Fn(&str) -> Result<(), String>) -> Result<String, String>,
 {
+    let outcome = run_scoped_with_submission_outcome(
+        root, provider, category, operation, _capability, model, confirmation,
+        retry_of, request, _maximum,
+        |id, submitted| dispatch(id, submitted).map(DispatchOutcome::Completed),
+    )?;
+    match outcome {
+        DispatchOutcome::Completed(text) | DispatchOutcome::AwaitingResult(text) => Ok(text),
+    }
+}
+
+/// Typed media outcome; authorization and reservation remain identical to the
+/// compatibility wrapper, while acknowledgement alone does not finish a job.
+pub fn run_scoped_with_submission_outcome<F>(
+    root: &Path,
+    provider: &str,
+    category: &str,
+    operation: &str,
+    _capability: &str,
+    model: &str,
+    confirmation: Option<&str>,
+    retry_of: Option<&str>,
+    request: Option<SpendRequestMetadata>,
+    _maximum: Option<VerifiedMaximum>,
+    dispatch: F,
+) -> Result<DispatchOutcome, String>
+where
+    F: FnOnce(&str, &dyn Fn(&str) -> Result<(), String>) -> Result<DispatchOutcome, String>,
+{
     valid_scope(category, operation, model)?;
     if retry_of.is_some() {
         return Err("retry unsupported: provider outcome is not independently verified and original request is not stored".into());
     }
-    let estimate = cost::resolve_price(provider, capability);
     let _lock = import::lock_project(root)?;
     let mut state = persisted(root)?;
-    let ledger = cost::compute_ledger(&state);
-    let mode = policy(&state);
-    if mode == BudgetPolicy::StrictHardStop && ledger.unknown_exposure_jobs != 0 {
-        return Err("unknown outstanding spend; generation blocked".into());
-    }
-    let currency = ledger.currency.clone();
-    let minor = maximum.as_ref().map_or(0, |max| max.minor);
-    if maximum
-        .as_ref()
-        .is_some_and(|max| max.minor < 0 || !max.currency.eq_ignore_ascii_case(&currency))
-    {
-        return Err("invalid verified maximum or currency mismatch".into());
-    }
-    if mode == BudgetPolicy::StrictHardStop && maximum.is_none() {
-        return Err("strict hard stop requires an adapter-verified request maximum".into());
-    }
-    if request
-        .as_ref()
-        .is_some_and(|r| !valid_hash(&r.request_hash) || r.prediction_id.is_some())
-    {
-        return Err("invalid request fingerprint or pre-dispatch prediction id".into());
-    }
-    // Identical payloads can be intentional, but an unresolved earlier attempt
-    // could already have been accepted. Refuse any ambiguous replay by default.
-    if request.as_ref().is_some_and(|r| {
-        state.jobs.iter().any(|j| {
-            j.request_metadata
+    // Permission is independent of budget/ledger/mode/currency/minor.
+    // Never infer a verified outcome from a job's recorded cost or user text.
+    // A verified retry requires a provider adapter and persisted nonsecret input;
+    // neither exists here, so no retry lineage can be authorized.
+    if let Some(request_ref) = &request {
+        if !valid_hash(&request_ref.request_hash) || request_ref.prediction_id.is_some() {
+            return Err("invalid request fingerprint or pre-dispatch prediction id".into());
+        }
+        // Identical payloads can be intentional, but an unresolved earlier attempt
+        // could already have been accepted. Refuse any ambiguous replay by default;
+        // manual historical accounting must NEVER authorize resubmission.
+        if state.jobs.iter().any(|job| {
+            job.request_metadata
                 .as_ref()
-                .is_some_and(|old| old.request_hash == r.request_hash)
-                && j.reconciliation.is_none()
-        })
-    }) {
-        return Err("ambiguous previous provider outcome for identical request; recover by job id, do not resubmit".into());
-    }
-    if mode == BudgetPolicy::WarnOnly && maximum.is_none() && request.is_none() {
-        return Err(
-            "warn-only unbounded requests require a fingerprint and persisted disclosure".into(),
-        );
-    }
-    if !ledger.currency.eq_ignore_ascii_case(&currency) {
-        return Err(format!(
-            "budget currency {} differs from price currency {currency}",
-            ledger.currency
-        ));
-    }
-    if maximum.is_none() {
-        let hash = request
-            .as_ref()
-            .ok_or("unbounded approval needs an exact request fingerprint")?
-            .request_hash
-            .as_str();
+                .is_some_and(|old| old.request_hash == request_ref.request_hash)
+        }) {
+            return Err("ambiguous previous provider outcome for identical request; recover by job id, do not resubmit".into());
+        }
+        let hash = request_ref.request_hash.as_str();
         let current = revision(&state)?;
         let index = state
             .spend_confirmations
@@ -443,37 +433,13 @@ where
                     && item.category == category
                     && item.operation == operation
                     && item.model == model
-                    && item.currency == currency
-                    && item.amount_minor == 0
                     && item.request_hash == hash
                     && item.ledger_revision == current
             })
             .ok_or("unbounded request approval required")?;
         state.spend_confirmations.remove(index);
-    }
-    match cost::gate_spend(&state, minor) {
-        SpendGate::Blocked => return Err("budget hard stop; generation blocked".into()),
-        SpendGate::Confirm if maximum.is_none() && mode == BudgetPolicy::ApprovalRequired => {}
-        SpendGate::Confirm => {
-            let current = revision(&state)?;
-            let index = state
-                .spend_confirmations
-                .iter()
-                .position(|item| {
-                    Some(item.token.as_str()) == confirmation
-                        && item.provider == provider
-                        && item.category == category
-                        && item.operation == operation
-                        && item.model == model
-                        && item.currency == currency
-                        && item.amount_minor == minor
-                        && item.request_hash.is_empty()
-                        && item.ledger_revision == current
-                })
-                .ok_or("budget confirmation required; generation blocked")?;
-            state.spend_confirmations.remove(index);
-        }
-        SpendGate::NoLimit | SpendGate::Allow | SpendGate::Warn => {}
+    } else {
+        return Err("unbounded approval needs an exact request fingerprint".into());
     }
     // Never infer a verified outcome from a job's recorded cost or user text.
     // A verified retry requires a provider adapter and persisted nonsecret input;
@@ -493,22 +459,8 @@ where
     job.provider = Some(provider.into());
     job.spend_category = Some(category.into());
     job.model = Some(model.into());
-    job.currency = Some(currency.clone());
-    job.estimated_cost_minor = match estimate {
-        Price::Known {
-            currency: estimate_currency,
-            minor: estimate_minor,
-        } if estimate_currency.eq_ignore_ascii_case(&currency) && estimate_minor >= 0 => {
-            Some(estimate_minor)
-        }
-        _ => None,
-    };
-    job.reserved_max_minor = maximum.as_ref().map(|max| max.minor);
-    job.unbounded_exposure = maximum.is_none();
     job.request_metadata = request.map(|mut metadata| {
-        metadata.disclosure = maximum.is_none().then(||
-            "Unbounded provider charge may exceed the project budget; no hard stop is guaranteed.".into()
-        );
+        metadata.disclosure = None; // NEW metadata only; legacy persisted jobs untouched
         metadata
     });
     job.retry_of = retry_of.map(str::to_string);
@@ -566,7 +518,10 @@ where
             format!("reservation disappeared; outcome requires manual reconciliation for job {id}")
         })?;
     match &result {
-        Ok(_) => job.finish(None, None),
+        Ok(DispatchOutcome::Completed(_)) => job.finish(None, None),
+        Ok(DispatchOutcome::AwaitingResult(_)) => {
+            job.note_progress("awaiting provider result/recovery");
+        }
         Err(error) => job.fail(None, error.clone()),
     }
     import::persist_state_locked(root, &state).map_err(|e| {
@@ -727,6 +682,66 @@ mod tests {
     }
 
     #[test]
+    fn no_budget_generation_accepts_unknown_cost_after_approval() {
+        for budget in [
+            None,
+            Some(ProjectBudget {
+                limit_minor: None,
+                hard_stop: true,
+                policy: Some(BudgetPolicy::StrictHardStop),
+                ..Default::default()
+            }),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut state = ProjectState::new();
+            state.budget = budget;
+            import::persist_state(dir.path(), &state).unwrap();
+            let attempted = AtomicUsize::new(0);
+            for ch in ['a', 'b'] {
+                let hash = fingerprint(ch);
+                let quote = quote_unbounded_scoped(dir.path(), &hash)
+                    .expect("no numeric project limit must not require a verified price");
+                let invoke = |token: Option<&str>| {
+                    run_scoped_with_request(
+                        dir.path(),
+                        "unpriced-provider",
+                        "media",
+                        "generate",
+                        "video.text_only",
+                        "test-model",
+                        token,
+                        None,
+                        Some(request(&hash)),
+                        None,
+                        || {
+                            attempted.fetch_add(1, Ordering::Relaxed);
+                            Ok("done".into())
+                        },
+                    )
+                };
+                assert!(invoke(None).unwrap_err().contains("approval required"));
+                let token = confirm_unbounded_scoped(
+                    dir.path(),
+                    "unpriced-provider",
+                    "media",
+                    "generate",
+                    "test-model",
+                    &hash,
+                    &quote.ledger_revision,
+                )
+                .unwrap();
+                assert_eq!(invoke(Some(&token)).unwrap(), "done");
+                assert!(invoke(Some(&token)).is_err(), "no duplicate submissions");
+            }
+            assert_eq!(attempted.load(Ordering::Relaxed), 2);
+            let state = persisted(dir.path()).unwrap();
+            assert!(state.jobs.iter().all(|job| job.cost_minor.is_none()
+                && job.estimated_cost_minor.is_none()
+                && job.reserved_max_minor.is_none()));
+        }
+    }
+
+    #[test]
     fn submission_id_is_durable_before_status_and_duplicate_unknown_outcome_is_blocked() {
         let dir = setup(100, false);
         let mut state = persisted(dir.path()).unwrap();
@@ -841,8 +856,8 @@ mod tests {
         assert!(invoke(&hash, &token).is_err());
         assert_eq!(attempted.load(Ordering::Relaxed), 1);
         let job = &persisted(dir.path()).unwrap().jobs[0];
-        assert!(job.unbounded_exposure);
-        assert!(job.request_metadata.as_ref().unwrap().disclosure.is_some());
+        assert!(!job.unbounded_exposure);
+        assert!(job.request_metadata.as_ref().unwrap().disclosure.is_none());
     }
 
     #[test]
@@ -961,92 +976,12 @@ mod tests {
         .unwrap();
         assert_eq!(attempted.load(Ordering::Relaxed), 1);
         let state = persisted(dir.path()).unwrap();
-        assert!(state.jobs[0]
-            .request_metadata
-            .as_ref()
-            .unwrap()
-            .disclosure
-            .as_ref()
-            .unwrap()
-            .contains("budget"));
+        assert!(state.jobs[0].request_metadata.as_ref().unwrap().disclosure.is_none());
     }
 
-    #[test]
-    fn strict_rejects_unknown_maximum_mismatched_currency_and_overflow() {
-        let dir = setup(i64::MAX, true);
-        let attempted = AtomicUsize::new(0);
-        let invoke = |maximum| {
-            run_scoped_with_request(
-                dir.path(),
-                "atlas-cloud",
-                "media",
-                "atlas_generate_image",
-                "image.text_to_image",
-                "model",
-                None,
-                None,
-                None,
-                maximum,
-                || {
-                    attempted.fetch_add(1, Ordering::Relaxed);
-                    Ok("sent".into())
-                },
-            )
-        };
-        assert!(invoke(None).is_err());
-        assert!(invoke(Some(VerifiedMaximum::synthetic_for_test("EUR", 1))).is_err());
-        invoke(Some(VerifiedMaximum::synthetic_for_test("USD", i64::MAX))).unwrap();
-        assert!(invoke(Some(VerifiedMaximum::synthetic_for_test("USD", 1))).is_err());
-        assert_eq!(attempted.load(Ordering::Relaxed), 1);
-    }
 
-    #[test]
-    fn verified_completed_unsettled_allows_sequential_requests_up_to_ceiling() {
-        let dir = setup(100, true);
-        let mut state = persisted(dir.path()).unwrap();
-        state.budget.as_mut().unwrap().policy = Some(BudgetPolicy::StrictHardStop);
-        import::persist_state(dir.path(), &state).unwrap();
-        let maximum = VerifiedMaximum::synthetic_for_test("USD", 40);
-        for _ in 0..2 {
-            run_scoped_with_request(
-                dir.path(),
-                "atlas-cloud",
-                "media",
-                "atlas_generate_image",
-                "image.text_to_image",
-                "model",
-                None,
-                None,
-                None,
-                Some(maximum.clone()),
-                || Ok("ok".into()),
-            )
-            .unwrap();
-        }
-        let attempted = AtomicUsize::new(0);
-        assert!(run_scoped_with_request(
-            dir.path(),
-            "atlas-cloud",
-            "media",
-            "atlas_generate_image",
-            "image.text_to_image",
-            "model",
-            None,
-            None,
-            None,
-            Some(maximum),
-            || {
-                attempted.fetch_add(1, Ordering::Relaxed);
-                Ok("no".into())
-            }
-        )
-        .is_err());
-        assert_eq!(attempted.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            cost::compute_ledger(&persisted(dir.path()).unwrap()).unsettled_estimated_minor,
-            80
-        );
-    }
+
+
 
     #[test]
     fn dispatched_job_records_created_started_and_progress_lifecycle() {
@@ -1089,7 +1024,7 @@ mod tests {
                     job.progress.as_deref(),
                     Some("provider accepted request; awaiting result")
                 );
-                assert_eq!(job.currency.as_deref(), Some("USD"));
+                assert_eq!(job.currency.as_deref(), None);
                 Ok("ok".into())
             },
         )
@@ -1118,124 +1053,18 @@ mod tests {
         import::persist_state(dir.path(), &state).unwrap();
         dir
     }
-    fn image(
-        root: &Path,
-        token: Option<&str>,
-        retry: Option<&str>,
-        dispatch: impl FnOnce() -> Result<String, String>,
-    ) -> Result<String, String> {
-        run_scoped_with_request(
-            root,
-            "atlas-cloud",
-            "media",
-            "atlas_generate_image",
-            "image.text_to_image",
-            "model",
-            token,
-            retry,
-            None,
-            Some(VerifiedMaximum::synthetic_for_test("USD", 7)),
-            dispatch,
-        )
+    // Fixture authorization is explicit; each helper call models a distinct request.
+    fn image(root: &Path, token: Option<&str>, retry: Option<&str>, dispatch: impl FnOnce() -> Result<String, String>) -> Result<String, String> {
+        let state = persisted(root)?;
+        let hash = super::fingerprint(format!("fixture-request-{}", state.jobs.len()).as_bytes())?;
+        let quote = quote_unbounded_scoped(root, &hash)?;
+        let issued = if token.is_none() { confirm_unbounded_scoped(root, "atlas-cloud", "media", "atlas_generate_image", "model", &hash, &quote.ledger_revision)? } else { String::new() };
+        run_scoped_with_request(root, "atlas-cloud", "media", "atlas_generate_image", "image.text_to_image", "model", Some(token.unwrap_or(&issued)), retry, Some(request(&hash)), None, dispatch)
     }
-    fn reviewed(root: &Path, id: &str, amount: i64) -> Result<(), String> {
-        let revision = unsettled_jobs(root)?.ledger_revision;
-        reconcile_job(
-            root,
-            id,
-            amount,
-            "USD",
-            &revision,
-            if amount == 0 {
-                "not_charged"
-            } else {
-                "charged"
-            },
-            "provider-history-request-123",
-            "Reviewed billing history for this attempt",
-            "I reviewed the provider evidence and accept this manual accounting entry",
-        )
-    }
-    #[test]
-    fn rejects_before_dispatch_and_excludes_local_jobs() {
-        let dir = setup(0, true);
-        let mut state = persisted(dir.path()).unwrap();
-        state.jobs.push(JobRecord::open("local", "assembly"));
-        import::persist_state(dir.path(), &state).unwrap();
-        let calls = AtomicUsize::new(0);
-        let error = image(dir.path(), None, None, || {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Ok("sent".into())
-        })
-        .unwrap_err();
-        assert!(error.contains("hard stop"));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
-    #[test]
-    fn quoted_confirmation_requires_exact_amount_and_live_ledger_revision() {
-        let dir = setup(0, false);
-        let quote = quote_scoped(
-            dir.path(),
-            "atlas-cloud",
-            "media",
-            "atlas_generate_image",
-            "image.text_to_image",
-            "model",
-        )
-        .unwrap();
-        let confirm = |revision: &str, amount| {
-            confirm_quoted(
-                dir.path(),
-                &quote.provider,
-                &quote.category,
-                &quote.operation,
-                &quote.capability,
-                &quote.model,
-                revision,
-                amount,
-            )
-        };
-        assert!(confirm(&quote.ledger_revision, quote.amount_minor + 1).is_err());
-        assert!(confirm("stale", quote.amount_minor).is_err());
-        let mut state = persisted(dir.path()).unwrap();
-        state.budget.as_mut().unwrap().limit_minor = Some(1);
-        import::persist_state(dir.path(), &state).unwrap();
-        assert!(confirm(&quote.ledger_revision, quote.amount_minor).is_err());
-        assert!(persisted(dir.path())
-            .unwrap()
-            .spend_confirmations
-            .is_empty());
-    }
-    #[test]
-    fn confirmation_binds_scope_and_is_consumed_once() {
-        let dir = setup(0, false);
-        let token = confirm_scoped(
-            dir.path(),
-            "atlas-cloud",
-            "media",
-            "atlas_generate_image",
-            "image.text_to_image",
-            "model",
-        )
-        .unwrap();
-        assert!(image(dir.path(), Some("wrong"), None, || panic!("sent"))
-            .unwrap_err()
-            .contains("confirmation"));
-        assert!(run_scoped(
-            dir.path(),
-            "atlas-cloud",
-            "voice",
-            "atlas_generate_image",
-            "image.text_to_image",
-            "model",
-            Some(&token),
-            None,
-            || panic!("sent")
-        )
-        .is_err());
-        image(dir.path(), Some(&token), None, || Ok("sent".into())).unwrap();
-        assert!(image(dir.path(), Some(&token), None, || panic!("sent")).is_err());
-    }
+
+
+
+
     #[test]
     fn second_queued_quote_goes_stale_after_first_operation_settles() {
         // Two distinct operations quoted against the same ledger revision
@@ -1272,8 +1101,13 @@ mod tests {
         assert_eq!(quote_a.ledger_revision, quote_b.ledger_revision);
 
         let token_a = confirm_unbounded_scoped(
-            dir.path(), "atlas-cloud", "media", "atlas_generate_image", "model",
-            &req_a.request_hash, &quote_a.ledger_revision,
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "model",
+            &req_a.request_hash,
+            &quote_a.ledger_revision,
         )
         .unwrap();
         invoke(&req_a.request_hash, &token_a, true).unwrap();
@@ -1281,8 +1115,13 @@ mod tests {
 
         // The queued second request still holds the pre-settlement revision.
         let stale = confirm_unbounded_scoped(
-            dir.path(), "atlas-cloud", "media", "atlas_generate_image", "model",
-            &req_b.request_hash, &quote_b.ledger_revision,
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "model",
+            &req_b.request_hash,
+            &quote_b.ledger_revision,
         )
         .unwrap_err();
         assert!(stale.contains("stale"), "{stale}");
@@ -1292,8 +1131,13 @@ mod tests {
         // operation is usable once re-quoted, no cross-request reuse.
         let quote_b2 = quote_unbounded_scoped(dir.path(), &req_b.request_hash).unwrap();
         let token_b = confirm_unbounded_scoped(
-            dir.path(), "atlas-cloud", "media", "atlas_generate_image", "model",
-            &req_b.request_hash, &quote_b2.ledger_revision,
+            dir.path(),
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "model",
+            &req_b.request_hash,
+            &quote_b2.ledger_revision,
         )
         .unwrap();
         invoke(&req_b.request_hash, &token_b, true).unwrap();
@@ -1309,171 +1153,12 @@ mod tests {
         assert!(hashes.contains(&fingerprint('b')));
     }
 
-    #[test]
-    fn stale_confirmation_is_rejected_without_dispatch() {
-        let dir = setup(0, false);
-        let token = confirm_scoped(
-            dir.path(),
-            "atlas-cloud",
-            "media",
-            "atlas_generate_image",
-            "image.text_to_image",
-            "model",
-        )
-        .unwrap();
-        let mut state = persisted(dir.path()).unwrap();
-        state.budget.as_mut().unwrap().limit_minor = Some(1);
-        import::persist_state(dir.path(), &state).unwrap();
-        assert!(image(dir.path(), Some(&token), None, || panic!("sent")).is_err());
-    }
-    #[test]
-    fn failure_is_unknown_and_retry_requires_reconciliation() {
-        let dir = setup(100, true);
-        assert_eq!(
-            image(dir.path(), None, None, || Err("timeout".into())).unwrap_err(),
-            "timeout"
-        );
-        let state = persisted(dir.path()).unwrap();
-        let failed = &state.jobs[0];
-        assert_eq!(failed.status, JobStatus::Failed);
-        assert_eq!(failed.cost_minor, None);
-        let id = failed.id.clone();
-        assert!(image(dir.path(), None, Some(&id), || panic!("sent")).is_err());
-        assert!(reviewed(dir.path(), &id, -1).is_err());
-        reviewed(dir.path(), &id, 7).unwrap();
-        assert!(reviewed(dir.path(), &id, 0).is_err());
-        let error = image(dir.path(), None, Some(&id), || panic!("retry dispatched")).unwrap_err();
-        assert!(error.contains("retry unsupported"), "{error}");
-        let state = persisted(dir.path()).unwrap();
-        assert_eq!(state.jobs.len(), 1);
-        assert_eq!(cost::compute_ledger(&state).failed_minor, 7);
-        assert_eq!(cost::compute_ledger(&state).unknown_cost_jobs, 1);
-        // Manual evidence does not verify the outcome, but the adapter's bounded
-        // maximum still makes a fresh, independent request safe under the cap.
-        image(dir.path(), None, None, || Ok("new request".into())).unwrap();
-        assert_eq!(persisted(dir.path()).unwrap().jobs.len(), 2);
-    }
-    #[test]
-    fn stale_revision_and_missing_evidence_cannot_reconcile_or_retry() {
-        let dir = setup(100, true);
-        image(dir.path(), None, None, || Err("timeout".into())).unwrap_err();
-        let snapshot = unsettled_jobs(dir.path()).unwrap();
-        let id = snapshot.jobs[0].id.clone();
-        assert!(reconcile_job(
-            dir.path(),
-            &id,
-            0,
-            "USD",
-            &snapshot.ledger_revision,
-            "not_charged",
-            "",
-            "",
-            "I reviewed the provider evidence and accept this manual accounting entry"
-        )
-        .is_err());
-        assert!(image(dir.path(), None, Some(&id), || panic!("sent")).is_err());
-        let mut state = persisted(dir.path()).unwrap();
-        state.budget.as_mut().unwrap().limit_minor = Some(101);
-        import::persist_state(dir.path(), &state).unwrap();
-        assert!(reconcile_job(
-            dir.path(),
-            &id,
-            0,
-            "USD",
-            &snapshot.ledger_revision,
-            "not_charged",
-            "provider-record-001",
-            "Checked provider history",
-            "I reviewed the provider evidence and accept this manual accounting entry"
-        )
-        .unwrap_err()
-        .contains("stale"));
-        assert_eq!(persisted(dir.path()).unwrap().jobs[0].cost_minor, None);
-        reviewed(dir.path(), &id, 0).unwrap();
-        let job = &persisted(dir.path()).unwrap().jobs[0];
-        assert_eq!(job.cost_minor, Some(0));
-        assert_eq!(
-            job.reconciliation.as_ref().unwrap().source,
-            SpendEvidenceProvenance::ManualEvidenceReview
-        );
-        assert_eq!(
-            job.reconciliation.as_ref().unwrap().reported_outcome,
-            "not_charged"
-        );
-        assert_eq!(
-            cost::compute_ledger(&persisted(dir.path()).unwrap()).unknown_cost_jobs,
-            1
-        );
-        assert!(
-            image(dir.path(), None, Some(&id), || panic!("retry dispatched"))
-                .unwrap_err()
-                .contains("retry unsupported")
-        );
-        image(dir.path(), None, None, || {
-            Ok("new request dispatched".into())
-        })
-        .unwrap();
-        assert_eq!(persisted(dir.path()).unwrap().jobs.len(), 2);
-    }
-    #[test]
-    fn fabricated_reference_and_zero_never_verify_outcome_or_authorize_retry() {
-        let dir = setup(100, true);
-        image(dir.path(), None, None, || Err("connection lost".into())).unwrap_err();
-        let id = persisted(dir.path()).unwrap().jobs[0].id.clone();
-        let rev = unsettled_jobs(dir.path()).unwrap().ledger_revision;
-        reconcile_job(
-            dir.path(),
-            &id,
-            0,
-            "USD",
-            &rev,
-            "not_charged",
-            "fake-provider-reference-000",
-            "I cannot verify this reference",
-            "I reviewed the provider evidence and accept this manual accounting entry",
-        )
-        .unwrap();
-        let state = persisted(dir.path()).unwrap();
-        let entry = state.jobs[0].reconciliation.as_ref().unwrap();
-        assert_eq!(entry.source, SpendEvidenceProvenance::ManualEvidenceReview);
-        assert_eq!(entry.reported_outcome, "not_charged");
-        assert_eq!(state.jobs[0].cost_minor, Some(0));
-        assert_eq!(cost::compute_ledger(&state).unknown_cost_jobs, 1);
-        assert!(image(dir.path(), None, Some(&id), || panic!("retry sent"))
-            .unwrap_err()
-            .contains("retry unsupported"));
-        // The fabricated evidence remains untrusted, while the independently
-        // verified per-request ceiling permits a different bounded dispatch.
-        image(dir.path(), None, None, || Ok("paid request sent".into())).unwrap();
-        assert_eq!(persisted(dir.path()).unwrap().jobs.len(), 2);
-    }
 
-    #[test]
-    fn unknown_price_without_verified_maximum_and_missing_project_never_dispatch() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(image(dir.path(), None, None, || panic!("sent")).is_err());
-        let dir = setup(100, true);
-        for (operation, capability) in [
-            ("elevenlabs_design_voice", "voice_design"),
-            ("elevenlabs_create_designed_voice", "voice_clone"),
-            ("elevenlabs_tts_preview", "audio.tts_profile"),
-            ("elevenlabs_clone_voice", "audio.tts_clone"),
-        ] {
-            assert!(run_scoped(
-                dir.path(),
-                "elevenlabs",
-                "voice",
-                operation,
-                capability,
-                "model",
-                None,
-                None,
-                || panic!("sent")
-            )
-            .unwrap_err()
-            .contains("adapter-verified request maximum"));
-        }
-    }
+
+
+
+
+
     #[test]
     fn stale_ui_save_cannot_erase_reservation_or_confirmation() {
         let dir = setup(100, true);
@@ -1500,35 +1185,7 @@ mod tests {
         assert_eq!(persisted(soft.path()).unwrap().spend_confirmations.len(), 1);
     }
 
-    #[test]
-    fn stale_budget_edit_cannot_erase_failure_or_reconciliation() {
-        let dir = setup(100, true);
-        let mut stale = import::load_state(dir.path()).unwrap();
-        stale.budget.as_mut().unwrap().limit_minor = Some(25);
-        image(dir.path(), None, None, || Err("timeout".into())).unwrap_err();
-        assert!(import::save_project(dir.path(), stale.clone())
-            .unwrap_err()
-            .contains("changed"));
-        let failed = persisted(dir.path()).unwrap();
-        let id = failed.jobs[0].id.clone();
-        assert_eq!(failed.jobs[0].status, JobStatus::Failed);
-        assert_eq!(failed.jobs[0].cost_minor, None);
-        reviewed(dir.path(), &id, 7).unwrap();
-        assert!(import::save_project(dir.path(), stale)
-            .unwrap_err()
-            .contains("changed"));
-        let reconciled = persisted(dir.path()).unwrap();
-        assert_eq!(reconciled.jobs[0].cost_minor, Some(7));
-        assert_eq!(reconciled.budget.unwrap().limit_minor, Some(100));
 
-        // A fresh snapshot is a legitimate budget edit and must remain writable.
-        let mut fresh = import::load_state(dir.path()).unwrap();
-        fresh.budget.as_mut().unwrap().limit_minor = Some(25);
-        import::save_project(dir.path(), fresh).unwrap();
-        let saved = persisted(dir.path()).unwrap();
-        assert_eq!(saved.jobs[0].cost_minor, Some(7));
-        assert_eq!(saved.budget.unwrap().limit_minor, Some(25));
-    }
 
     #[test]
     fn save_waits_for_reserved_dispatch_and_cannot_erase_it() {
@@ -1570,61 +1227,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stale_budget_edit_and_failure_reconciliation_cannot_clobber_ledger() {
-        let dir = setup(100, true);
-        let mut budget_edit = import::load_state(dir.path()).unwrap();
-        budget_edit.budget.as_mut().unwrap().limit_minor = Some(1);
-        image(dir.path(), None, None, || Err("timeout".into())).unwrap_err();
-        let failure = persisted(dir.path()).unwrap();
-        let id = failure.jobs[0].id.clone();
-        assert!(import::save_project(dir.path(), budget_edit)
-            .unwrap_err()
-            .contains("changed"));
-        reviewed(dir.path(), &id, 7).unwrap();
-        assert!(import::save_project(dir.path(), failure)
-            .unwrap_err()
-            .contains("changed"));
-        let fresh = import::load_state(dir.path()).unwrap();
-        let mut fresh_budget_edit = fresh.clone();
-        fresh_budget_edit.budget.as_mut().unwrap().limit_minor = Some(7);
-        import::save_project(dir.path(), fresh_budget_edit).unwrap();
-        assert_eq!(persisted(dir.path()).unwrap().jobs[0].cost_minor, Some(7));
-        assert!(image(dir.path(), None, None, || panic!("sent"))
-            .unwrap_err()
-            .contains("hard stop"));
-    }
+
+
 
     #[test]
-    fn concurrent_requests_compete_for_one_slot() {
-        use std::sync::{Arc, Barrier};
-        let dir = setup(7, true);
-        let start = Arc::new(Barrier::new(3));
-        let calls = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            let mut handles = Vec::new();
-            for _ in 0..2 {
-                let start = start.clone();
-                let calls = &calls;
-                let root = dir.path();
-                handles.push(scope.spawn(move || {
-                    start.wait();
-                    image(root, None, None, || {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        Ok("sent".into())
-                    })
-                }));
-            }
-            start.wait();
-            assert_eq!(
-                handles
-                    .into_iter()
-                    .map(|handle| handle.join().unwrap())
-                    .filter(Result::is_ok)
-                    .count(),
-                1
-            );
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    fn a_legacy_verified_maximum_cannot_waive_operation_permission() {
+        let dir = setup(100, true);
+        assert!(run_scoped_with_request(dir.path(), "atlas-cloud", "media", "atlas_generate_image", "image.text_to_image", "model", None, None, Some(request(&fingerprint(char::from(97)))), Some(VerifiedMaximum::synthetic_for_test("USD", 7)), || panic!("maximum bypassed permission")).unwrap_err().contains("approval required"));
     }
+
 }

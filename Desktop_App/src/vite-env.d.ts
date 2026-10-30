@@ -8,7 +8,7 @@ declare module "*.md?raw" {
 interface WorkbenchBridge {
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
   onMenu: (handler: (id: string) => void) => () => void;
-  onDirectorProgress: (handler: (message: string) => void) => () => void;
+  onDirectorProgress: (handler: (payload: unknown) => void) => () => void;
   onSpendConfirmationRequired: (handler: (payload: unknown) => void) => () => void;
   toMediaUrl: (path: string) => string;
   openProject?: () => Promise<string | null>;

@@ -14,6 +14,8 @@ pub mod post;
 pub mod production;
 pub mod qc;
 pub mod recipe;
+pub mod assembly_jobs;
+pub mod render_jobs;
 pub mod report;
 pub mod route;
 pub mod scope;
@@ -146,6 +148,15 @@ pub fn cmd_import(args: &Value) -> Result<Value, String> {
 pub fn cmd_status(args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let refresh = arg_bool(args, "refresh", false);
+    let jobs_only = args.get("jobsOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+    if jobs_only {
+        let state = render_jobs::read_persisted(Path::new(&root))?;
+        return Ok(json!({
+            "state": {
+                "jobs": state.jobs,
+            }
+        }));
+    }
     let imported = if refresh {
         import_project(Path::new(&root), ImportOptions { persist: false })?
     } else {
@@ -410,13 +421,22 @@ pub fn cmd_add_requirement(args: &Value) -> Result<Value, String> {
         .as_deref()
         .and_then(crate::workflow::state::RequirementKind::parse)
         .ok_or_else(|| "Unknown requirement kind".to_string())?;
-    let scene_id = args.get("sceneId").and_then(|value| {
-        value
-            .as_u64()
-            .map(|n| n as u32)
-            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-    });
+    let scene_id = match args.get("sceneId") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .or_else(|| value.as_str().and_then(|text| text.parse::<u32>().ok()))
+                .ok_or_else(|| "sceneId must be a valid u32 integer or numeric string".to_string())?,
+        ),
+    };
     let mut state = import::load_state(Path::new(&root))?;
+    if let Some(id) = scene_id {
+        if id == 0 || !state.scenes.iter().any(|scene| scene.id == id) {
+            return Err(format!("scene {id} not found"));
+        }
+    }
     let id = crate::workflow::state::requirement_id(kind, &name);
     if state
         .requirements
@@ -605,7 +625,13 @@ pub fn cmd_attach_scratch_audio(args: &Value) -> Result<Value, String> {
     let root = arg_path(args, "projectRoot")?;
     let scene_id = arg_u32(args, "sceneId")?;
     let shot_id = opt_str(args, "shotId").ok_or_else(|| "Missing shot id".to_string())?;
-    let source = arg_path(args, "sourcePath")?;
+    let source_path = args
+        .get("sourcePath")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Missing or invalid argument: sourcePath".to_string())?;
+    let source = crate::session::authorize(source_path, crate::project_path::PathIntent::Read)?;
     let mut state = import::load_state(Path::new(&root))?;
     let scene = state
         .scenes
@@ -616,7 +642,7 @@ pub fn cmd_attach_scratch_audio(args: &Value) -> Result<Value, String> {
         Path::new(&root),
         scene,
         &shot_id,
-        Path::new(&source),
+        &source,
     )?;
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_note(imported, format!("Attached scratch audio `{rel}`."))
@@ -1241,13 +1267,9 @@ pub fn cmd_prepare_render(app: &HostCtx, args: &Value) -> Result<Value, String> 
     let scene_id = arg_u32(args, "sceneId")?;
     let cut_number = arg_u32(args, "cut")?;
     let mut state = import::load_state(Path::new(&root))?;
-    let (card, note) = production::prepare_render_with_host(
-        app,
-        Path::new(&root),
-        &mut state,
-        scene_id,
-        cut_number,
-    )?;
+    let (card, note) = if arg_bool(args,"resumeSavedAudio",false) {
+        production::prepare_saved_audio_with_host(app,Path::new(&root),&state,scene_id,cut_number)?
+    } else { production::prepare_render_with_host(app,Path::new(&root),&mut state,scene_id,cut_number)? };
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_pending(imported, note, card)
 }
@@ -1395,21 +1417,102 @@ fn cmd_prepare_assemble_inner(
     }
     let mut cuts = scene.cuts.iter().collect::<Vec<_>>();
     cuts.sort_by_key(|cut| cut.id.cut);
-    let cut_count = cuts.len();
     let mut missing = Vec::new();
     let mut selected = Vec::new();
     let mut take_ids = Vec::new();
-    for cut in cuts {
-        let take = cut.selected_take.as_ref().and_then(|selected| {
-            cut.takes
-                .iter()
-                .find(|take| take.id == *selected || take.path == *selected)
-        });
-        if let Some(take) = take {
-            take_ids.push(take.id.clone());
-            selected.push(json!({ "id": cut.id.cut, "video": take.path }));
-        } else {
-            missing.push(cut.id.cut);
+    let mut snapshot = Vec::new();
+    let use_animatic = scene.animatic.as_ref().map(|a| !a.shots.is_empty()).unwrap_or(false);
+
+    if use_animatic {
+        let anim = scene.animatic.as_ref().unwrap();
+        let anim_ids: Vec<u32> = anim.shots.iter().map(|s| s.cut_id.cut).collect();
+        let mut seen = std::collections::HashSet::new();
+        for id in &anim_ids {
+            if !seen.insert(*id) {
+                return Err(format!("Animatic duplicate cut id: {}", id));
+            }
+        }
+        let cut_ids_in_scene: std::collections::HashSet<u32> = scene.cuts.iter().map(|c| c.id.cut).collect();
+        for id in &anim_ids {
+            if !cut_ids_in_scene.contains(id) {
+                return Err(format!("Animatic references missing cut: {}", id));
+            }
+        }
+        for id in &cut_ids_in_scene {
+            if !anim_ids.contains(id) {
+                return Err(format!("Foreigner cut not in animatic: {}", id));
+            }
+        }
+        for shot in &anim.shots {
+            let cut = scene.cuts.iter().find(|c| c.id.cut == shot.cut_id.cut).unwrap();
+            let take = cut.selected_take.as_ref().and_then(|selected| {
+                cut.takes.iter().find(|t| t.id == *selected || t.path == *selected)
+            });
+            if take.is_none() {
+                missing.push(shot.cut_id.cut);
+            } else {
+                let take = take.unwrap();
+                take_ids.push(take.id.clone());
+                let start = shot.trim_in_seconds.unwrap_or(0.0);
+                let tail = shot.trim_out_seconds.unwrap_or(0.0);
+                let dur = shot.duration_seconds - start - tail;
+                if !start.is_finite() || start < 0.0 {
+                    return Err(format!("Animatic cut {} invalid start {}", shot.cut_id.cut, start));
+                }
+                if shot.trim_out_seconds.unwrap_or(0.0) < 0.0 {
+                    return Err(format!("Animatic cut {} negative tail", shot.cut_id.cut));
+                }
+                if !dur.is_finite() || dur <= 0.0 {
+                    return Err(format!("Animatic cut {} invalid duration {} (dur = {} - {} - {})", shot.cut_id.cut, dur, shot.duration_seconds, start, tail));
+                }
+                let mut entry = serde_json::Map::new();
+                entry.insert("id".into(), Value::from(cut.id.source_scene));
+                entry.insert("cut".into(), Value::from(cut.id.cut));
+                entry.insert("video".into(), Value::String(take.path.clone()));
+                entry.insert("start".into(), Value::Number(serde_json::Number::from_f64(start).unwrap_or(serde_json::Number::from(0))));
+                entry.insert("duration".into(), Value::Number(serde_json::Number::from_f64(dur).unwrap_or(serde_json::Number::from(0))));
+                entry.insert("transition_out".into(), Value::String(shot.transition.map(|t|t.label()).unwrap_or("cut").to_string()));
+                selected.push(Value::Object(entry));
+                snapshot.push(crate::workflow::state::AssemblyShotSnapshot {
+                    shot_id: cut.stable_id.clone(),
+                    cut_label: shot.cut_id.cut,
+                    take_id: take.id.clone(),
+                    path: take.path.clone(),
+                    start_seconds: start,
+                    duration_seconds: dur,
+                    transition: shot.transition.as_ref().map(|tr| {
+                        serde_json::to_string(tr).unwrap_or_default().trim_matches('"').to_string()
+                    }).unwrap_or_else(|| "cut".into()),
+                });
+            }
+        }
+    } else {
+        let mut cuts = scene.cuts.iter().collect::<Vec<_>>();
+        cuts.sort_by_key(|cut| cut.id.cut);
+        for cut in cuts {
+            let take = cut.selected_take.as_ref().and_then(|selected| {
+                cut.takes
+                    .iter()
+                    .find(|take| take.id == *selected || take.path == *selected)
+            });
+            if let Some(take) = take {
+                take_ids.push(take.id.clone());
+                let absolute=crate::project_path::resolve(&take.path,Some(&root),crate::project_path::PathIntent::Read).map_err(|e|e.to_string())?.into_path_buf();
+                let duration=crate::workflow::qc::probe_media(&absolute)?.duration_secs.filter(|d|d.is_finite() && *d>0.0).ok_or("selected take has no measured runtime")?;
+                selected.push(json!({ "id": cut.id.source_scene, "cut": cut.id.cut, "video": take.path,"start":0.0,"duration":duration,"transition_out":"cut" }));
+                snapshot.push(crate::workflow::state::AssemblyShotSnapshot{shot_id:cut.stable_id.clone(),cut_label:cut.id.cut,take_id:take.id.clone(),path:take.path.clone(),start_seconds:0.0,duration_seconds:duration,transition:"cut".into()});
+                snapshot.push(crate::workflow::state::AssemblyShotSnapshot {
+                    shot_id: cut.stable_id.clone(),
+                    cut_label: cut.id.cut,
+                    take_id: take.id.clone(),
+                    path: take.path.clone(),
+                    start_seconds: 0.0,
+                    duration_seconds: 0.0,
+                    transition: "cut".into(),
+                });
+            } else {
+                missing.push(cut.id.cut);
+            }
         }
     }
     if !missing.is_empty() {
@@ -1422,6 +1525,13 @@ fn cmd_prepare_assemble_inner(
                 .join(", Cut ")
         ));
     }
+    if state.jobs.iter().any(|j| j.kind == "assemble" && matches!(j.status, crate::workflow::state::JobStatus::Pending | crate::workflow::state::JobStatus::Running) && j.raw_provider_id.as_deref() == Some(&format!("scene_{scene_id}")) && j.assembly_snapshot.as_ref() == Some(&snapshot)) {
+        return Err("An unchanged assembly is already pending or running. Approve the existing request or resolve it in Jobs.".into());
+    }
+    let reserved_paths: std::collections::HashSet<String> = state.jobs.iter()
+        .filter(|j| j.kind == "assemble" && matches!(j.status, crate::workflow::state::JobStatus::Pending | crate::workflow::state::JobStatus::Running))
+        .filter_map(|j| j.output_path.clone())
+        .collect();
     let output_path = (1..=1000)
         .map(|version| {
             if version == 1 {
@@ -1430,14 +1540,19 @@ fn cmd_prepare_assemble_inner(
                 format!("Final/Scene{scene_id}_master_v{version}.mp4")
             }
         })
-        .find(|relative| !Path::new(&root).join(relative).exists())
+        .find(|relative| !Path::new(&root).join(relative).exists() && !reserved_paths.contains(relative.as_str()))
         .ok_or_else(|| "Could not allocate a master output version".to_string())?;
+    let cut_count = if use_animatic {
+        scene.animatic.as_ref().unwrap().shots.len()
+    } else {
+        scene.cuts.len()
+    };
     let mut inputs = Map::new();
     inputs.insert("production_path".into(), Value::String("prod.md".into()));
     inputs.insert("output_path".into(), Value::String(output_path.clone()));
-    // Each entry is a cut, while the legacy assembler's timing metadata is
-    // scene-based. Preserve complete reviewed takes until cut-level metadata lands.
-    inputs.insert("trim".into(), Value::String("full".into()));
+    inputs.insert("trim".into(), Value::String("custom".into()));
+    inputs.insert("fade_in".into(), Value::Bool(false));
+    inputs.insert("fade_out".into(), Value::Bool(false));
     inputs.insert("caption_mode".into(), Value::String("none".into()));
     inputs.insert("scenes".into(), Value::Array(selected));
     let action = DirectorAction {
@@ -1475,6 +1590,9 @@ fn cmd_prepare_assemble_inner(
     job.output_path = Some(output_path.clone());
     job.raw_provider_id = Some(format!("scene_{scene_id}"));
     job.input_asset_ids = take_ids;
+    if !snapshot.is_empty() {
+        job.assembly_snapshot = Some(snapshot);
+    }
     if !scene_stable.is_empty() {
         job.scope = Some(crate::workflow::state::JobScope {
             kind: "scene".into(),
@@ -1663,9 +1781,16 @@ pub fn cmd_attach_start_frame(args: &Value) -> Result<Value, String> {
     let source = opt_str(args, "sourcePath")
         .or_else(|| opt_str(args, "path"))
         .ok_or_else(|| "Missing sourcePath".to_string())?;
+    let source_path = crate::session::authorize(&source, crate::project_path::PathIntent::Read)
+        .map_err(|error| error.to_string())?;
     let mut state = import::load_state(Path::new(&root))?;
-    let asset_id =
-        start_frames::attach_image(Path::new(&root), &mut state, scene_id, cut_number, &source)?;
+    let asset_id = start_frames::attach_image(
+        Path::new(&root),
+        &mut state,
+        scene_id,
+        cut_number,
+        &source_path.to_string_lossy(),
+    )?;
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_note(
         imported,

@@ -60,6 +60,11 @@ function paintTakeReviewStage(scene: SceneRecord, emit: (intent: TakeReviewInten
         button.disabled = Boolean(getSurfaceHost().busy) || take.status === status;
         actions.append(button);
       }
+      const deleteBtn = actionButton("Delete", () => {
+        emit({ type: "delete-take", cut: cut.id.cut, takeId: take.id, path: take.path });
+      });
+      deleteBtn.disabled = Boolean(getSurfaceHost().busy);
+      actions.append(deleteBtn);
       row.append(summary, actions);
       card.append(row);
     }

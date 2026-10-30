@@ -38,31 +38,19 @@ pub fn classify_chat_dispatch<'a>(api: &'a ApiEntry, model: &'a str) -> Option<C
     })
 }
 
-/// Existing callers do not pass project identity, so a hard stop cannot be
-/// checked. Fail closed rather than silently dispatch potentially paid chat.
-/// A future project-aware host authorization must reserve spend before invoking
-/// the private transport below and reconcile the actual charge afterward.
+/// Chat uses the configured provider without mandatory project budgeting.
+/// Charges remain unaccounted/unknown; do not infer that a request is free.
+/// Media generation keeps its own explicit approval boundary.
 pub fn chat_completion(
     api: &ApiEntry,
-    _api_key: &str,
+    api_key: &str,
     model: &str,
-    _messages: &[Value],
+    messages: &[Value],
 ) -> Result<String, String> {
-    let Some(dispatch) = classify_chat_dispatch(api, model) else {
-        return Err(format!(
-            "API “{}” uses protocol “{}”, which does not support Director chat. Pick a chat-capable API (Atlas, OpenAI-compatible, Anthropic, Gemini, or Ollama).",
-            api.name, api.kind
-        ));
-    };
-    Err(format!(
-        "{} request for {} / {} blocked: chat cost is unknown and project-budget enforcement is not wired to this route.",
-        dispatch.category, dispatch.provider_kind, dispatch.model
-    ))
+    dispatch_chat(api, api_key, model, messages)
 }
 
-// Keep wire-format implementations for a future, project-authorized dispatch.
-// This function must not be made public without a host-owned reservation gate.
-#[allow(dead_code)]
+/// Existing protocol transports; pricing availability is not a prerequisite.
 fn dispatch_chat(
     api: &ApiEntry,
     api_key: &str,
@@ -425,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn every_chat_protocol_is_unknown_cost_and_blocked_before_network() {
+    fn every_chat_protocol_dispatches_without_a_budget_or_pricing_api() {
         for kind in [
             "atlas-cloud",
             "openai-chat",
@@ -442,19 +430,82 @@ mod tests {
                 dispatch.budget_coverage,
                 ChatBudgetCoverage::NotAccountedUnknownCost
             );
-            // Port 1 is not a provider. This must return the budget guard error,
-            // not a connection refusal, even with a valid user message.
-            let error = chat_completion(
+            use std::io::{Read, Write};
+            use std::net::TcpListener;
+            use std::time::{Duration, Instant};
+
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let mut api = api;
+            api.base_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                return None;
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("loopback fixture: {error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    let read = stream.read(&mut chunk).unwrap();
+                    assert!(read > 0, "incomplete chat request");
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let size: usize = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + size {
+                            break;
+                        }
+                    }
+                }
+                // All wire-format responses are deliberately unpriced. No usage
+                // endpoint, maximum charge, or project state is needed for chat.
+                let body = json!({
+                    "choices": [{"message": {"content": "planner ready"}}],
+                    "content": [{"type": "text", "text": "planner ready"}],
+                    "candidates": [{"content": {"parts": [{"text": "planner ready"}]}}]
+                })
+                .to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                Some(String::from_utf8(bytes).unwrap())
+            });
+            let result = chat_completion(
                 &api,
-                "key",
+                "test-key",
                 "test-model",
                 &[json!({"role":"user","content":"hi"})],
-            )
-            .unwrap_err();
-            assert!(
-                error.contains("blocked: chat cost is unknown"),
-                "{kind}: {error}"
             );
+            let received = server.join().unwrap();
+            assert_eq!(result.as_deref(), Ok("planner ready"), "{kind}: {result:?}");
+            let received = received.expect("chat must reach the loopback provider");
+            let expected_path = match kind {
+                "anthropic-messages" => "/v1/messages",
+                "gemini" => "/models/test-model:generateContent",
+                _ => "/v1/chat/completions",
+            };
+            assert!(
+                received.starts_with(&format!("POST {expected_path} ")),
+                "{kind}: {received}"
+            );
+            assert!(received.contains("hi"));
         }
     }
 

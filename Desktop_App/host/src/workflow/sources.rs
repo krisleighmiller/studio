@@ -289,14 +289,38 @@ pub fn bind_selected_exit_frame(
         .and_then(|cut| cut.visual_source.as_ref())
         .and_then(|source| source.asset_id.clone());
     let rel = next_continuity_rel(root, state, scene_id, cut_number, predecessor.cut);
-    let output = root.join(&rel);
-    if let Some(parent) = output.parent() {
+    let root_str = root.to_string_lossy().into_owned();
+    // Confine destination BEFORE create_dir_all: resolve against the
+    // project root and enforce the exact Preproduction/SceneN/continuity_frames bucket.
+    let output_confined = crate::project_path::resolve(&rel, Some(&root_str), crate::project_path::PathIntent::Write)
+        .map(|resolved| resolved.into_path_buf())
+        .map_err(|error| format!("continuity-frame destination outside project: {error}"))?;
+    crate::project_path::under_scene_bucket(root, &output_confined, "continuity_frames")
+        .map_err(|error| format!("continuity-frame destination outside continuity_frames bucket: {error}"))?;
+    if crate::project_path::relative_to_root(root, &output_confined)?.parent()
+        != Path::new(&rel).parent()
+    {
+        return Err("continuity-frame destination is outside this scene continuity_frames bucket".into());
+    }
+    if let Some(parent) = output_confined.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("could not create continuity-frame folder: {error}"))?;
     }
+    // Re-confine AFTER create_dir_all — fs::copy follows parent chain,
+    // so the final destination must still be inside the exact continuity_frames bucket.
+    let output_again = crate::project_path::resolve(&rel, Some(&root_str), crate::project_path::PathIntent::Write)
+        .map(|resolved| resolved.into_path_buf())
+        .map_err(|error| format!("continuity-frame destination outside project: {error}"))?;
+    crate::project_path::under_scene_bucket(root, &output_again, "continuity_frames")
+        .map_err(|error| format!("continuity-frame destination outside continuity_frames bucket: {error}"))?;
+    if crate::project_path::relative_to_root(root, &output_again)?.parent()
+        != Path::new(&rel).parent()
+    {
+        return Err("continuity-frame destination is outside this scene continuity_frames bucket".into());
+    }
     fs_ops::extract_frame_at(
         video.to_string_lossy().to_string(),
-        Some(output.to_string_lossy().to_string()),
+        Some(output_again.to_string_lossy().to_string()),
         Some(chosen),
     )?;
     let asset_id = state.push_asset(AssetRecord {
@@ -742,4 +766,5 @@ mod tests {
             .any(|version| version.asset_id == asset.id && version.path == path));
         assert!(state.scenes[0].cuts[1].visual_source_ready());
     }
+
 }

@@ -41,13 +41,13 @@ describe("paid media confirmation handoff (host mocked; no provider calls)", () 
 
     await handle(payload());
 
-    expect(onSubmitted).toHaveBeenCalledWith("saved");
+    expect(onSubmitted).toHaveBeenCalledWith("saved", expect.any(Function));
   });
 
   it("shows the host quote and replays once with exact scope and token", async () => {
     const { handle, invoke, ask, status } = setup();
     await handle(payload());
-    expect(ask).toHaveBeenCalledWith(expect.stringContaining("1.23 USD"), expect.anything());
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining("atlas_generate_image"), expect.anything());
     expect(invoke).toHaveBeenCalledTimes(2);
     expect(invoke).toHaveBeenNthCalledWith(1, "confirm_spend", {
       projectRoot: "/project", provider: "atlas-cloud", category: "media",
@@ -148,7 +148,7 @@ describe("paid media confirmation handoff (host mocked; no provider calls)", () 
       quote: { currency: "USD", requestHash: "a".repeat(64), ledgerRevision: "revision-a",
         disclosure: "No verified maximum exists for this request; charge may exceed budget." },
     });
-    expect(ask).toHaveBeenCalledWith(expect.stringContaining("NOT a guaranteed hard stop"), expect.anything());
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining("Authorize this single media generation"), expect.anything());
     expect(invoke).toHaveBeenNthCalledWith(1, "confirm_unbounded_spend", {
       projectRoot: "/project", provider: "atlas-cloud", category: "media",
       operation: "atlas_generate_image", model: "image-model",

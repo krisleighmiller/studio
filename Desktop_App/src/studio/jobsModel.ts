@@ -1,5 +1,4 @@
 import type { AssetRecord, JobRecord, SceneRecord, StageId } from "../workflowTypes";
-import { minorToMoney } from "./money";
 
 export type JobFilter = "active" | "failed" | "awaiting" | "completed";
 
@@ -16,12 +15,8 @@ export type JobRowModel = {
   completed: string;
   scope: string;
   progress: string;
-  estimate: string;
-  actual: string;
-  currency: string;
   retry: string;
   predictionId: string | null;
-  reconciliation: string;
   cancellation: string;
   resume: string;
   detail: string;
@@ -119,19 +114,12 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
   const completed = knownText(job.completed_at);
   const scope = job.scope?.kind && job.scope.id ? `${job.scope.kind} ${job.scope.id}` : "unknown";
   const progress = knownText(job.progress);
-  const estimate = money(job.estimated_cost_minor);
-  const actual = money(job.cost_minor);
-  const currency = knownText(job.currency);
   const predictionId = job.request_metadata?.prediction_id?.trim() || null;
   const retry = job.retry_of
     ? `of ${job.retry_of} · further retry unsupported (provider outcome unverified; original request unavailable)`
     : job.status === "failed" && job.spend_category
       ? "Unsupported · provider outcome unverified; original request unavailable"
       : "unknown";
-  const reconciliation = job.reconciliation
-    ? `Manual accounting (reviewer-reported ${job.reconciliation.reported_outcome ?? job.reconciliation.provider_outcome ?? "unknown"}; ref ${job.reconciliation.evidence_reference}; ${job.reconciliation.reviewed_at}) — not independently provider-verified; retry remains blocked`
-    : "No recorded reconciliation";
-  const cost = `estimate ${estimate} · actual ${actual}${job.cost_minor != null && !job.actual_verified ? " (not provider-verified)" : ""} · currency ${currency}`;
   return {
     id: job.id,
     title: KIND_LABELS[job.kind] ?? labelize(job.kind || "Job"),
@@ -143,12 +131,8 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
     completed,
     scope,
     progress,
-    estimate,
-    actual,
-    currency,
     retry,
     predictionId,
-    reconciliation,
     // No job-level provider cancel/resume command is wired to Studio. Do not infer
     // support from a provider name, an ID, or a persisted cancelled status.
     // Assembly is local work, not a provider prediction to resume or cancel.
@@ -170,7 +154,7 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
     cut: located.cut,
     lookSlotId: located.lookSlotId,
     stage: stageFor(job.kind),
-    tooltip: `${job.kind} · ${job.status ?? "unknown"} · ${elapsed} · ${cost} · ${detail}`,
+    tooltip: `${job.kind} · ${job.status ?? "unknown"} · ${elapsed} · ${detail}`,
   };
 }
 
@@ -362,9 +346,6 @@ function knownText(value: string | null | undefined): string {
   return text ? text : "unknown";
 }
 
-function money(value: number | null | undefined): string {
-  return minorToMoney(value);
-}
 
 function labelize(value: string): string {
   const text = value.replace(/_/g, " ").trim();

@@ -56,6 +56,7 @@ export function renderJobsView(
     const button = document.createElement("button");
     button.type = "button";
     button.className = option.id === filter ? "active" : "";
+    button.dataset.jobFilter = option.id;
     const count = option.id === "all" ? total : model.counts[option.id];
     button.textContent = `${option.label} ${count}`;
     button.addEventListener("click", () => onIntent({ type: "filter", filter: option.id }));
@@ -80,6 +81,7 @@ function jobRow(row: JobRowModel, onIntent: (intent: JobsIntent) => void): HTMLE
   const button = document.createElement("button");
   button.type = "button";
   button.className = "studio-job";
+  button.dataset.jobId = row.id;
   button.title = row.actionLabel ? `${row.actionLabel}. ${row.tooltip}` : row.tooltip;
   button.disabled = !row.actionLabel;
   const dot = document.createElement("span");
@@ -101,12 +103,8 @@ function jobRow(row: JobRowModel, onIntent: (intent: JobsIntent) => void): HTMLE
     `Completed ${row.completed}`,
     `Scope ${row.scope}`,
     `Progress ${row.progress}`,
-    `Estimate ${row.estimate}`,
-    `Actual ${row.actual}`,
-    `Currency ${row.currency}`,
     `Retry ${row.retry}`,
     `Prediction ${row.predictionId ?? "unknown"}`,
-    row.reconciliation,
   ].join(" · ");
   copy.append(title, meta, facts);
   const support = document.createElement("span");

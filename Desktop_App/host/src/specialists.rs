@@ -16,7 +16,7 @@ use crate::scene_plan::{RenderLane, RenderRequest};
 use crate::settings::{self, ApiEntry};
 use crate::text_writes::{
     approval_required, approval_summary, authorize_text_write, commit_staged_text_write,
-    commit_text_write, stage_authorized_text_writes, text_write_approval_card,
+    commit_text_write, prepare_text_write_approval_card, stage_authorized_text_writes,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -537,6 +537,10 @@ pub fn run_inspect(
         .ok_or_else(|| "inspect missing resolved path".to_string())?;
     let op = action.action.op.as_deref().unwrap_or("read_file");
     match op {
+        "media_probe" => {
+            let report = crate::media_inspect::inspect_media(&path, &action.action.inputs)?;
+            serde_json::to_string_pretty(&report).map_err(|e| format!("media_probe JSON: {e}"))
+        }
         "path_exists" => Ok(json!({
             "exists": path.exists(),
             "isFile": path.is_file(),
@@ -564,10 +568,15 @@ pub fn run_inspect(
             let text = fs::read_to_string(&path).map_err(|e| format!("read_file: {e}"))?;
             // Cap huge files for planner context
             if text.len() > 80_000 {
+                let mut end = 80_000;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
                 Ok(format!(
-                    "{}…\n\n(truncated {} bytes)",
-                    &text[..80_000],
-                    text.len()
+                    "(read_file truncated: omitted {} UTF-8 bytes of {} total bytes)\n\n{}…",
+                    text.len() - end,
+                    text.len(),
+                    &text[..end]
                 ))
             } else {
                 Ok(text)
@@ -598,7 +607,19 @@ pub fn run_specialist(
         "text_sync" => run_text_sync(app, context, validated, project_root),
         "lip_sync" => run_lip_sync(app, context, validated, project_root),
         "assemble" => {
-            crate::assemble::run(app, validated, project_root).map(SpecialistResult::done)
+            let save_path = validated.action.inputs.get("output_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !save_path.is_empty() && project_root.is_some() {
+                let result = crate::workflow::assembly_jobs::with_validated_assembly_job(
+                    std::path::Path::new(project_root.unwrap()),
+                    validated,
+                    || crate::assemble::run(app, validated, project_root),
+                );
+                result.map(SpecialistResult::done)
+            } else {
+                crate::assemble::run(app, validated, project_root).map(SpecialistResult::done)
+            }
         }
         "model_sheet" => run_model_sheet(app, context, validated, project_root),
         "production_helper" => {
@@ -1055,7 +1076,13 @@ fn run_text_specialist(
     ];
 
     app.emit("director-progress", format!("{label} thinking…"));
-    let mut reply = chat::chat_completion(llm.api, llm.api_key, llm.model, &messages)?;
+    let reply = chat::chat_completion(llm.api, llm.api_key, llm.model, &messages);
+    if app.director_cancelled() {
+        return Ok(SpecialistResult::done(
+            "Stopped before preparing file writes.",
+        ));
+    }
+    let mut reply = reply?;
     let mut emit = parse_text_specialist_emit(&reply);
 
     // One format nudge for models that answer in prose (common on smaller local LLMs).
@@ -1071,7 +1098,18 @@ fn run_text_specialist(
 Emit the required tags now. If you only need a blocker question, use <workbench_ask>. \
 Otherwise emit every file to write with <workbench_file path=\"…\"> and a <workbench_summary>."
         }));
-        reply = chat::chat_completion(llm.api, llm.api_key, llm.model, &messages)?;
+        if app.director_cancelled() {
+            return Ok(SpecialistResult::done(
+                "Stopped before preparing file writes.",
+            ));
+        }
+        let next = chat::chat_completion(llm.api, llm.api_key, llm.model, &messages);
+        if app.director_cancelled() {
+            return Ok(SpecialistResult::done(
+                "Stopped before preparing file writes.",
+            ));
+        }
+        reply = next?;
         emit = parse_text_specialist_emit(&reply);
     }
 
@@ -1111,6 +1149,11 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
     let mut written = Vec::new();
     let mut staged = Vec::new();
     for (authorized, body) in planned {
+        if app.director_cancelled() {
+            return Ok(SpecialistResult::done(format!(
+                "Stopped before the next file write. Saved new files: {written:?}"
+            )));
+        }
         let previous = if authorized.replacing {
             fs::read_to_string(&authorized.path).ok()
         } else {
@@ -1130,6 +1173,11 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
         written.push(authorized.path.display().to_string());
     }
     if !staged.is_empty() {
+        if app.director_cancelled() {
+            return Ok(SpecialistResult::done(format!(
+                "Stopped before publishing file approval. Saved new files: {written:?}"
+            )));
+        }
         let summaries: Vec<String> = staged
             .iter()
             .map(|(_, _, summary)| summary.clone())
@@ -1141,7 +1189,13 @@ Otherwise emit every file to write with <workbench_file path=\"…\"> and a <wor
                 .map(|(write, body, _)| (write, body))
                 .collect(),
         );
-        let card = text_write_approval_card(&id, &summaries, project_root)?;
+        let card = prepare_text_write_approval_card(&id, &summaries, project_root)?;
+        if app.director_cancelled() {
+            return Ok(SpecialistResult::done(format!(
+                "Stopped before publishing file approval. Saved new files: {written:?}"
+            )));
+        }
+        let card = crate::pending::publish_user_text(&card);
         let mut message = format!(
             "{label} prepared {} file change(s) for approval.",
             summaries.len()
@@ -1221,35 +1275,41 @@ fn run_production_helper(
             "character_files",
         ],
     );
-    for path in &context.attached_paths {
-        let t = path.trim();
-        if !t.is_empty() && !paths.iter().any(|p| p == t) {
-            paths.push(t.to_string());
+    let explicit_sources = !paths.is_empty();
+    let output_path = input_str(inputs, &["output_path", "save_path"]);
+    // Compare resolved locations, not spellings (relative, absolute, and aliases).
+    // Peeking does not consume a one-time file grant.
+    let output_location =
+        output_path.and_then(|out| crate::media_util::peek_path(out, project_root).ok());
+    let is_output = |raw: &str| {
+        output_path == Some(raw)
+            || output_location.as_ref().is_some_and(|out| {
+                crate::media_util::peek_path(raw, project_root).is_ok_and(|path| &path == out)
+            })
+    };
+    if !explicit_sources {
+        for path in context
+            .attached_paths
+            .iter()
+            .map(String::as_str)
+            .chain(context.selected_path.as_deref())
+            .chain(context.focused_editor_path.as_deref())
+        {
+            let path = path.trim();
+            if !path.is_empty() && !paths.iter().any(|p| p == path) {
+                paths.push(path.to_string());
+            }
         }
     }
-    if let Some(sel) = context
-        .selected_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if !paths.iter().any(|p| p == sel) {
-            paths.push(sel.to_string());
-        }
-    }
-    if let Some(focused) = context
-        .focused_editor_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if !paths.iter().any(|p| p == focused) {
-            paths.push(focused.to_string());
-        }
-    }
+    // A destination is never implicit input, even if the planner repeats it in
+    // a source alias. To review the previous digest, use a distinct output path.
+    paths.retain(|path| !is_output(path));
 
     if paths.len() > HELPER_MAX_FILES {
-        paths.truncate(HELPER_MAX_FILES);
+        return Err(format!(
+            "Production Helper received {} source documents; the limit is {HELPER_MAX_FILES}. Select fewer sources; no digest was generated or saved.",
+            paths.len()
+        ));
     }
 
     app.emit(
@@ -1293,7 +1353,11 @@ fn run_production_helper(
         };
         let mut body = text;
         if body.len() > HELPER_MAX_CHARS_PER_FILE {
-            body.truncate(HELPER_MAX_CHARS_PER_FILE);
+            let mut end = HELPER_MAX_CHARS_PER_FILE;
+            while !body.is_char_boundary(end) {
+                end -= 1;
+            }
+            body.truncate(end);
             body.push_str("\n\n…[truncated for helper context]…\n");
         }
         if total_chars + body.len() > HELPER_MAX_TOTAL_CHARS {
@@ -1314,11 +1378,22 @@ fn run_production_helper(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .filter(|_| !explicit_sources)
+        .filter(|_| {
+            !context
+                .focused_editor_path
+                .as_deref()
+                .is_some_and(is_output)
+        })
     {
         if !dossier.contains(excerpt) {
             let mut clip = excerpt.to_string();
             if clip.len() > 8_000 {
-                clip.truncate(8_000);
+                let mut end = 8_000;
+                while !clip.is_char_boundary(end) {
+                    end -= 1;
+                }
+                clip.truncate(end);
                 clip.push_str("\n…[excerpt truncated]…");
             }
             dossier.push_str(&format!(
@@ -1334,7 +1409,22 @@ fn run_production_helper(
     }
 
     let mode = input_str(inputs, &["mode"]).unwrap_or("review");
-    let output_path = input_str(inputs, &["output_path", "save_path"]);
+    // Do not turn a failed or partial read into model prose that can be saved
+    // (or staged for approval) as if it were a grounded document digest.
+    if !missing.is_empty() {
+        return Err(format!(
+            "Production Helper could not load all source documents; no digest was generated or saved:\n- {}",
+            missing.join("\n- ")
+        ));
+    }
+    if read_labels.is_empty()
+        && (explicit_sources || !paths.is_empty() || mode == "digest" || output_path.is_some())
+    {
+        return Err(
+            "Production Helper needs readable source documents distinct from the output destination; no digest was generated or saved."
+                .into(),
+        );
+    }
 
     let mut user_block = String::new();
     user_block.push_str(&format!("## Mode hint\n{mode}\n\n"));
@@ -1346,13 +1436,6 @@ fn run_production_helper(
         user_block.push_str("## Files provided by host\n");
         for label in &read_labels {
             user_block.push_str(&format!("- `{label}`\n"));
-        }
-        user_block.push('\n');
-    }
-    if !missing.is_empty() {
-        user_block.push_str("## Paths that could not be loaded\n");
-        for m in &missing {
-            user_block.push_str(&format!("- {m}\n"));
         }
         user_block.push('\n');
     }
@@ -1380,14 +1463,24 @@ fn run_production_helper(
         }),
     ];
 
-    let reply = chat::chat_completion(llm.api, llm.api_key, llm.model, &messages)?;
-    let reply = reply.trim().to_string();
+    let reply = chat::chat_completion(llm.api, llm.api_key, llm.model, &messages);
+    if app.director_cancelled() {
+        return Ok(SpecialistResult::done(
+            "Stopped before saving or staging the digest.",
+        ));
+    }
+    let reply = reply?.trim().to_string();
     if reply.is_empty() {
         return Err("Production Helper returned an empty reply.".into());
     }
 
     let mut message = reply.clone();
     if let Some(out) = output_path {
+        if app.director_cancelled() {
+            return Ok(SpecialistResult::done(
+                "Stopped before saving or staging the digest.",
+            ));
+        }
         let body = format!("{reply}\n");
         match authorize_text_write("production_helper", out, project_root, body.len(), 0, 0) {
             Ok(authorized) => {
@@ -1398,10 +1491,21 @@ fn run_production_helper(
                 };
                 if approval_required(&authorized) {
                     let summary = approval_summary(&authorized, previous.as_deref(), &body);
+                    let approval_message = if authorized.replacing {
+                        "\n\nDigest overwrite is waiting for approval.\n\n"
+                    } else {
+                        "\n\nNew digest file is waiting for approval.\n\n"
+                    };
                     let id =
                         stage_authorized_text_writes("production_helper", vec![(authorized, body)]);
-                    let card = text_write_approval_card(&id, &[summary], project_root)?;
-                    message.push_str("\n\nDigest overwrite is waiting for approval.\n\n");
+                    let card = prepare_text_write_approval_card(&id, &[summary], project_root)?;
+                    if app.director_cancelled() {
+                        return Ok(SpecialistResult::done(
+                            "Stopped before publishing the digest approval.",
+                        ));
+                    }
+                    let card = crate::pending::publish_user_text(&card);
+                    message.push_str(approval_message);
                     message.push_str(&card);
                 } else {
                     commit_text_write(&authorized, &body, false).map_err(|error| {
@@ -2907,8 +3011,10 @@ fn run_text_sync(
         ));
     }
 
+    crate::workflow_continuation::set_outputs(app, &output_video, &output_audio)?;
     // Voice mode
     let reuse_wav = input_str(inputs, &["performance_wav", "reuse_audio"]);
+    if reuse_wav.is_none() && output_audio.exists() { return Err("Saved performance audio already exists. Use Resume with saved audio; speech will not be generated again.".into()); }
     let clone_wav = input_str(inputs, &["voice_clone", "voice_clone_path", "clone_wav"])
         .map(|s| s.to_string())
         .or_else(|| {

@@ -54,6 +54,8 @@ const HOST_COMMANDS = new Set([
   "workflow_update_sketch",
   "workflow_save_sketch",
   "workflow_set_animatic_duration",
+  "workflow_set_shot_trim",
+  "workflow_set_shot_transition",
   "workflow_reorder_animatic",
   "workflow_reorder_cuts",
   "workflow_approve_animatic",

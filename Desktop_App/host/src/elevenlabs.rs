@@ -6,12 +6,40 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+#[cfg(not(feature = "mock-provider"))]
 const API_BASE: &str = "https://api.elevenlabs.io";
 const USER_AGENT: &str = "VideoWorkbench/0.1 (desktop; elevenlabs-voice)";
 
+// Match the existing Atlas compile-time mock contract; ordinary builds ignore the env.
+#[cfg(not(feature = "mock-provider"))]
+fn api_base() -> Result<String, String> { Ok(API_BASE.into()) }
+
+#[cfg(feature = "mock-provider")]
+fn mock_url(raw: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw).map_err(|_| "Invalid ElevenLabs mock URL")?;
+    let host = url.host_str().unwrap_or("");
+    let local = host == "localhost" || host == "[::1]" || host == "::1"
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if !local || !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty() || url.password().is_some()
+        || url.query().is_some() || url.fragment().is_some() {
+        return Err("ElevenLabs mock URL must be plain loopback HTTP(S).".into());
+    }
+    Ok(url)
+}
+
+#[cfg(feature = "mock-provider")]
+fn api_base() -> Result<String, String> {
+    let raw = std::env::var("WORKBENCH_ELEVENLABS_BASE_URL")
+        .map_err(|_| "mock-provider requires WORKBENCH_ELEVENLABS_BASE_URL; real provider refused")?;
+    Ok(mock_url(raw.trim())?.as_str().trim_end_matches('/').into())
+}
+
 fn client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
+    let builder = reqwest::blocking::Client::builder();
+    #[cfg(feature = "mock-provider")]
+    let builder = builder.redirect(reqwest::redirect::Policy::none());
+    builder.timeout(std::time::Duration::from_secs(180))
         .user_agent(USER_AGENT)
         .build()
         .map_err(|error| format!("Could not build HTTP client: {error}"))
@@ -30,7 +58,7 @@ fn dispatch_billable(
     confirmation: &str,
     dispatch: impl FnOnce() -> Result<String, String>,
 ) -> Result<String, String> {
-    let root = crate::session::authorize_user_path(root, crate::project_path::PathIntent::Write)?;
+    let root = crate::session::command_root(Some(root))?;
     crate::voice_spend::run(&root, operation, model, input, Some(confirmation), dispatch)
 }
 
@@ -44,7 +72,7 @@ pub fn elevenlabs_confirm_voice_spend(
     attested: bool,
 ) -> Result<String, String> {
     let root =
-        crate::session::authorize_user_path(&project_root, crate::project_path::PathIntent::Write)?;
+        crate::session::command_root(Some(&project_root))?;
     crate::voice_spend::confirm(
         &root,
         &operation,
@@ -63,7 +91,7 @@ pub fn elevenlabs_quote_voice_spend(
     input: String,
 ) -> Result<crate::voice_spend::VoiceQuote, String> {
     let root =
-        crate::session::authorize_user_path(&project_root, crate::project_path::PathIntent::Write)?;
+        crate::session::command_root(Some(&project_root))?;
     crate::voice_spend::quote(&root, &operation, &model, &input)
 }
 
@@ -76,7 +104,7 @@ pub fn elevenlabs_confirm_unbounded_voice_spend(
     ledger_revision: String,
 ) -> Result<String, String> {
     let root =
-        crate::session::authorize_user_path(&project_root, crate::project_path::PathIntent::Write)?;
+        crate::session::command_root(Some(&project_root))?;
     crate::voice_spend::confirm_unbounded(
         &root,
         &operation,
@@ -143,7 +171,7 @@ pub fn elevenlabs_list_voices(
     let key = api_key(&app)?;
     let client = client()?;
     let mut req = client
-        .get(format!("{API_BASE}/v2/voices"))
+        .get(format!("{}/v2/voices", api_base()?))
         .header("xi-api-key", &key)
         .query(&[(
             "page_size",
@@ -276,7 +304,7 @@ pub fn elevenlabs_tts_preview(
         &confirmation,
         || {
             let response = client
-                .post(format!("{API_BASE}/v1/text-to-speech/{voice_id}"))
+                .post(format!("{}/v1/text-to-speech/{voice_id}", api_base()?))
                 .header("xi-api-key", &key)
                 .header("Accept", "audio/mpeg")
                 .json(&json!({"text": text, "model_id": "eleven_multilingual_v2"}))
@@ -348,7 +376,7 @@ pub fn elevenlabs_design_voice(
         &scope_input,
         &confirmation,
         || {
-            let response = client.post(format!("{API_BASE}/v1/text-to-voice/design"))
+            let response = client.post(format!("{}/v1/text-to-voice/design", api_base()?))
             .header("xi-api-key", &key)
             .json(&json!({"voice_description": description, "text": sample, "model_id": "eleven_multilingual_ttv_v2", "auto_generate_text": false}))
             .send().map_err(|error| format!("Voice design request failed: {error}"))?;
@@ -437,7 +465,7 @@ pub fn elevenlabs_create_designed_voice(
         &scope_input,
         &confirmation,
         || {
-            let response = client.post(format!("{API_BASE}/v1/text-to-voice"))
+            let response = client.post(format!("{}/v1/text-to-voice", api_base()?))
             .header("xi-api-key", &key)
             .json(&json!({"voice_name": voice_name, "voice_description": voice_description, "generated_voice_id": generated_voice_id}))
             .send().map_err(|error| format!("Create designed voice failed: {error}"))?;
@@ -461,6 +489,7 @@ pub fn elevenlabs_create_designed_voice(
         .ok_or_else(|| "ElevenLabs create-voice response missing voice_id.".into())
 }
 
+#[cfg(not(feature = "mock-provider"))]
 fn allow_preview_url(raw: &str) -> Result<(), String> {
     let url =
         reqwest::Url::parse(raw).map_err(|_| "Preview URL is not a valid URL.".to_string())?;
@@ -476,6 +505,9 @@ fn allow_preview_url(raw: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(feature = "mock-provider")]
+fn allow_preview_url(raw: &str) -> Result<(), String> { mock_url(raw).map(|_| ()) }
 
 pub fn elevenlabs_download_preview_url(url: String) -> Result<AudioPayload, String> {
     let url = url.trim();
@@ -503,4 +535,43 @@ pub fn elevenlabs_download_preview_url(url: String) -> Result<AudioPayload, Stri
         audio_base64: B64.encode(bytes),
         media_type,
     })
+}
+
+#[cfg(all(test, feature = "mock-provider"))]
+mod s09_mock_tests {
+    use super::*;
+    #[test]
+    fn mock_base_fails_closed() {
+        std::env::remove_var("WORKBENCH_ELEVENLABS_BASE_URL");
+        assert!(api_base().is_err());
+        for bad in ["https://api.elevenlabs.io", "http://user@127.0.0.1", "http://127.0.0.1?x=1", "http://127.0.0.1/#frag", "file:///tmp", "http://127.0.0.1.evil.invalid"] {
+            std::env::set_var("WORKBENCH_ELEVENLABS_BASE_URL", bad);
+            assert!(api_base().is_err(), "accepted {bad}");
+        }
+        for good in ["http://127.0.0.1:8901/", "http://localhost:8901", "http://[::1]:8901"] {
+            std::env::set_var("WORKBENCH_ELEVENLABS_BASE_URL", good);
+            assert!(api_base().is_ok());
+        }
+        std::env::remove_var("WORKBENCH_ELEVENLABS_BASE_URL");
+    }
+    #[test]
+    fn preview_policy_is_hermetic_in_mock_builds() {
+        assert!(allow_preview_url("https://api.elevenlabs.io/audio.mp3").is_err());
+        assert!(allow_preview_url("http://127.0.0.1:8901/audio.mp3").is_ok());
+        assert!(allow_preview_url("http://127.0.0.1.evil.invalid/audio").is_err());
+        assert!(allow_preview_url("http://user@127.0.0.1/audio").is_err());
+    }
+}
+
+#[cfg(all(test, not(feature = "mock-provider")))]
+mod s09_production_tests {
+    use super::*;
+    #[test]
+    fn compiled_endpoint_ignores_mock_environment() {
+        std::env::set_var("WORKBENCH_ELEVENLABS_BASE_URL", "http://127.0.0.1:1");
+        assert_eq!(api_base().unwrap(), API_BASE);
+        std::env::remove_var("WORKBENCH_ELEVENLABS_BASE_URL");
+        assert!(allow_preview_url("http://127.0.0.1/audio").is_err());
+        assert!(allow_preview_url("https://api.elevenlabs.io/audio").is_ok());
+    }
 }

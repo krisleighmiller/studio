@@ -39,23 +39,21 @@ fn dirs_fallback() -> PathBuf {
     PathBuf::from(".").join("workbench-settings")
 }
 
-struct JobSlots {
-    available: Mutex<mpsc::Receiver<()>>,
-    release: mpsc::Sender<()>,
-}
-
-fn job_slots() -> &'static JobSlots {
-    static SLOTS: std::sync::OnceLock<JobSlots> = std::sync::OnceLock::new();
-    SLOTS.get_or_init(|| {
-        let (release, available) = mpsc::channel();
-        for _ in 0..8 {
-            let _ = release.send(());
-        }
-        JobSlots {
-            available: Mutex::new(available),
-            release,
-        }
-    })
+fn respond(app: &HostCtx, recorder: &RecorderState, request: Request) {
+    let result = dispatch(app, recorder, &request.cmd, &request.args);
+    let response = match result {
+        Ok(value) => json!({
+            "id": request.id,
+            "ok": true,
+            "result": workbench_host::director::redact_publication(app, value),
+        }),
+        Err(error) => json!({
+            "id": request.id,
+            "ok": false,
+            "error": workbench_host::secrets::redact_text(app, &error),
+        }),
+    };
+    app.write_response(&response);
 }
 
 fn main() {
@@ -64,6 +62,20 @@ fn main() {
 
     let app = HostCtx::new(default_settings_dir());
     let recorder = Arc::new(RecorderState::new());
+
+    // Keep input consumption independent of the eight execution workers. In
+    // particular, Stop must not wait for a slot held by blocked provider calls.
+    let (queue, work) = mpsc::sync_channel::<(HostCtx, Request)>(64);
+    let work = Arc::new(Mutex::new(work));
+    for _ in 0..8 {
+        let work = Arc::clone(&work);
+        let recorder = Arc::clone(&recorder);
+        thread::spawn(move || loop {
+            let next = work.lock().expect("request queue").recv();
+            let Ok((app, request)) = next else { break };
+            respond(&app, &recorder, request);
+        });
+    }
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -92,34 +104,22 @@ fn main() {
             }
         };
 
-        let app = app.clone();
-        let recorder = Arc::clone(&recorder);
-        let slots = job_slots();
-        // Wait for a free slot before starting another command thread.
-        let _ = slots.available.lock().expect("job slots").recv();
-        let release = slots.release.clone();
-        // Each command on its own thread so long director/Atlas work can emit progress
-        // while still accepting later requests (e.g. voice level polls).
-        thread::spawn(move || {
-            let result = dispatch(&app, &recorder, &request.cmd, &request.args);
-            let response = match result {
-                Ok(value) => {
-                    let value = workbench_host::secrets::redact_json(&app, value);
-                    json!({
-                        "id": request.id,
-                        "ok": true,
-                        "result": value,
-                    })
-                }
-                Err(error) => json!({
+        // Immutable admission snapshot, before queuing. Handle Stop on this
+        // reader, in input order, so queued older requests stay cancelled.
+        let request_app = app.for_request();
+        if request.cmd == "director_cancel" {
+            respond(&request_app, &recorder, request);
+        } else {
+            match queue.try_send((request_app, request)) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full((app, request))) => app.write_response(&json!({
                     "id": request.id,
                     "ok": false,
-                    "error": workbench_host::secrets::redact_text(&app, &error),
-                }),
-            };
-            app.write_response(&response);
-            let _ = release.send(());
-        });
+                    "error": "Host request queue is full; request was not executed.",
+                })),
+                Err(mpsc::TrySendError::Disconnected(_)) => break,
+            }
+        }
     }
 
     let _ = io::stderr().flush();

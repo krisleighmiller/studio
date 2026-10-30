@@ -44,6 +44,7 @@ import {
   toggleJobsDrawer,
   setStudioWorkArea,
   refreshWorkflowDesk,
+  refreshWorkflowJobsOnly,
   renderWorkflowDesk,
   attachDirectorContext,
   detachDirectorContext,
@@ -83,6 +84,7 @@ type ChatMessage = {
   id: string;
   role: "user" | "assistant" | "system";
   text: string;
+  context?: ReturnType<typeof currentDirectorContext>;
 };
 
 type ChatTab = {
@@ -233,6 +235,10 @@ let filesEditorId: string | null = null;
 let assetRenderSeq = 0;
 
 let projectRoot: string | null = null;
+// Host session changes precede the renderer's root update. Invalidate old
+// Director chains before opening a dialog or invoking a project transition.
+let projectEpoch = 0;
+let projectTransitionInFlight = false;
 let selectedPath: string | null = null;
 let editorTabs: EditorTab[] = [];
 let activeEditorId: string | null = null;
@@ -262,7 +268,9 @@ function uid(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
+let statusRevision = 0;
 function setStatus(left: string, right = ""): void {
+  statusRevision += 1;
   els.statusLeft.textContent = left;
   els.statusRight.textContent = right;
 }
@@ -2669,6 +2677,7 @@ async function openFile(path: string): Promise<void> {
     };
     editorTabs.push(tab);
     activeEditorId = tab.id;
+    placeFileSurface(tab);
     renderEditor();
     focusEditor();
     return;
@@ -2837,6 +2846,7 @@ async function closeAllEditorTabs(): Promise<void> {
 
 function closeChatTab(id: string): void {
   if (chatTabs.length <= 1) return;
+  if (directorOperation?.tab.id === id) closeDirectorProgress(directorOperation);
   const index = chatTabs.findIndex((item) => item.id === id);
   chatTabs = chatTabs.filter((item) => item.id !== id);
   if (activeChatId === id) {
@@ -2861,20 +2871,39 @@ async function confirmOpenProjectSwitch(): Promise<boolean> {
   );
 }
 
+async function withProjectTransition(action: () => Promise<void>): Promise<void> {
+  if (projectTransitionInFlight) return;
+  projectTransitionInFlight = true;
+  projectEpoch += 1;
+  if (directorOperation) {
+    closeDirectorProgress(directorOperation);
+    renderChat();
+  }
+  try {
+    await action();
+  } finally {
+    projectTransitionInFlight = false;
+  }
+}
+
 async function openProjectAt(
   selected: string,
   options?: { sessionReady?: boolean },
 ): Promise<void> {
   const root = selected.replace(/\/+$/, "");
   if (!options?.sessionReady) {
-    if (!(await confirmOpenProjectSwitch())) return;
-    try {
-      await useRecentProject(root);
-    } catch {
-      setStatus("Recent project folder is missing", root);
-      void removeRecentProject(root);
-      return;
-    }
+    await withProjectTransition(async () => {
+      if (!(await confirmOpenProjectSwitch())) return;
+      try {
+        await useRecentProject(root);
+      } catch {
+        setStatus("Recent project folder is missing", root);
+        void removeRecentProject(root);
+        return;
+      }
+      await openProjectAt(root, { sessionReady: true });
+    });
+    return;
   }
   try {
     await invoke("list_dir", { path: root });
@@ -2907,13 +2936,19 @@ async function openProjectAt(
 }
 
 async function openProject(): Promise<void> {
-  if (!(await confirmOpenProjectSwitch())) return;
-  const selected = await openProjectFolder();
-  if (!selected) return;
-  await openProjectAt(selected, { sessionReady: true });
+  await withProjectTransition(async () => {
+    if (!(await confirmOpenProjectSwitch())) return;
+    const selected = await openProjectFolder();
+    if (!selected) return;
+    await openProjectAt(selected, { sessionReady: true });
+  });
 }
 
 async function closeProject(): Promise<void> {
+  await withProjectTransition(closeProjectInSession);
+}
+
+async function closeProjectInSession(): Promise<void> {
   if (!projectRoot) return;
   syncTabFromEditor();
   const dirtyFiles = editorTabs.some(
@@ -3226,8 +3261,64 @@ function setChatWorkingChrome(busy: boolean): void {
   els.chatStopBtn.textContent = directorStopping ? "Stopping…" : "Stop";
 }
 
-/** Live progress line shown in chat while a Director turn is running. */
-let directorProgressMessageId: string | null = null;
+/** One IPC operation owns its progress even when another chat is selected. */
+type DirectorOperation = {
+  tab: ChatTab;
+  requestId: string;
+  epoch: number;
+  root: string | null;
+  messageId: string | null;
+  progressOpen: boolean;
+};
+let directorOperation: DirectorOperation | null = null;
+let directorPresentationSerial = 0;
+type DeferredMediaOwner = { tab: ChatTab; context: ReturnType<typeof currentDirectorContext>; serial: number; epoch: number; root: string | null; published?: boolean };
+const deferredMediaOwners = new Map<string, DeferredMediaOwner>();
+function publishMediaContinuation(result: unknown, ownerRequestId: string | undefined): void {
+  if (!ownerRequestId) return;
+  const owner = deferredMediaOwners.get(ownerRequestId);
+  if (!owner || owner.published || !result || typeof result !== "object" || !("continuation" in result)) return;
+  const value = result.continuation;
+  if (!value || typeof value !== "object" || !("workflowContinuation" in value) || value.workflowContinuation !== true
+    || !("reply" in value) || typeof value.reply !== "string" || !("continueSuggested" in value) || value.continueSuggested !== false) return;
+  owner.published = true;
+  if (!chatTabs.includes(owner.tab) || owner.serial !== directorPresentationSerial || owner.epoch !== projectEpoch
+    || owner.root !== projectRoot || projectTransitionInFlight || directorStopRequested) return;
+  owner.tab.messages.push({ id: uid("msg"), role: "assistant", text: value.reply, context: owner.context });
+  renderChat();
+}
+
+function beginDirectorOperation(tab: ChatTab): DirectorOperation {
+  directorPresentationSerial += 1;
+  deferredMediaOwners.clear();
+  const operation = { tab, requestId: uid("operation"), epoch: projectEpoch, root: projectRoot, messageId: null, progressOpen: true };
+  directorOperation = operation;
+  return operation;
+}
+
+function ownsDirectorPresentation(operation: DirectorOperation): boolean {
+  return directorOperation === operation && chatTabs.includes(operation.tab)
+    && operation.epoch === projectEpoch && operation.root === projectRoot && !projectTransitionInFlight;
+}
+
+function closeDirectorProgress(operation: DirectorOperation): void {
+  operation.progressOpen = false;
+  if (operation.messageId) {
+    operation.tab.messages = operation.tab.messages.filter((message) => message.id !== operation.messageId);
+    operation.messageId = null;
+  }
+}
+
+function finishDirectorOperation(operation: DirectorOperation): void {
+  closeDirectorProgress(operation);
+  if (directorOperation === operation) {
+    operation.tab.busy = false;
+    directorOperation = null;
+    chatSendInFlight = false;
+    directorStopping = false;
+  }
+  renderChat();
+}
 /** Caps host-driven resume hops for planner yields and long model-sheet packs. */
 let autoContinueDepth = 0;
 const MAX_AUTO_CONTINUE = 48;
@@ -3237,16 +3328,21 @@ let directorStopping = false;
 
 async function stopDirector(): Promise<void> {
   if (directorStopping) return;
+  const operation = directorOperation;
   directorStopRequested = true;
+  directorPresentationSerial += 1;
+  deferredMediaOwners.clear();
   directorStopping = true;
   autoContinueDepth = MAX_AUTO_CONTINUE;
   setChatWorkingChrome(chatSendInFlight || Boolean(activeChat()?.busy));
-  setStatus("Stopping Director…");
-  upsertDirectorProgressMessage("Stopping Director…");
+  if (operation && ownsDirectorPresentation(operation)) {
+    setStatus(operation.progressOpen ? "Stopping Director…" : "Director stopped");
+  }
+  if (directorOperation) upsertDirectorProgressMessage(directorOperation, "Stopping Director…");
   try {
     await invoke("director_cancel");
   } catch (error) {
-    setStatus(`Stop request failed: ${error}`);
+    if (operation?.progressOpen && ownsDirectorPresentation(operation)) setStatus(`Stop request failed: ${error}`);
   }
 }
 
@@ -3255,32 +3351,19 @@ function looksLikeStoppedError(error: unknown): boolean {
   return /stopped by user/i.test(text);
 }
 
-function upsertDirectorProgressMessage(text: string): void {
-  const tab = activeChat();
-  if (!tab) return;
+function upsertDirectorProgressMessage(operation: DirectorOperation, text: string): void {
+  if (!ownsDirectorPresentation(operation) || !operation.progressOpen) return;
+  const tab = operation.tab;
   const cleaned = text.trim();
   if (!cleaned) return;
-  if (directorProgressMessageId) {
-    const existing = tab.messages.find(
-      (message) => message.id === directorProgressMessageId,
-    );
-    if (existing) {
-      existing.text = cleaned;
-      renderChat();
-      return;
-    }
+  const existing = tab.messages.find((message) => message.id === operation.messageId);
+  if (existing) {
+    existing.text = cleaned;
+  } else {
+    operation.messageId = uid("msg");
+    tab.messages.push({ id: operation.messageId, role: "system", text: cleaned });
   }
-  directorProgressMessageId = uid("msg");
-  tab.messages.push({
-    id: directorProgressMessageId,
-    role: "system",
-    text: cleaned,
-  });
   renderChat();
-}
-
-function clearDirectorProgressMessage(): void {
-  directorProgressMessageId = null;
 }
 
 function currentDirectorContext() {
@@ -3315,7 +3398,23 @@ async function approveDirectorAction(
   actionId: string,
 ): Promise<void> {
   const tab = activeChat();
-  if (!tab || tab.busy || chatSendInFlight) return;
+  if (!tab || tab.busy || chatSendInFlight || projectTransitionInFlight) return;
+  const epoch = projectEpoch;
+  // Keep the context that produced this card, not a selection made afterward.
+  const context = tab.messages.find((message) => message.id === messageId)?.context
+    ?? currentDirectorContext();
+  if (context.projectRoot !== projectRoot) {
+    setStatus("Reopen the approval's original project before approving it");
+    return;
+  }
+  // Approval is an explicit user action; do not inherit Stop from an earlier turn.
+  autoContinueDepth = 0;
+  directorStopRequested = false;
+  directorStopping = false;
+  let continuePlanning = false;
+  let awaitingMedia = false;
+  const operation = beginDirectorOperation(tab);
+  deferredMediaOwners.set(operation.requestId, { tab, context: structuredClone(context), serial: directorPresentationSerial, epoch, root: projectRoot });
   // Treat dispatch as one-shot even if IPC rejects after host consumption.
   // Re-rendering an uncertain result must never offer a replay of this token.
   const source = tab.messages.find((message) => message.id === messageId);
@@ -3330,9 +3429,14 @@ async function approveDirectorAction(
       model: string;
       toolEvents: string[];
       continueSuggested?: boolean;
+      stopped?: boolean;
+      workflowContinuation?: boolean;
     }>("director_approve", {
       id: actionId,
+      progressId: operation.requestId,
     });
+    closeDirectorProgress(operation);
+    if (!chatTabs.includes(tab)) return;
     const source = tab.messages.find((message) => message.id === messageId);
     if (source) {
       source.text = source.text
@@ -3343,37 +3447,71 @@ async function approveDirectorAction(
       id: uid("msg"),
       role: "assistant",
       text: result.reply,
+      context,
     });
-    setStatus("Approved plan finished", result.model);
-    if (projectRoot) {
-      await renderExplorer();
+    awaitingMedia = result.toolEvents.includes("approve:awaiting-spend-authorization");
+    const awaitingAction = /\[\[workbench_(?:approve|pending):/.test(result.reply) || awaitingMedia;
+    const failed = result.toolEvents.includes("approve:error");
+    const halted = directorStopRequested || Boolean(result.stopped);
+    // SpecialistResult::done(false) means the action finished, not that the
+    // user's multi-step request finished. Return its result to the planner once.
+    continuePlanning = !halted && !failed && !awaitingAction && !result.workflowContinuation;
+    if (ownsDirectorPresentation(operation)) setStatus(
+      halted ? "Director stopped" : failed ? "Approved plan failed"
+        : awaitingAction ? "Approved plan awaiting action" : "Approved plan finished",
+      result.model,
+    );
+    if (ownsDirectorPresentation(operation) && projectRoot) {
       try {
-        await refreshWorkflowDesk();
+        await renderExplorer();
+      } catch {
+        /* explorer refresh is best-effort after an approval */
+      }
+      try {
+        await refreshWorkflowDesk(() => ownsDirectorPresentation(operation), false);
       } catch {
         /* desk refresh is best-effort after an approval */
       }
     }
   } catch (error) {
+    if (!chatTabs.includes(tab)) return;
     tab.messages.push({
       id: uid("msg"),
       role: "system",
       text: `Approval failed: ${error}`,
     });
-    setStatus(`Approval error: ${error}`);
+    continuePlanning = false;
+    if (ownsDirectorPresentation(operation)) setStatus(`Approval error: ${error}`);
   } finally {
-    tab.busy = false;
-    chatSendInFlight = false;
-    renderChat();
+    finishDirectorOperation(operation);
+    if (!awaitingMedia) deferredMediaOwners.delete(operation.requestId);
+  }
+  if (
+    continuePlanning && !directorStopRequested && activeChat() === tab &&
+    projectRoot === context.projectRoot && !projectTransitionInFlight && epoch === projectEpoch
+  ) {
+    autoContinueDepth += 1;
+    await sendChatMessage("", { autoContinue: true, afterApproval: true, context, chatId: tab.id, projectEpoch: epoch });
   }
 }
 
 async function sendChatMessage(
   text: string,
-  options?: { autoContinue?: boolean; resume?: boolean },
+  options?: {
+    autoContinue?: boolean;
+    resume?: boolean;
+    afterApproval?: boolean;
+    context?: ReturnType<typeof currentDirectorContext>;
+    chatId?: string;
+    projectEpoch?: number;
+  },
 ): Promise<void> {
   const tab = activeChat();
   const isResume = Boolean(options?.resume);
-  if (!tab || tab.busy || chatSendInFlight) return;
+  const addsUserMessage = !isResume && !options?.afterApproval && !options?.autoContinue;
+  const epoch = options?.projectEpoch ?? projectEpoch;
+  if (!tab || tab.busy || chatSendInFlight || projectTransitionInFlight || epoch !== projectEpoch) return;
+  if (options?.chatId && options.chatId !== tab.id) return;
   if (options?.autoContinue && directorStopRequested) {
     directorStopping = false;
     tab.messages.push({
@@ -3385,21 +3523,22 @@ async function sendChatMessage(
     setStatus("Director stopped");
     return;
   }
-  if (!isResume && !text.trim()) return;
+  if (addsUserMessage && !text.trim()) return;
 
   const userText = text.trim();
-  if (!options?.autoContinue && !isResume) {
+  if (!options?.autoContinue && addsUserMessage) {
     autoContinueDepth = 0;
     directorStopRequested = false;
     directorStopping = false;
   }
-  // Clear immediately so Send never looks like it failed to take the message.
-  els.chatInput.value = "";
+  // Clear only a submitted message, not a draft typed during automatic work.
+  if (addsUserMessage && !options?.autoContinue) els.chatInput.value = "";
 
+  const context = options?.context ?? currentDirectorContext();
   const settings = getSettings();
   const selected = settings.selectedChatModel;
   if (!selected?.modelId) {
-    if (!isResume) {
+    if (addsUserMessage) {
       tab.messages.push({ id: uid("msg"), role: "user", text: userText });
     }
     tab.messages.push({
@@ -3411,14 +3550,12 @@ async function sendChatMessage(
     return;
   }
 
-  if (!isResume) {
+  if (addsUserMessage) {
     tab.messages.push({ id: uid("msg"), role: "user", text: userText });
   }
+  const operation = beginDirectorOperation(tab);
   tab.busy = true;
   chatSendInFlight = true;
-  if (!isResume) {
-    directorProgressMessageId = null;
-  }
   // Apply chrome immediately (before full rebuild) so Send never stays "Send".
   setChatWorkingChrome(true);
   renderChat();
@@ -3426,14 +3563,27 @@ async function sendChatMessage(
     isResume ? "Director resuming…" : "Director working…",
     selected.modelId,
   );
+  const workingStatusRevision = statusRevision;
   upsertDirectorProgressMessage(
-    isResume
+    operation, isResume
       ? "Director resuming the same turn…"
       : "Director working…",
   );
   await paintSoon();
 
   try {
+    // Stop / tab or project switches can happen during the paint above.
+    if (directorStopRequested) {
+      throw new Error("Stopped by user");
+    }
+    if (!chatTabs.includes(tab) || projectTransitionInFlight || epoch !== projectEpoch || (options?.autoContinue && (
+      activeChat() !== tab || projectRoot !== context.projectRoot
+    ))) {
+      closeDirectorProgress(operation);
+      // A transition may already have installed its own status. Only replace ours.
+      if (statusRevision === workingStatusRevision) setStatus("Director paused");
+      return;
+    }
     const result = await invoke<{
       reply: string;
       model: string;
@@ -3442,43 +3592,35 @@ async function sendChatMessage(
       plannerPaused?: boolean;
       stopped?: boolean;
     }>("director_turn", {
+      progressId: operation.requestId,
       request: {
         model: selected.modelId,
         apiId: selected.apiId,
         messages: directorHistory(tab),
         resume: isResume,
-        context: currentDirectorContext(),
+        context,
       },
     });
 
-    if (directorProgressMessageId) {
-      tab.messages = tab.messages.filter(
-        (message) => message.id !== directorProgressMessageId,
-      );
-      clearDirectorProgressMessage();
-    }
+    closeDirectorProgress(operation);
 
+    if (!chatTabs.includes(tab)) return;
     const halted = directorStopRequested || Boolean(result.stopped);
 
     // Planner yielded so the desk could paint — resume the same host loop.
     // Do not add a pause bubble or a fake "continue" user turn.
-    if (!halted && result.plannerPaused && autoContinueDepth < MAX_AUTO_CONTINUE) {
+    if (!halted && ownsDirectorPresentation(operation) && result.plannerPaused && autoContinueDepth < MAX_AUTO_CONTINUE) {
       if (projectRoot) {
         try {
-          await refreshWorkflowDesk();
+          await refreshWorkflowDesk(() => ownsDirectorPresentation(operation), false);
         } catch {
           /* keep the turn going if the desk cannot refresh yet */
         }
       }
       autoContinueDepth += 1;
-      upsertDirectorProgressMessage(
-        "Director still working — resuming the same turn…",
-      );
-      tab.busy = false;
-      chatSendInFlight = false;
-      renderChat();
       await paintSoon();
-      await sendChatMessage("", { autoContinue: true, resume: true });
+      finishDirectorOperation(operation);
+      await sendChatMessage("", { autoContinue: true, resume: true, context, chatId: tab.id, projectEpoch: epoch });
       return;
     }
 
@@ -3490,21 +3632,28 @@ async function sendChatMessage(
           ? result.reply
           : "Stopped. The Director will not continue this turn."
         : result.reply,
+      context,
     });
-    if (halted) {
-      setStatus("Director stopped");
-    } else if (result.toolEvents.length > 0) {
-      setStatus(
-        "Director reply",
-        `${result.model} · ${result.toolEvents.length} tool call(s)`,
-      );
-    } else {
-      setStatus("Director reply", result.model);
+    if (ownsDirectorPresentation(operation)) {
+      if (halted) {
+        setStatus("Director stopped");
+      } else if (result.toolEvents.length > 0) {
+        setStatus(
+          "Director reply",
+          `${result.model} · ${result.toolEvents.length} tool call(s)`,
+        );
+      } else {
+        setStatus("Director reply", result.model);
+      }
     }
-    if (projectRoot) {
-      await renderExplorer();
+    if (ownsDirectorPresentation(operation) && projectRoot) {
       try {
-        await refreshWorkflowDesk();
+        await renderExplorer();
+      } catch {
+        /* explorer refresh is best-effort after chat */
+      }
+      try {
+        await refreshWorkflowDesk(() => ownsDirectorPresentation(operation), false);
       } catch {
         /* desk refresh is best-effort after chat */
       }
@@ -3515,46 +3664,37 @@ async function sendChatMessage(
       result.reply,
     );
     if (
-      !halted &&
+      !halted && ownsDirectorPresentation(operation) &&
       result.continueSuggested &&
       !awaitingApproval &&
       autoContinueDepth < MAX_AUTO_CONTINUE
     ) {
       autoContinueDepth += 1;
-      tab.busy = false;
-      chatSendInFlight = false;
-      renderChat();
       await paintSoon();
-      await sendChatMessage("continue", { autoContinue: true });
+      finishDirectorOperation(operation);
+      await sendChatMessage("", { autoContinue: true, context, chatId: tab.id, projectEpoch: epoch });
       return;
     }
   } catch (error) {
-    if (directorProgressMessageId) {
-      tab.messages = tab.messages.filter(
-        (message) => message.id !== directorProgressMessageId,
-      );
-      clearDirectorProgressMessage();
-    }
+    closeDirectorProgress(operation);
+    if (!chatTabs.includes(tab)) return;
     if (directorStopRequested || looksLikeStoppedError(error)) {
       tab.messages.push({
         id: uid("msg"),
         role: "system",
         text: "Stopped. The Director will not continue this turn.",
       });
-      setStatus("Director stopped");
+      if (ownsDirectorPresentation(operation)) setStatus("Director stopped");
     } else {
       tab.messages.push({
         id: uid("msg"),
         role: "system",
         text: `Director turn failed: ${error}`,
       });
-      setStatus(`Director error: ${error}`);
+      if (ownsDirectorPresentation(operation)) setStatus(`Director error: ${error}`);
     }
   } finally {
-    tab.busy = false;
-    chatSendInFlight = false;
-    directorStopping = false;
-    renderChat();
+    finishDirectorOperation(operation);
   }
 }
 
@@ -4632,23 +4772,33 @@ async function bindMenuAndProgress(): Promise<void> {
     invoke,
     ask,
     projectRoot: () => projectRoot,
+    projectEpoch: () => projectEpoch,
+    ownerIsCurrent: (id) => { const owner = id ? deferredMediaOwners.get(id) : undefined; return Boolean(owner && chatTabs.includes(owner.tab) && owner.serial === directorPresentationSerial && owner.epoch === projectEpoch && owner.root === projectRoot && !projectTransitionInFlight && !directorStopRequested); },
     status: setStatus,
-    onSubmitted: async () => {
-      if (!projectRoot) return;
+    onSubmitted: async (result, isCurrent, ownerRequestId) => {
+      if (!isCurrent()) return;
+      publishMediaContinuation(result, ownerRequestId);
       await renderExplorer();
-      await refreshWorkflowDesk();
+      if (!isCurrent()) return;
+      await refreshWorkflowDesk(isCurrent, false);
+      await refreshWorkflowJobsOnly(isCurrent);
     },
+    onProgress: (isCurrent) => refreshWorkflowJobsOnly(isCurrent),
+    onSettled: (_outcome, isCurrent) => refreshWorkflowJobsOnly(isCurrent),
   });
   await bindHostEvents({
     onMenu: (id) => handleMenuAction(id),
     onSpendConfirmationRequired: (payload) => { void confirmMediaSpend(payload); },
     onDirectorProgress: (message) => {
-      const text = (message || "").trim();
+      const operation = directorOperation;
+      if (!operation || !ownsDirectorPresentation(operation) || !operation.progressOpen || directorStopRequested) return;
+      // Uncorrelated legacy strings cannot be safely assigned to this request.
+      if (!message || typeof message !== "object" || !("requestId" in message) || !("message" in message)
+        || message.requestId !== operation.requestId || typeof message.message !== "string") return;
+      const text = message.message.trim();
       if (!text) return;
       setStatus(text);
-      if (chatSendInFlight) {
-        upsertDirectorProgressMessage(text);
-      }
+      upsertDirectorProgressMessage(operation, text);
     },
   });
 }

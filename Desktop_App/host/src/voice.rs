@@ -119,22 +119,57 @@ fn write_wav_from_pcm(raw_path: &Path, wav_path: &Path) -> Result<(), String> {
         .map_err(|error| format!("Could not finalize the WAV file: {error}"))
 }
 
-fn voice_dir(character_directory: &Path) -> Result<PathBuf, String> {
+// Derive writes inside the exact character voice bucket, independent of source grants.
+fn voice_path(character_directory: &Path, relative: &Path) -> Result<PathBuf, String> {
+    let character = character_directory.canonicalize()
+        .map_err(|error| format!("Invalid character directory: {error}"))?;
+    let expected = character.join(relative);
+    if expected.is_symlink() {
+        return Err("Unsafe voice destination: symlinks are not allowed.".into());
+    }
+    let resolved = crate::project_path::resolve(
+        &relative.to_string_lossy(), Some(&character.to_string_lossy()),
+        crate::project_path::PathIntent::Write,
+    ).map_err(|error| format!("Unsafe voice destination: {error}"))?.into_path_buf();
+    if resolved != expected {
+        return Err("Unsafe voice destination: exact character bucket required.".into());
+    }
+    Ok(resolved)
+}
+
+fn profile_path(character_directory: &Path, character_name: &str) -> Result<PathBuf, String> {
+    voice_path(character_directory, &PathBuf::from("voice")
+        .join(format!("{}_voice_profile.yaml", safe_character_name(character_name))))
+}
+
+fn voice_dir(character_directory: &Path, character_name: &str) -> Result<PathBuf, String> {
     if !character_directory.is_dir() {
         return Err("Choose an existing character directory before saving.".into());
     }
-    let voice_directory = character_directory.join("voice");
+    let voice_directory = voice_path(character_directory, Path::new("voice"))?;
+    // Reject metadata redirects before creating or copying anything.
+    profile_path(character_directory, character_name)?;
     std::fs::create_dir_all(&voice_directory)
         .map_err(|error| format!("Could not create the voice directory: {error}"))?;
-    Ok(voice_directory)
+    let checked = voice_path(character_directory, Path::new("voice"))?;
+    if checked != voice_directory || !checked.is_dir() {
+        return Err("Unsafe voice destination: directory changed.".into());
+    }
+    profile_path(character_directory, character_name)?;
+    Ok(checked)
 }
 
-fn next_audio_path(voice_directory: &Path, stem: &str, extension: &str) -> PathBuf {
+fn next_audio_path(voice_directory: &Path, stem: &str, extension: &str) -> Result<PathBuf, String> {
+    let character = voice_directory.parent().ok_or("Invalid voice directory")?;
     let mut index = 1;
     loop {
         let candidate = voice_directory.join(format!("{stem}_voice_sample_{index:02}.{extension}"));
+        if candidate.is_symlink() {
+            return Err("Unsafe voice destination: audio symlink.".into());
+        }
         if !candidate.exists() {
-            return candidate;
+            return voice_path(character, &PathBuf::from("voice")
+                .join(candidate.file_name().ok_or("Invalid voice filename")?));
         }
         index += 1;
     }
@@ -148,9 +183,7 @@ fn write_profile_files(
     audio_path: &Path,
 ) -> Result<SavedVoiceProfile, String> {
     let stem = safe_character_name(character_name);
-    let profile_path = character_directory
-        .join("voice")
-        .join(format!("{stem}_voice_profile.yaml"));
+    let profile_path = profile_path(character_directory, &stem)?;
     // The sheet is optional, and its path must be scoped to the open project (or a
     // one-time grant). A guessed, stale, or out-of-project path must not block the
     // voice profile and must never append to a file the host has not authorized.
@@ -165,7 +198,8 @@ fn write_profile_files(
     let metadata_path = if let Some(reference_path) = reference_path {
         append_character_audio_profile(&reference_path, profile)?;
         // Also keep a machine-readable sidecar for pipeline tools.
-        let _ = std::fs::write(&profile_path, profile);
+        std::fs::write(&profile_path, profile)
+            .map_err(|error| format!("Could not write voice profile metadata: {error}"))?;
         format!("{}# Audio Profile", reference_path.to_string_lossy())
     } else {
         std::fs::write(&profile_path, profile)
@@ -452,12 +486,12 @@ pub fn voice_attach_existing(
     if !AUDIO_EXTENSIONS.contains(&extension.as_str()) {
         return Err("Choose a WAV, MP3, M4A, OGG, FLAC, or AAC file.".into());
     }
-    let voice_directory = voice_dir(&character_directory)?;
+    let voice_directory = voice_dir(&character_directory, &request.character_name)?;
     let audio_path = if inside_directory(&source, &voice_directory) {
         source
     } else {
         let stem = safe_character_name(&request.character_name);
-        let destination = next_audio_path(&voice_directory, &stem, &extension);
+        let destination = next_audio_path(&voice_directory, &stem, &extension)?;
         std::fs::copy(&source, &destination).map_err(|error| {
             format!("Could not copy the audio file into the voice folder: {error}")
         })?;
@@ -522,9 +556,9 @@ pub fn voice_save_recording(request: SaveRecordingRequest) -> Result<SavedVoiceP
     if !temp_path.is_file() {
         return Err("The recording file is missing or is no longer available.".into());
     }
-    let voice_directory = voice_dir(&character_directory)?;
+    let voice_directory = voice_dir(&character_directory, &request.character_name)?;
     let stem = safe_character_name(&request.character_name);
-    let audio_path = next_audio_path(&voice_directory, &stem, "wav");
+    let audio_path = next_audio_path(&voice_directory, &stem, "wav")?;
     std::fs::copy(&temp_path, &audio_path)
         .map_err(|error| format!("Could not save the approved recording: {error}"))?;
     let _ = std::fs::remove_file(&temp_path);
@@ -594,7 +628,7 @@ pub fn voice_save_library_voice(
         &request.character_directory,
         crate::project_path::PathIntent::Write,
     )?;
-    let voice_directory = voice_dir(&character_directory)?;
+    let voice_directory = voice_dir(&character_directory, &request.character_name)?;
     let stem = safe_character_name(&request.character_name);
     let bytes = B64
         .decode(request.audio_base64.trim())
@@ -609,7 +643,7 @@ pub fn voice_save_library_voice(
     } else {
         "mp3"
     };
-    let audio_path = next_audio_path(&voice_directory, &stem, extension);
+    let audio_path = next_audio_path(&voice_directory, &stem, extension)?;
     std::fs::write(&audio_path, bytes)
         .map_err(|error| format!("Could not save library voice audio: {error}"))?;
     let relative_audio_path = format!(
@@ -699,25 +733,11 @@ pub fn voice_save_designed_voice(
     app: HostCtx,
     request: SaveDesignedVoiceRequest,
 ) -> Result<SavedVoiceProfile, String> {
-    let voice_id = elevenlabs::elevenlabs_create_designed_voice(
-        app,
-        request.character_name.clone(),
-        request.voice_description.clone(),
-        request.generated_voice_id.clone(),
-        request
-            .project_root
-            .clone()
-            .ok_or("Project root required for voice creation")?,
-        request
-            .confirmation
-            .clone()
-            .ok_or("One-use confirmation required for voice creation")?,
-    )?;
     let character_directory = crate::session::authorize_user_path(
         &request.character_directory,
         crate::project_path::PathIntent::Write,
     )?;
-    let voice_directory = voice_dir(&character_directory)?;
+    let voice_directory = voice_dir(&character_directory, &request.character_name)?;
     let stem = safe_character_name(&request.character_name);
     let bytes = B64
         .decode(request.audio_base64.trim())
@@ -732,7 +752,21 @@ pub fn voice_save_designed_voice(
     } else {
         "mp3"
     };
-    let audio_path = next_audio_path(&voice_directory, &stem, extension);
+    let audio_path = next_audio_path(&voice_directory, &stem, extension)?;
+    let voice_id = elevenlabs::elevenlabs_create_designed_voice(
+        app,
+        request.character_name.clone(),
+        request.voice_description.clone(),
+        request.generated_voice_id.clone(),
+        request
+            .project_root
+            .clone()
+            .ok_or("Project root required for voice creation")?,
+        request
+            .confirmation
+            .clone()
+            .ok_or("One-use confirmation required for voice creation")?,
+    )?;
     std::fs::write(&audio_path, bytes)
         .map_err(|error| format!("Could not save designed voice audio: {error}"))?;
     let relative_audio_path = format!(
@@ -806,11 +840,7 @@ fn record_voice_clone_job(project_root: &str, voice_id: &str) -> Result<(), Stri
     let mut job = crate::workflow::state::JobRecord::open(job_id, "voice_clone");
     job.provider = Some("elevenlabs".into());
     job.raw_provider_id = Some(voice_id.to_string());
-    if let Some((currency, minor)) = crate::workflow::cost::known_price("elevenlabs", "voice_clone")
-    {
-        job.currency = Some(currency);
-        job.estimated_cost_minor = Some(minor);
-    }
+    // Price lookup/stamp removed for this bounded retirement phase.
     job.finish(None, None);
     state.jobs.push(job);
     crate::workflow::import::save_project(Path::new(project_root), state)?;
@@ -837,9 +867,9 @@ mod tests {
         assert_eq!(job.provider.as_deref(), Some("elevenlabs"));
         assert_eq!(job.raw_provider_id.as_deref(), Some("voice_abc"));
         assert_eq!(job.status, crate::workflow::state::JobStatus::Completed);
-        assert_eq!(job.estimated_cost_minor, Some(0));
+        assert_eq!(job.estimated_cost_minor, None);
         assert_eq!(job.cost_minor, None);
-        assert_eq!(job.currency.as_deref(), Some("USD"));
+        assert_eq!(job.currency.as_deref(), None);
     }
 
     #[test]

@@ -63,14 +63,14 @@ export function onMenu(handler: (id: string) => void): () => void {
 }
 
 export function onDirectorProgress(
-  handler: (message: string) => void,
+  handler: (payload: unknown) => void,
 ): () => void {
   return bridge().onDirectorProgress(handler);
 }
 
 export async function bindHostEvents(handlers: {
   onMenu: (id: string) => void;
-  onDirectorProgress: (message: string) => void;
+  onDirectorProgress: (payload: unknown) => void;
   onSpendConfirmationRequired?: (payload: unknown) => void;
 }): Promise<() => void> {
   const wb = bridge();

@@ -257,9 +257,6 @@ describe("phase 4 presentation and job truth", () => {
     expect(model.rows[0]?.completed).toBe("unknown");
     expect(model.rows[0]?.scope).toBe("shot shot-1");
     expect(model.rows[0]?.progress).toBe("unknown");
-    expect(model.rows[0]?.estimate).toBe("unknown");
-    expect(model.rows[0]?.actual).toBe("unknown");
-    expect(model.rows[0]?.currency).toBe("unknown");
     expect(model.rows[0]?.retry).toBe("unknown");
     const view = renderJobsView(model, true, "all", () => {});
     const text = view.textContent ?? "";
@@ -268,12 +265,7 @@ describe("phase 4 presentation and job truth", () => {
     expect(text).toContain("Completed unknown");
     expect(text).toContain("Scope shot shot-1");
     expect(text).toContain("Progress unknown");
-    expect(text).toContain("Estimate unknown");
-    expect(text).toContain("Actual unknown");
-    expect(text).toContain("Currency unknown");
     expect(text).toContain("Retry unknown");
-    expect(model.rows[0]?.tooltip).toContain("estimate unknown");
-    expect(model.rows[0]?.tooltip).toContain("actual unknown");
     expect(model.rows[0]?.outputPath).toBe("Scenes/Scene1/Cut1/take.mp4");
     expect(model.rows[0]?.cut).toBe(1);
     expect(model.rows[0]?.stage).toBe("take_review");

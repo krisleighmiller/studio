@@ -151,21 +151,40 @@ export function renderStartFrameCard(
   preview.preload = "metadata";
   preview.className = "workflow-take-video";
   let frameTimeEdited = frameTime.value !== "";
-  frameTime.addEventListener("input", () => {
-    frameTimeEdited = true;
-  });
-  preview.addEventListener("loadedmetadata", () => {
-    if (frameTimeEdited || !Number.isFinite(preview.duration)) return;
+  const refreshBindState = (): void => {
+    const predecessor = earlierCuts.find(
+      (candidate) => candidate.id.cut === Number(predecessorSelect.value),
+    );
+    const take = predecessor?.takes?.find(
+      (candidate) =>
+        candidate.id === predecessor?.selected_take ||
+        candidate.path === predecessor?.selected_take,
+    );
+    const editedTime = frameTimeEdited && frameTime.value !== "" ? Number(frameTime.value) : null;
     const choice = continuityChoice({
-      strategy: strategySelect.value,
-      predecessorTakeSelected: true,
-      durationSeconds: preview.duration,
-      editedTimeSeconds: null,
+      strategy: strategySelect.value as VisualSourceStrategy,
+      predecessorTakeSelected: Boolean(take),
+      durationSeconds: Number.isFinite(preview.duration) ? preview.duration : null,
+      editedTimeSeconds: editedTime,
       boundAssetId: cut.visual_source?.asset_id,
-      dependentLabels: [],
+      dependentLabels: predecessor ? getSurfaceHost().continuityDependents(predecessor) : [],
       busy: getSurfaceHost().busy,
     });
-    if (choice.timeSeconds != null) frameTime.value = choice.timeSeconds.toFixed(3);
+    if (editedTime == null && choice.timeSeconds != null) {
+      frameTime.value = choice.timeSeconds.toFixed(3);
+    }
+    bindContinuity.disabled = !choice.bindEnabled;
+    bindContinuity.title =
+      choice.bindReason ??
+      "Extract the frame at the chosen time. The successor stays blocked until this bind is saved.";
+  };
+  frameTime.addEventListener("input", () => {
+    frameTimeEdited = true;
+    refreshBindState();
+  });
+  preview.addEventListener("loadedmetadata", () => {
+    if (!Number.isFinite(preview.duration)) return;
+    refreshBindState();
   });
   const bindContinuity = actionButton("Bind selected frame", () => {
     emit({

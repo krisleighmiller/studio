@@ -58,13 +58,15 @@ export type NotesIntent =
   | { type: "save-prompt"; cut: number; prompt: string; negativePrompt: string }
   | { type: "sync-cut"; cut: number }
   | { type: "render"; cut: number }
+  | { type: "resume-audio"; cut: number }
   | { type: "set-take-status"; cut: number; takeId: string; status: string }
   | { type: "delete-take"; cut: number; takeId: string; path: string };
 
 export type TakeReviewIntent =
   | { type: "refresh" }
   | { type: "alternate" }
-  | { type: "set-status"; cut: number; takeId: string; status: string };
+  | { type: "set-status"; cut: number; takeId: string; status: string }
+  | { type: "delete-take"; cut: number; takeId: string; path: string };
 
 export type AssembleIntent =
   | { type: "prepare" }
@@ -77,16 +79,6 @@ export type AssembleIntent =
 
 export type ProfileIntent =
   | { type: "save"; profile: Record<string, unknown> }
-  | {
-      type: "set-budget";
-      budget: {
-        currency: string;
-        limit_minor: number | null;
-        warning_at_minor: number | null;
-        hard_stop: boolean;
-        policy: "strict_hard_stop" | "approval_required" | "warn_only";
-      } | null;
-    }
   | { type: "set-requirement"; requirementId: string; status: string; name: string }
   | { type: "add-requirement"; name: string; kind: string; sceneId: number | null };
 

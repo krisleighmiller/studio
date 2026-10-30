@@ -145,11 +145,23 @@ export function renderProductionNoteCard(
       actions.append(actionButton("Open full handoff", () => getSurfaceHost().hooks?.onOpenPath(notePath)));
     }
     actions.append(renderCutButton(cut, emit));
+    if (cut.speech_mode === "source_video_lipsync") {
+      const resume = actionButton("Resume with saved audio", () => emit({ type: "resume-audio", cut: cut.id.cut }));
+      resume.disabled = Boolean(getSurfaceHost().busy) || Boolean(renderBlocker(cut));
+      resume.title = "Prepare a fresh approval for this pending shot's saved performance WAV. Never synthesize speech again.";
+      actions.append(resume);
+    }
     card.append(actions);
   } else {
     const actions = document.createElement("div");
     actions.className = "workflow-inspector-actions";
     actions.append(renderCutButton(cut, emit));
+    if (cut.speech_mode === "source_video_lipsync") {
+      const resume = actionButton("Resume with saved audio", () => emit({ type: "resume-audio", cut: cut.id.cut }));
+      resume.disabled = Boolean(getSurfaceHost().busy) || Boolean(renderBlocker(cut));
+      resume.title = "Prepare a fresh approval for this pending shot's saved performance WAV. Never synthesize speech again.";
+      actions.append(resume);
+    }
     card.append(actions);
   }
 

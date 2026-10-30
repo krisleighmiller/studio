@@ -55,7 +55,7 @@ fn cut_number_from_name(name: &str) -> Option<u32> {
 }
 
 fn rel(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
+    crate::project_path::relative_to_root(root, path)
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
 }
@@ -314,6 +314,7 @@ fn apply_handoff(root: &Path, state: &mut ProjectState, handoff: SceneHandoff, s
     cut.prompt = Some(handoff.prompt.clone());
     cut.negative_prompt = handoff.negative_prompt.clone();
     cut.production_note_path = Some(rel(root, source_path));
+    cut.source_origin = Some(handoff.id());
     cut.dialogue = handoff
         .speech
         .cues
@@ -558,7 +559,108 @@ pub(crate) fn refresh_stage_flags(state: &mut ProjectState) {
     crate::workflow::recipe::apply_stages(state);
 }
 
-fn merge_preserved(previous: ProjectState, state: &mut ProjectState) {
+fn reconcile_fresh_ids(previous: &ProjectState, state: &mut ProjectState) {
+    use std::collections::HashMap;
+    let mut remap: HashMap<String, String> = HashMap::new();
+    let mut next_seq = previous
+        .next_asset_id()
+        .strip_prefix("asset_")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    // Pass 1: build original->target for fresh assets.
+    for asset in &state.assets {
+        let orig = asset.id.clone();
+        if remap.contains_key(&orig) {
+            continue;
+        }
+        if let Some(prev) = previous.assets.iter().find(|p| p.path == asset.path && p.role == asset.role) {
+            remap.insert(orig, prev.id.clone());
+        } else {
+            let target = format!("asset_{next_seq}");
+            next_seq += 1;
+            remap.insert(orig, target);
+        }
+    }
+    // Pass 2: apply to asset records, preserving saved properties for matches.
+    for asset in &mut state.assets {
+        let orig = asset.id.clone();
+        if let Some(target) = remap.get(&orig) {
+            let saved_match = previous.assets.iter().find(|p| p.id == *target);
+            if saved_match.is_some() {
+                if let Some(p) = saved_match {
+                    asset.status = p.status.clone();
+                    asset.source_job_id = p.source_job_id.clone();
+                    asset.parent_asset_id = p.parent_asset_id.clone();
+                    asset.notes = p.notes.clone();
+                }
+            } else {
+                if let Some(parent) = &asset.parent_asset_id {
+                    if let Some(t) = remap.get(parent) {
+                        asset.parent_asset_id = Some(t.clone());
+                    }
+                }
+            }
+            asset.id = target.clone();
+        }
+    }
+    // Pass 3: remap fresh references only.
+    for character in &mut state.characters {
+        for id in &mut character.asset_ids {
+            if let Some(t) = remap.get(id) {
+                *id = t.clone();
+            }
+        }
+    }
+    for scene in &mut state.scenes {
+        for cut in &mut scene.cuts {
+            for take in &mut cut.takes {
+                if let Some(t) = remap.get(&take.id) {
+                    take.id = t.clone();
+                }
+            }
+            if let Some(sel) = &mut cut.selected_take {
+                if let Some(t) = remap.get(sel) {
+                    *sel = t.clone();
+                }
+            }
+            if let Some(source) = &mut cut.visual_source {
+                if let Some(aid) = source.asset_id.as_ref() {
+                    if let Some(t) = remap.get(aid) {
+                        source.asset_id = Some(t.clone());
+                    }
+                }
+                if let Some(tid) = source.source_take_id.as_ref() {
+                    if let Some(t) = remap.get(tid) {
+                        source.source_take_id = Some(t.clone());
+                    }
+                }
+            }
+        }
+        if let Some(board) = &mut scene.look_board {
+            for slot in &mut board.slots {
+                for id in &mut slot.asset_ids {
+                    if let Some(t) = remap.get(id) {
+                        *id = t.clone();
+                    }
+                }
+                if let Some(appr) = slot.approved_asset_id.as_ref() {
+                    if let Some(t) = remap.get(appr) {
+                        slot.approved_asset_id = Some(t.clone());
+                    }
+                }
+            }
+            for id in &mut board.asset_ids {
+                if let Some(t) = remap.get(id) {
+                    *id = t.clone();
+                }
+            }
+            board.sync_asset_ids();
+        }
+    }
+}
+
+fn merge_preserved(previous: ProjectState, state: &mut ProjectState) -> Result<(), String> {
+    reconcile_fresh_ids(&previous, state);
     let saved = previous.clone();
     for old_scene in previous.scenes {
         let scene = state.scene_mut(old_scene.id, &old_scene.title);
@@ -577,16 +679,53 @@ fn merge_preserved(previous: ProjectState, state: &mut ProjectState) {
         if scene.look_board.is_none() {
             scene.look_board = old_scene.look_board;
         }
+        let mut claimed_dests: HashSet<usize> = HashSet::new();
+        for old_cut in &old_scene.cuts {
+            match crate::workflow::identity::correspond_cut(scene, old_cut) {
+                Ok(Some(dest)) => {
+                    if !claimed_dests.insert(dest) {
+                        return Err(format!(
+                            "duplicate saved source origin mapping: two old cuts claim destination cut {} in scene {}",
+                            dest, old_scene.id
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(message) => return Err(message),
+            }
+        }
         for old_cut in old_scene.cuts {
-            let old_selected = old_cut.selected_take.clone();
-            let old_selected_path = old_selected.as_ref().and_then(|selected| {
-                old_cut
-                    .takes
-                    .iter()
-                    .find(|take| take.id == *selected || take.path == *selected)
-                    .map(|take| take.path.clone())
-            });
-            let cut = scene.cut_mut(old_cut.id.cut);
+            let dest = match crate::workflow::identity::correspond_cut(scene, &old_cut) {
+                Ok(Some(index)) => index,
+                Ok(None) => {
+                    // Fail closed: a saved cut that cannot be matched now means the
+                    // saved source is missing or changed; refuse the reimport before
+                    // persisting instead of guessing at identity.
+                    if old_cut.has_production_note() {
+                        return Err(format!(
+                            "saved source missing or changed before reimport; refusing to reimport cut {} (stable_id: {}, production_note_path: {})",
+                            old_cut.id.cut,
+                            old_cut.stable_id,
+                            old_cut.production_note_path.as_deref().unwrap_or("<none>")
+                        ));
+                    }
+                    let mut retained = old_cut.clone();
+                    let max_label = scene.cuts.iter().map(|c| c.id.cut).max().unwrap_or(0);
+                    if retained.id.cut <= max_label
+                        || scene.cuts.iter().any(|c| c.id.cut == retained.id.cut)
+                    {
+                        let mut candidate = max_label + 1;
+                        while scene.cuts.iter().any(|c| c.id.cut == candidate) {
+                            candidate += 1;
+                        }
+                        retained.id.cut = candidate;
+                    }
+                    scene.cuts.push(retained);
+                    continue;
+                }
+                Err(message) => return Err(message),
+            };
+            let cut = &mut scene.cuts[dest];
             if cut.sketch.is_none() {
                 cut.sketch = old_cut.sketch;
             }
@@ -602,15 +741,23 @@ fn merge_preserved(previous: ProjectState, state: &mut ProjectState) {
             if cut.visual_source.is_none() {
                 cut.visual_source = old_cut.visual_source;
             }
-            for old_take in old_cut.takes {
+            for old_take in &old_cut.takes {
                 if let Some(current) = cut.takes.iter_mut().find(|take| take.path == old_take.path)
                 {
                     current.status = old_take.status;
-                    current.notes = old_take.notes;
+                    current.notes = old_take.notes.clone();
                 } else {
-                    cut.takes.push(old_take);
+                    cut.takes.push(old_take.clone());
                 }
             }
+            let old_selected = old_cut.selected_take.clone();
+            let old_selected_path = old_selected.as_ref().and_then(|selected| {
+                old_cut
+                    .takes
+                    .iter()
+                    .find(|take| take.id == *selected || take.path == *selected)
+                    .map(|take| take.path.clone())
+            });
             if cut.selected_take.is_none() {
                 cut.selected_take = old_selected_path
                     .as_ref()
@@ -632,22 +779,32 @@ fn merge_preserved(previous: ProjectState, state: &mut ProjectState) {
         if scene.post.is_none() {
             scene.post = old_scene.post;
         }
+        // Native readiness is recomputed below; only retain extension-stage metadata.
+        for (id, status) in old_scene.stages.extensions {
+            scene.stages.extensions.entry(id).or_insert(status);
+        }
     }
     for old_job in previous.jobs {
         if !state.jobs.iter().any(|job| job.id == old_job.id) {
             state.jobs.push(old_job);
         }
     }
+    state.versions = previous.versions.clone();
+    state.spend_confirmations = previous.spend_confirmations.clone();
     state.budget = previous.budget;
     if previous.assets.iter().any(|asset| {
         asset.role.is_scene_look()
             || asset.role.is_cut_image()
             || asset.role == AssetRole::WardrobePlate
+            || asset.role == AssetRole::AssemblyDraft
+            || asset.role == AssetRole::FinalExport
     }) {
         for old in previous.assets {
             if (old.role.is_scene_look()
                 || old.role.is_cut_image()
-                || old.role == AssetRole::WardrobePlate)
+                || old.role == AssetRole::WardrobePlate
+                || old.role == AssetRole::AssemblyDraft
+                || old.role == AssetRole::FinalExport)
                 && !state
                     .assets
                     .iter()
@@ -658,7 +815,8 @@ fn merge_preserved(previous: ProjectState, state: &mut ProjectState) {
         }
     }
     uniquify_duplicate_asset_ids(state);
-    crate::workflow::identity::adopt(state, &saved);
+    crate::workflow::identity::adopt(state, &saved)?;
+    Ok(())
 }
 
 fn prune_missing_scene_look_assets(project_root: &Path, state: &mut ProjectState) -> bool {
@@ -726,10 +884,6 @@ fn prune_missing_scene_look_assets(project_root: &Path, state: &mut ProjectState
                 }
             }
         }
-    }
-    for job in &mut state.jobs {
-        job.input_asset_ids.retain(|id| !missing.contains(id));
-        job.output_asset_ids.retain(|id| !missing.contains(id));
     }
     true
 }
@@ -1114,7 +1268,7 @@ fn restore_scene_look_jobs(project_root: &Path, state: &mut ProjectState) -> boo
     changed
 }
 
-fn restore_assemble_jobs(project_root: &Path, state: &mut ProjectState) -> bool {
+pub(super) fn restore_assemble_jobs(project_root: &Path, state: &mut ProjectState) -> bool {
     let jobs: Vec<(
         String,
         String,
@@ -1135,16 +1289,18 @@ fn restore_assemble_jobs(project_root: &Path, state: &mut ProjectState) -> bool 
         .collect();
     let mut changed = false;
     for (job_id, requested, raw, status) in jobs {
-        if matches!(
-            status,
-            crate::workflow::state::JobStatus::Failed
-                | crate::workflow::state::JobStatus::Cancelled
-        ) {
+        if status != crate::workflow::state::JobStatus::Completed {
             continue;
         }
-        let Some(actual) = existing_media_path(project_root, &requested) else {
-            continue;
+        let requested_path = match resolve_project_path(project_root, &requested, crate::project_path::PathIntent::Read) {
+            Ok(p) => p,
+            Err(_) => continue,
         };
+        if !requested_path.is_file() {
+            continue;
+        }
+        if crate::workflow::qc::probe_media(&requested_path).ok().is_none_or(|p| p.video.is_none() || p.duration_secs.is_none_or(|d|!d.is_finite() || d<=0.0)) { continue; }
+        let actual = requested_path;
         let actual_rel = rel(project_root, &actual);
         let scene_id = raw
             .as_deref()
@@ -1197,53 +1353,16 @@ fn restore_assemble_jobs(project_root: &Path, state: &mut ProjectState) -> bool 
                 changed = true;
             }
         }
-        let versions_before = state
-            .scene(scene_id)
-            .and_then(|scene| scene.post.as_ref())
-            .map(|post| post.versions.len())
-            .unwrap_or(0);
-        let selected_before = selected_take_count(state, scene_id);
-        if crate::workflow::post::attach_review_export(state, scene_id, &actual_rel).is_ok() {
-            let versions_after = state
-                .scene(scene_id)
-                .and_then(|scene| scene.post.as_ref())
-                .map(|post| post.versions.len())
-                .unwrap_or(0);
-            if versions_after != versions_before
-                || selected_take_count(state, scene_id) != selected_before
-            {
-                changed = true;
-            }
-        }
+        let before = state.scene(scene_id).cloned();
+        if crate::workflow::post::attach_review_export(state,scene_id,&actual_rel).is_ok() && before != state.scene(scene_id).cloned() { changed=true; }
         if let Some(job) = state.jobs.iter_mut().find(|job| job.id == job_id) {
-            let was_complete = job.status == crate::workflow::state::JobStatus::Completed
-                && job.output_asset_ids.contains(&asset_id)
-                && job.completed_at.is_some();
-            job.finish(Some(&actual_rel), Some(&asset_id));
-            if !was_complete {
+            if job.status != crate::workflow::state::JobStatus::Completed || !job.output_asset_ids.contains(&asset_id) {
+                job.finish(Some(&actual_rel), Some(&asset_id));
                 changed = true;
             }
         }
     }
     changed
-}
-
-fn selected_take_count(state: &ProjectState, scene_id: u32) -> usize {
-    state
-        .scene(scene_id)
-        .map(|scene| {
-            scene
-                .cuts
-                .iter()
-                .filter(|cut| {
-                    cut.takes.iter().any(|take| {
-                        take.status == crate::workflow::state::TakeStatus::Selected
-                            && cut.selected_take.as_deref() == Some(take.id.as_str())
-                    })
-                })
-                .count()
-        })
-        .unwrap_or(0)
 }
 
 fn scene_id_from_final_path(path: &str) -> Option<u32> {
@@ -1368,7 +1487,13 @@ pub fn import_project(project_root: &Path, options: ImportOptions) -> Result<Imp
     }
     if let Some(prev) = previous {
         state.state_revision = prev.state_revision;
-        merge_preserved(prev, &mut state);
+        // Keep recipe compatibility diagnostics; fresh scan diagnostics are rebuilt above.
+        for note in &prev.notes {
+            if note.starts_with("Unknown recipe `") && !state.notes.contains(note) {
+                state.notes.push(note.clone());
+            }
+        }
+        merge_preserved(prev, &mut state)?;
     }
     restore_wardrobe_plate_assets(project_root, &mut state);
     restore_render_jobs(project_root, &mut state);
@@ -1636,6 +1761,7 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            assembly_snapshot: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,
@@ -1706,6 +1832,7 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            assembly_snapshot: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,
@@ -1747,6 +1874,7 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            assembly_snapshot: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,
@@ -1804,7 +1932,7 @@ mod tests {
 
         let mut imported = ProjectState::new();
         imported.jobs.push(JobRecord::open("job-new", "render"));
-        merge_preserved(previous, &mut imported);
+        merge_preserved(previous, &mut imported).unwrap();
 
         assert_eq!(imported.jobs.len(), 2);
         let preserved = imported
@@ -1938,6 +2066,7 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            assembly_snapshot: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,
@@ -2040,6 +2169,7 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            assembly_snapshot: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,
@@ -2103,6 +2233,7 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            assembly_snapshot: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,
@@ -2172,6 +2303,13 @@ mod tests {
             ..pending_job_fields()
         });
 
+        assert!(!restore_assemble_jobs(dir.path(), &mut state), "unapproved pending file is not execution proof");
+        assert_eq!(state.jobs[0].status,JobStatus::Pending);
+        assert!(state.scene(1).unwrap().post.is_none());
+        let generated=std::process::Command::new("ffmpeg").args(["-v","error","-y","-f","lavfi","-i","color=blue:s=160x90:r=24:d=0.5","-c:v","libx264","-threads","1"]).arg(dir.path().join(first)).output().unwrap();
+        assert!(generated.status.success());
+        state.jobs[0].assembly_snapshot=Some(vec![crate::workflow::state::AssemblyShotSnapshot{shot_id:"shot_1".into(),cut_label:1,take_id:"take_1".into(),path:"Scenes/Scene1/Cut1/take.mp4".into(),start_seconds:0.0,duration_seconds:0.5,transition:"cut".into()}]);
+        state.jobs[0].finish(Some(first),None); // fixture represents an already-authorized delivered job
         assert!(restore_assemble_jobs(dir.path(), &mut state));
         let job = state.jobs.iter().find(|job| job.id == "job_9").unwrap();
         assert_eq!(job.status, JobStatus::Completed);
@@ -2220,12 +2358,11 @@ mod tests {
             }],
             ..pending_job_fields()
         });
-        assert!(restore_assemble_jobs(dir.path(), &mut state));
+        // Pending must NOT be promoted by file presence alone.
+        assert!(!restore_assemble_jobs(dir.path(), &mut state));
         let versions = &state.scene(1).unwrap().post.as_ref().unwrap().versions;
-        assert_eq!(versions.len(), 2);
+        assert_eq!(versions.len(), 1, "pending promotion refused");
         assert_eq!(versions[0].assembly_path.as_deref(), Some(first));
-        assert_eq!(versions[1].assembly_path.as_deref(), Some(second));
-        assert_ne!(versions[0].id, versions[1].id);
     }
 
     fn pending_job_fields() -> JobRecord {
@@ -2252,6 +2389,7 @@ mod tests {
             retry_of: None,
             spend_category: None,
             reconciliation: None,
+            assembly_snapshot: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,

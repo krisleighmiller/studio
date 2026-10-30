@@ -41,6 +41,7 @@ pub struct VideoStream {
     pub frame_rate: f64,
     pub codec: String,
     pub nb_frames: Option<u64>,
+    pub duration_secs: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,31 +59,7 @@ pub struct AudioLevels {
 
 /// Run a single ffprobe and fold the JSON into a `MediaProbe`.
 pub fn probe_media(path: &Path) -> Result<MediaProbe, String> {
-    if !path.is_file() {
-        return Err(format!("Not a file: {}", path.display()));
-    }
-    let output = Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-        ])
-        .arg(path)
-        .output()
-        .map_err(|error| format!("Could not run ffprobe (is it on PATH?): {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "ffprobe could not decode {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let parsed: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("ffprobe produced invalid JSON: {error}"))?;
-    Ok(parse_ffprobe(&parsed))
+    safe_probe_media(path)
 }
 
 /// Parse ffprobe JSON into a `MediaProbe`. Pure and unit-testable.
@@ -120,6 +97,7 @@ pub fn parse_ffprobe(value: &Value) -> MediaProbe {
                             .get("nb_frames")
                             .and_then(Value::as_str)
                             .and_then(|text| text.parse::<u64>().ok()),
+                        duration_secs: stream.get("duration").and_then(Value::as_str).and_then(|text| text.parse::<f64>().ok()),
                     });
                 }
                 "audio" if audio.is_none() => {
@@ -151,11 +129,87 @@ pub fn parse_ffprobe(value: &Value) -> MediaProbe {
     }
 }
 
+/// Local-confined safe probe with protocol/format restrictions.
+fn safe_probe_media(path: &Path) -> Result<MediaProbe, String> {
+    if !path.is_file() {
+        return Err(format!("Not a file: {}", path.display()));
+    }
+    let output = Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-print_format", "json",
+            "-show_format",
+            "-show_streams",
+            "-protocol_whitelist", "file,pipe",
+            "-format_whitelist", "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mp3,wav,flac,ogg,aiff,aac",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("Could not run ffprobe (is it on PATH?): {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffprobe could not decode {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("ffprobe produced invalid JSON: {error}"))?;
+    Ok(parse_ffprobe(&parsed))
+}
+
+/// Measure actual video-only duration: stream metadata first, then strict decode progress.
+fn measure_video_duration(path: &Path) -> Option<f64> {
+    if let Ok(probe) = safe_probe_media(path) {
+        if let Some(v) = &probe.video {
+            if let Some(d) = v.duration_secs {
+                if d.is_finite() && d > 0.0 {
+                    return Some(d);
+                }
+            }
+        }
+    }
+    let result = Command::new("ffmpeg")
+        .args([
+            "-v", "error", "-nostdin", "-xerror", "-err_detect", "explode",
+            "-protocol_whitelist", "file,pipe",
+            "-format_whitelist", "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mp3,wav,flac,ogg,aiff,aac",
+            "-i",
+        ])
+        .arg(path)
+        .args(["-map", "0:v:0", "-an", "-progress", "pipe:1", "-f", "null", "-"])
+        .output();
+    if let Ok(out) = result {
+        if out.status.success() {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut last_us: Option<u64> = None;
+            for line in stdout.lines() {
+                if let Some(val) = line.strip_prefix("out_time_us=") {
+                    if let Some(u) = val.parse::<u64>().ok() {
+                        last_us = Some(u);
+                    }
+                }
+            }
+            if let Some(us) = last_us {
+                if us > 0 {
+                    return Some(us as f64 / 1_000_000.0);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Run ffmpeg `volumedetect` and return mean/peak levels. Fails when there is no
 /// audio stream to measure.
 pub fn probe_audio_levels(path: &Path) -> Result<AudioLevels, String> {
     let output = Command::new("ffmpeg")
-        .args(["-nostats", "-hide_banner", "-i"])
+        .args([
+            "-nostats", "-hide_banner",
+            "-protocol_whitelist", "file,pipe",
+            "-format_whitelist", "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mp3,wav,flac,ogg,aiff,aac",
+            "-i",
+        ])
         .arg(path)
         .args(["-af", "volumedetect", "-f", "null", "-"])
         .output()
@@ -175,6 +229,90 @@ pub fn parse_volumedetect(stderr: &str) -> Option<AudioLevels> {
         mean_db: parse_db_line(stderr, "mean_volume:")?,
         max_db: parse_db_line(stderr, "max_volume:")?,
     })
+}
+
+/// Validate every encoded video/audio packet, not merely an intact container header.
+/// Assembly formats and protocols are restricted to local self-contained movies.
+pub fn check_full_video_decode(path: &Path) -> Vec<QCFinding> {
+    let result = Command::new("ffmpeg").args(["-v","error","-nostdin","-xerror","-err_detect","explode","-protocol_whitelist","file,pipe","-format_whitelist","mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi","-i"]).arg(path).args(["-map","0:v:0","-map","0:a?","-f","null","-"]).output();
+    match result {
+        Ok(out) if out.status.success() => Vec::new(),
+        Ok(out) => vec![error("full_decode", "Decode", format!("Assembly payload is incomplete or undecodable: {}", String::from_utf8_lossy(&out.stderr).chars().take(1500).collect::<String>()))],
+        Err(e) => vec![error("full_decode", "Decode", format!("Could not verify full assembly decode: {e}"))],
+    }
+}
+
+/// Strict audio-only decode for a required asset (no video stream required).
+pub fn check_audio_decode(path: &Path) -> Vec<QCFinding> {
+    let mut findings = Vec::new();
+    if !path.is_file() {
+        findings.push(error("file_exists","File",format!("Required audio asset missing: {}",path.display())));
+        return findings;
+    }
+    findings.push(info("file_exists","File",format!("Audio asset present: {}",path.display())));
+    let result = Command::new("ffmpeg").args(["-v","error","-nostdin","-xerror","-err_detect","explode","-protocol_whitelist","file,pipe","-format_whitelist","mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mp3,wav,flac,ogg,aiff,aac","-i"]).arg(path).args(["-map","0:a:0","-f","null","-"]).output();
+    let decode_failed = match result {
+        Ok(out) if out.status.success() => false,
+        Ok(out) => { findings.push(error("audio_decode","Audio decode",format!("Audio payload is incomplete or undecodable: {}",String::from_utf8_lossy(&out.stderr).chars().take(1500).collect::<String>()))); true },
+        Err(e) => { findings.push(error("audio_decode","Audio decode",format!("Could not verify audio decode: {e}"))); true },
+    };
+    if !decode_failed {
+        match safe_probe_media(path) {
+            Ok(probe) => {
+                if probe.audio.is_none() {
+                    findings.push(error("audio_stream","Audio stream","Audio file contains no audio stream."));
+                } else {
+                    findings.push(info("audio_stream","Audio stream",format!("{} @ {} Hz.",probe.audio.as_ref().unwrap().codec,probe.audio.as_ref().unwrap().sample_rate)));
+                }
+            }
+            Err(msg) => findings.push(error("audio_probe","Audio probe",format!("Could not probe audio: {msg}"))),
+        }
+    }
+    findings
+}
+
+/// Check selected source video covers required window (start+duration) and decodes fully.
+/// Only errors when source is unreadable or shorter than the window.
+pub fn check_video_source_window(path: &Path, start_secs: f64, duration_secs: f64) -> Vec<QCFinding> {
+    let mut findings = Vec::new();
+    if !start_secs.is_finite() || start_secs < 0.0 || !duration_secs.is_finite() || duration_secs <= 0.0 {
+        findings.push(error("source_window","Window","Requested window range is invalid (non-finite, negative, or non-positive duration)."));
+        return findings;
+    }
+    if !path.is_file() {
+        findings.push(error("source_exists","Source",format!("Selected source missing: {}",path.display())));
+        return findings;
+    }
+    findings.push(info("source_exists","Source",format!("Selected source present: {}",path.display())));
+    let decode = check_full_video_decode(path);
+    findings.extend(decode);
+    if findings.iter().any(|f| f.severity == QCSeverity::Error && f.id == "full_decode") {
+        return findings;
+    }
+    let probe = match safe_probe_media(path) {
+        Ok(p) => p,
+        Err(msg) => {
+            findings.push(error("source_probe","Source probe",format!("Could not probe selected source: {msg}")));
+            return findings;
+        }
+    };
+    if probe.video.is_none() {
+        findings.push(error("no_video","Video stream","Selected source has no video stream."));
+    }
+    let video_dur = measure_video_duration(path);
+    match video_dur {
+        Some(d) if d.is_finite() && d > 0.0 => {
+            let needed = start_secs + duration_secs;
+            if d < needed - 0.15 {
+                findings.push(error("source_window","Window",format!("Source video duration {:.2}s shorter than required window {:.2}s (start {:.2}s + duration {:.2}s).",d,needed,start_secs,duration_secs)));
+            } else {
+                findings.push(info("source_window","Window",format!("Source video duration {:.2}s covers required window {:.2}s.",d,needed)));
+            }
+        }
+        Some(_) => findings.push(error("source_duration","Duration","Measured video duration is non-finite or non-positive.")),
+        None => findings.push(error("source_duration","Duration","Selected source video duration could not be measured.")),
+    }
+    findings
 }
 
 /// Run the full deterministic media QC for one artifact. Any `Error` finding
@@ -576,6 +714,7 @@ mod tests {
                 frame_rate: 30.0,
                 codec: "h264".into(),
                 nb_frames: Some(300),
+                duration_secs: None,
             }),
             audio: Some(AudioStream {
                 sample_rate: 48000,
@@ -603,6 +742,7 @@ mod tests {
                 frame_rate: 24.0,
                 codec: "h264".into(),
                 nb_frames: Some(120),
+                duration_secs: None,
             }),
             audio: None,
         };
@@ -683,6 +823,7 @@ mod tests {
                 frame_rate: 30.0,
                 codec: "h264".into(),
                 nb_frames: Some(30),
+                duration_secs: None,
             }),
             audio: None,
         };
@@ -703,6 +844,7 @@ mod tests {
                 frame_rate: 24.0,
                 codec: "h264".into(),
                 nb_frames: Some(24),
+                duration_secs: None,
             }),
             audio: None,
         };

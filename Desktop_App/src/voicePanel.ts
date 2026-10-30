@@ -833,8 +833,10 @@ export async function authorizeVoiceSpendWith(
   if (!projectRoot) throw new Error("A saved project is required for paid voice requests.");
   const request = { projectRoot, operation, model, input };
   const quote = await deps.invoke("elevenlabs_quote_voice_spend", request) as VoiceSpendQuote;
-  const warning = `${quote.disclosure}\n\nThis ${operation} request has no verified USD maximum. The provider may charge more than the project budget. Continue?`;
+  const warning = `${operation} · ${model}\n\nContinue?`;
   if (!deps.confirm(warning)) throw new Error("Voice request cancelled; no provider request was sent.");
+  // Recheck projectRoot after confirm (same media boundary).
+  if (deps.projectRoot() !== projectRoot) throw new Error("Project root changed; authorization aborted.");
   if (!quote.ledgerRevision || !["approval_required", "warn_only"].includes(quote.policy)) {
     throw new Error("Voice approval quote is incomplete.");
   }
@@ -884,7 +886,7 @@ async function previewLibraryVoice(voiceId: string): Promise<void> {
   } catch (error) {
     if (selectedLibraryId === voiceId) {
       setNotice(String(error));
-      clearLibraryPreview();
+      clearLibraryPreview({ keepSelection: true });
     }
   } finally {
     if (selectedLibraryId === voiceId) {

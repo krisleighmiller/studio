@@ -43,9 +43,6 @@ import { buildAssetsModel, type AssetFilterId } from "./studio/selectors/assets"
 import { renderAssetsView } from "./studio/assetsView";
 import { buildStudioView } from "./studio/viewModel";
 import { renderProjectSummary } from "./studio/components/projectSummary";
-import { renderBudgetSummary } from "./studio/components/budgetSummary";
-import { renderSpendReview, type SpendReviewList, type SpendReviewIntent } from "./studio/components/spendReview";
-import { buildBudgetModel } from "./studio/selectors/budget";
 import { renderWorkspaceStatus } from "./studio/components/workspaceStatus";
 import { mouthLabel, roleLabel, speechLabel } from "./studio/labels";
 import { paintUnknownRecipeStage } from "./studio/recipeStage";
@@ -112,10 +109,9 @@ let selectedSurface: SurfaceId = "production_notes";
 let detailsOpen = false;
 let jobsOpen = false;
 let jobsFilter: JobFilter | "all" = "all";
-let spendReview: SpendReviewList | null = null;
-let spendReviewError: string | null = null;
 let busy: string | null = null;
 let actionNote: string | null = null;
+let actionError: string | null = null;
 
 export function bindWorkflowDesk(next: DeskHooks): void {
   hooks = next;
@@ -215,9 +211,81 @@ export function directorScopeText(): string {
   return describeDirectorContext(state, selection, recipeStageLabel(selection.stage)).scopeText;
 }
 
-export async function refreshWorkflowDesk(): Promise<void> {
+export async function refreshWorkflowJobsOnly(isCurrent: () => boolean = () => true): Promise<void> {
   const root = hooks?.projectRoot();
-  if (!root || !state) return;
+  if (!root || !state || !isCurrent()) return;
+  try {
+    const result = await invoke<{ state?: { jobs?: import("./workflowTypes").JobRecord[] } }>("workflow_status", {
+      projectRoot: root,
+      refresh: false,
+      jobsOnly: true,
+    });
+    if (!result || !result.state || !isCurrent() || hooks?.projectRoot() !== root) return;
+    if (state && result.state.jobs !== undefined) {
+      state.jobs = result.state.jobs;
+      // Refresh only the jobs drawer and shell indicator; do not rerender stage or clear drafts.
+      const rootEl = hooks?.root;
+      if (rootEl) {
+        const panel = rootEl.querySelector<HTMLElement>(".studio-jobs-panel");
+        if (panel) {
+          const open = jobsOpen;
+          const filter = jobsFilter;
+          const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          const hadFocus = Boolean(active && panel.contains(active));
+          const focusJob = hadFocus ? active?.closest<HTMLElement>(".studio-job")?.dataset.jobId : undefined;
+          const focusFilter = hadFocus ? active?.dataset.jobFilter : undefined;
+          const focusToggle = hadFocus && active?.matches(".studio-jobs-toggle");
+          const panelTop = panel.scrollTop;
+          const bodyTop = panel.querySelector<HTMLElement>(".workflow-jobs-body")?.scrollTop ?? 0;
+          const jobsEl = renderJobsView(
+            buildJobsModel({
+              jobs: state.jobs,
+              scenes: state.scenes ?? [],
+              assets: state.assets ?? [],
+              filter,
+            }),
+            open,
+            filter,
+            handleJobsIntent,
+          );
+          panel.replaceChildren(jobsEl);
+          if (hadFocus) {
+            const target = focusJob !== undefined
+              ? [...jobsEl.querySelectorAll<HTMLButtonElement>(".studio-job")].find(button => button.dataset.jobId === focusJob)
+              : focusFilter !== undefined
+                ? [...jobsEl.querySelectorAll<HTMLButtonElement>(".studio-job-filters button")].find(button => button.dataset.jobFilter === focusFilter)
+                : focusToggle ? jobsEl.querySelector<HTMLButtonElement>(".studio-jobs-toggle") : null;
+            const fallback = jobsEl.querySelector<HTMLButtonElement>(".studio-jobs-toggle");
+            (target && !target.disabled ? target : fallback)?.focus({ preventScroll: true });
+          }
+          panel.scrollTop = panelTop;
+          const body = panel.querySelector<HTMLElement>(".workflow-jobs-body");
+          if (body) body.scrollTop = bodyTop;
+        }
+      }
+      // Update shell Jobs button text/indicator via existing summary path.
+      const btn = document.querySelector<HTMLElement>("#jobs-btn");
+      if (btn) {
+        const summary = jobsSummary();
+        const parts = [`Jobs`];
+        if (summary.total) parts.push(`${summary.total}`);
+        if (summary.active) parts.push(`• ${summary.active} active`);
+        if (summary.failed) parts.push(`• ${summary.failed} failed`);
+        btn.textContent = parts.join(" ");
+        btn.classList.toggle("jobs-failed", summary.failed > 0);
+        btn.title = summary.failed
+          ? `${summary.failed} job(s) failed. Open the Jobs drawer for details.`
+          : summary.active ? `${summary.active} job(s) active.` : "Open the Jobs drawer.";
+      }
+    }
+  } catch {
+    // Polling errors must never resubmit or replace original result.
+  }
+}
+
+export async function refreshWorkflowDesk(isCurrent: () => boolean = () => true, publishStatus = true): Promise<void> {
+  const root = hooks?.projectRoot();
+  if (!root || !state || !isCurrent()) return;
   // Provider actions can create new stills, audio, and video files. Re-scan
   // instead of merely reloading the previous state so completed outputs appear
   // in the desk immediately after the Director finishes.
@@ -225,9 +293,11 @@ export async function refreshWorkflowDesk(): Promise<void> {
     projectRoot: root,
     persist: true,
   });
+  // Director refreshes carry their originating operation/epoch through the await.
+  if (!isCurrent() || hooks?.projectRoot() !== root) return;
   const keepNote = actionNote;
   const previousIntentMissing = selectedScene()?.stages.scene_intent === "missing";
-  applyHostResult(result);
+  applyHostResult(result, publishStatus);
   if (!result.note) actionNote = keepNote;
   const scene = selectedScene();
   if (
@@ -249,8 +319,6 @@ export function workflowStatusLine(): string {
 
 export function clearWorkflowDesk(): void {
   state = null;
-  spendReview = null;
-  spendReviewError = null;
   report = null;
   loadError = null;
   selectedSceneId = null;
@@ -267,14 +335,14 @@ export function clearWorkflowDesk(): void {
   detailsOpen = false;
   busy = null;
   actionNote = null;
+  actionError = null;
   resetSurfaceSession();
+  syncSurfaceHost();
   if (hooks) hooks.root.replaceChildren();
 }
 
 export async function loadWorkflowDesk(projectRoot: string): Promise<void> {
   loadError = null;
-  spendReview = null;
-  spendReviewError = null;
   try {
     const result = await invoke<WorkflowImportResult>("workflow_import", {
       projectRoot,
@@ -294,25 +362,27 @@ export async function loadWorkflowDesk(projectRoot: string): Promise<void> {
   }
 }
 
-function applyHostResult(result: WorkflowImportResult): void {
+function applyHostResult(result: WorkflowImportResult, publishStatus = true): void {
   state = result.state;
   report = result.report;
   actionNote = result.note ?? null;
+  actionError = null;
   clearIntentDraft();
   const scene = selectedScene();
   if (!scene) rememberScene(result.state.scenes[0] ?? null);
   else if (!selectedCutRecord()) rememberScene(scene, scene.cuts[0] ?? null);
   renderWorkflowDesk();
   emitSelection();
-  hooks?.onStatus("Production", result.note || workflowStatusLine());
+  if (publishStatus) hooks?.onStatus("Production", result.note || workflowStatusLine());
 }
 
 function requireChat(): { apiId: string; modelId: string } | null {
   const model = hooks?.chatModel() ?? null;
   if (!model?.modelId) {
-    actionNote = "Pick a chat model in the dropdown first.";
+    actionError = "Pick a chat model in the dropdown first.";
+    actionNote = actionError;
     renderWorkflowDesk();
-    hooks?.onStatus("Production", actionNote);
+    hooks?.onStatus("Production", actionError);
     return null;
   }
   return { apiId: model.apiId, modelId: model.modelId };
@@ -328,7 +398,10 @@ async function runAction(
     beforeRun: () => stopRoughCut(),
     onBusy: (next) => {
       busy = next;
-      if (next) actionNote = null;
+      if (next) {
+        actionNote = null;
+        actionError = null;
+      }
       renderWorkflowDesk();
     },
     onResult: (result) => {
@@ -336,9 +409,10 @@ async function runAction(
       if (result.pendingAction) hooks?.onPendingPlan?.(result.pendingAction);
     },
     onError: (message) => {
+      actionError = message;
       actionNote = message;
       renderWorkflowDesk();
-      hooks?.onStatus("Production", actionNote);
+      hooks?.onStatus("Production", actionError);
     },
   });
   return controller.run({ label, cmd, args });
@@ -373,7 +447,7 @@ export function jobsSummary(): { total: number; active: number; failed: number }
 function syncSurfaceHost(): void {
   bindSurfaceHost({
     busy,
-    error: actionNote,
+    error: actionError,
     chatReady: Boolean(hooks?.chatModel()?.modelId),
     state,
     report,
@@ -384,6 +458,7 @@ function syncSurfaceHost(): void {
     requireChat,
     rerender: () => renderWorkflowDesk(),
     setError: (message) => {
+      actionError = message;
       actionNote = message;
     },
     rememberScene: (scene, cut) => rememberScene(scene, cut),
@@ -1011,9 +1086,6 @@ function handleProfileIntent(intent: ProfileIntent): void {
     case "save":
       void runAction("Saving production profile", "workflow_save_profile", { profile: intent.profile });
       break;
-    case "set-budget":
-      void runAction("Saving spend budget", "workflow_set_budget", { budget: intent.budget });
-      break;
     case "set-requirement":
       void runAction(`Updating ${intent.name}`, "workflow_set_requirement_status", {
         requirementId: intent.requirementId,
@@ -1111,6 +1183,14 @@ function handleTakeReviewIntent(scene: SceneRecord, intent: TakeReviewIntent): v
         status: intent.status,
       });
       break;
+    case "delete-take":
+      void confirmNotesDeleteTake(scene, {
+        type: "delete-take",
+        cut: intent.cut,
+        takeId: intent.takeId,
+        path: intent.path,
+      });
+      break;
     default:
       break;
   }
@@ -1157,6 +1237,9 @@ function handleNotesIntent(scene: SceneRecord, intent: NotesIntent): void {
       });
       break;
     }
+    case "resume-audio":
+      void runAction("Preparing saved-audio recovery…", "workflow_prepare_render", { sceneId: scene.id, cut: intent.cut, resumeSavedAudio: true });
+      break;
     case "render":
       void runAction("Preparing render…", "workflow_prepare_render", {
         sceneId: scene.id,
@@ -1283,7 +1366,8 @@ function handleReferenceIntent(scene: SceneRecord, intent: ReferenceIntent): voi
       break;
     case "edit":
       if (!intent.brief.trim()) {
-        actionNote = `Enter an edit brief under Cut ${intent.cut} first.`;
+        actionError = `Enter an edit brief under Cut ${intent.cut} first.`;
+        actionNote = actionError;
         renderWorkflowDesk();
         return;
       }
@@ -1484,7 +1568,7 @@ function renderSceneIntentWorkspace(scene: SceneRecord): HTMLElement {
     buildIntentModel({
       scene,
       busy,
-      error: actionNote,
+      error: actionError,
       chatReady: Boolean(hooks?.chatModel()?.modelId),
       blocked: sceneBlockers(scene.id).map((requirement) => requirement.name),
     }),
@@ -1837,7 +1921,6 @@ function renderInspector(): HTMLElement {
 function renderJobsPanel(): HTMLElement {
   const panel = document.createElement("div");
   panel.className = "studio-jobs-panel";
-  const budget = renderBudgetSummary(buildBudgetModel(state));
   const jobs = renderJobsView(
     buildJobsModel({
       jobs: state?.jobs ?? [],
@@ -1850,62 +1933,11 @@ function renderJobsPanel(): HTMLElement {
     handleJobsIntent,
   );
   if (jobsOpen) {
-    // Detailed accounting belongs INSIDE the expandable Jobs region, so a
-    // collapsed Jobs band is actually compact instead of leaking rows.
-    jobs.append(renderSpendReview(spendReview, () => { void loadSpendReview(); }, (intent) => { void submitSpendReview(intent); }));
-    if (spendReviewError) {
-      const error = document.createElement("p");
-      error.setAttribute("role", "alert");
-      error.textContent = spendReviewError;
-      jobs.append(error);
-    }
-    panel.append(budget, jobs);
+    panel.append(jobs);
   } else {
-    panel.append(jobs, budget);
-    if (spendReview && spendReview.jobs.length > 0) {
-      // Required cost visibility survives collapse as a one-line pointer;
-      // the full disclosures return when Jobs opens.
-      const chip = document.createElement("span");
-      chip.className = "studio-spend-chip";
-      chip.textContent = `Paid media · ${spendReview.jobs.length} unsettled — open Jobs to review`;
-      panel.append(chip);
-    }
+    panel.append(jobs);
   }
   return panel;
-}
-
-async function loadSpendReview(): Promise<void> {
-  const root = hooks?.projectRoot();
-  if (!root) return;
-  try {
-    spendReview = await invoke<SpendReviewList>("workflow_unsettled_spend", { projectRoot: root });
-    spendReviewError = null;
-  } catch (error) {
-    spendReview = null;
-    spendReviewError = error instanceof Error ? error.message : String(error);
-  }
-  renderWorkflowDesk();
-}
-
-async function submitSpendReview(intent: SpendReviewIntent): Promise<void> {
-  const root = hooks?.projectRoot();
-  if (!root || busy) return;
-  busy = "Recording manual review";
-  renderWorkflowDesk();
-  try {
-    await invoke("workflow_reconcile_spend", { projectRoot: root, ...intent });
-    spendReview = null;
-    spendReviewError = null;
-    await refreshWorkflowDesk();
-    await loadSpendReview();
-    actionNote = "Manual evidence review recorded; provider verification was not performed.";
-  } catch (error) {
-    spendReview = null; // A failed/stale decision must not remain submit-ready.
-    spendReviewError = error instanceof Error ? error.message : String(error);
-  } finally {
-    busy = null;
-    renderWorkflowDesk();
-  }
 }
 
 function handleJobsIntent(intent: JobsIntent): void {

@@ -69,7 +69,9 @@ pub fn apply_host_defaults(
     }
 }
 
-/// Speech floor plus policy handles, then pace, then the smallest legal bucket.
+/// Dialogue Tight/Natural editorial time is speech / speech + natural air.
+/// Handles and provider buckets belong to source coverage, not editorial time.
+/// Held and silent-shot policies retain their existing bucket-based behavior.
 pub fn resolve_duration(
     speech_total: f64,
     pace: Pace,
@@ -96,7 +98,13 @@ pub fn resolve_duration(
         Pace::Tight | Pace::Natural => tight,
         Pace::Held => config.policy_for(lane).next_above(tight).unwrap_or(tight),
     };
-    let screen = (render - head - tail).max(speech_total);
+    let screen = match pace {
+        Pace::Tight if speech_total > 0.0 => speech_total,
+        Pace::Natural if speech_total > 0.0 => speech_total + NATURAL_AIR_SECONDS,
+        // Held intentionally requests a longer hold; no new hold policy is
+        // inferred here. Silent shots have no dialogue-derived duration.
+        _ => (render - head - tail).max(speech_total),
+    };
     Ok(ResolvedDuration {
         screen_seconds: round2(screen),
         head_handle_seconds: head,
@@ -298,13 +306,68 @@ mod tests {
     }
 
     #[test]
-    fn tight_snaps_to_smallest_bucket() {
+    fn tight_editorial_duration_is_dialogue_not_bucket() {
         let cfg = HostConfig::default();
         let d = resolve_duration(4.36, Pace::Tight, RenderLane::AudioDrivenI2v, &cfg).unwrap();
         assert_eq!(d.render_duration_seconds, 10.0);
         assert_eq!(d.head_handle_seconds, 0.5);
         assert_eq!(d.tail_handle_seconds, 0.5);
-        assert!((d.screen_seconds - 9.0).abs() < 1e-9);
+        assert_eq!(d.screen_seconds, 4.36);
+        assert_eq!(d.minimum_source_seconds, 5.36);
+    }
+
+    #[test]
+    fn dialogue_editorial_time_is_independent_of_provider_buckets() {
+        use crate::scene_plan::config::RenderDurationPolicy;
+        for (pace, expected_screen, expected_minimum) in [
+            (Pace::Tight, 4.0, 5.0),
+            (Pace::Natural, 5.0, 6.0),
+        ] {
+            for buckets in [&[5.0, 10.0][..], &[8.0, 12.0][..]] {
+                let mut cfg = HostConfig::default();
+                cfg.audio_driven_render = RenderDurationPolicy::buckets(buckets);
+                let d = resolve_duration(4.0, pace, RenderLane::AudioDrivenI2v, &cfg).unwrap();
+                assert_eq!(d.screen_seconds, expected_screen, "{pace:?} {buckets:?}");
+                assert_eq!(d.minimum_source_seconds, expected_minimum);
+                assert!(d.render_duration_seconds >= d.minimum_source_seconds);
+                assert!(buckets.contains(&d.render_duration_seconds));
+                assert!(d.screen_seconds >= 4.0);
+            }
+        }
+    }
+
+    #[test]
+    fn dialogue_pauses_handles_and_source_limits_remain_distinct() {
+        let cfg = HostConfig { head_handle_seconds: 0.25, tail_handle_seconds: 0.75, ..HostConfig::default() };
+        // The existing cue estimator includes explicit pauses in speech_total.
+        for (pace, screen, minimum) in [(Pace::Tight, 4.75, 5.75), (Pace::Natural, 5.75, 6.75)] {
+            let d = resolve_duration(4.75, pace, RenderLane::AudioDrivenI2v, &cfg).unwrap();
+            assert_eq!(d.screen_seconds, screen);
+            assert_eq!(d.minimum_source_seconds, minimum);
+            assert_eq!(d.head_handle_seconds, 0.25);
+            assert_eq!(d.tail_handle_seconds, 0.75);
+            assert_eq!(d.render_duration_seconds, 10.0);
+        }
+        assert!(resolve_duration(9.01, Pace::Tight, RenderLane::AudioDrivenI2v, &cfg).is_err());
+        assert!(resolve_duration(8.01, Pace::Natural, RenderLane::AudioDrivenI2v, &cfg).is_err());
+    }
+
+    #[test]
+    fn held_and_silent_policy_is_not_reinterpreted() {
+        let cfg = HostConfig::default();
+        for (speech, pace, screen, render) in [
+            (0.0, Pace::Tight, 4.0, 5.0),
+            (0.0, Pace::Natural, 4.0, 5.0),
+            (0.0, Pace::Held, 9.0, 10.0),
+            (2.0, Pace::Held, 9.0, 10.0),
+            (8.0, Pace::Held, 9.0, 10.0),
+        ] {
+            let d = resolve_duration(speech, pace, RenderLane::AudioDrivenI2v, &cfg).unwrap();
+            assert_eq!(d.screen_seconds, screen);
+            assert_eq!(d.render_duration_seconds, render);
+            assert!(d.screen_seconds >= speech);
+            assert!(d.render_duration_seconds >= d.minimum_source_seconds);
+        }
     }
 
     #[test]

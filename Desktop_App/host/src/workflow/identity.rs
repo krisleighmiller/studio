@@ -107,9 +107,14 @@ pub fn reorder_cuts(
     )
 }
 
-/// Attach saved stable ids to the cuts that still have the same production note,
+/// Attach saved stable ids to the cuts that still have the same source,
 /// move takes onto those cuts, and restore the saved label order.
-pub fn adopt(state: &mut ProjectState, previous: &ProjectState) {
+///
+/// Correspondence is one-to-one by (production path, source_origin). Legacy
+/// originless records key on a unique production path or the display label pair.
+/// Shared production paths without a captured source origin cannot be mapped and
+/// return an explicit ambiguity error instead of guessing.
+pub fn adopt(state: &mut ProjectState, previous: &ProjectState) -> Result<(), String> {
     let kept_assets: HashSet<String> = previous
         .assets
         .iter()
@@ -126,9 +131,27 @@ pub fn adopt(state: &mut ProjectState, previous: &ProjectState) {
         if state.scenes[index].stable_id.is_empty() && !old_scene.stable_id.is_empty() {
             state.scenes[index].stable_id = old_scene.stable_id.clone();
         }
+        // Enforce bijection: no two old cuts may claim the same destination cut.
+        let mut claimed_dests: HashSet<usize> = HashSet::new();
         for old_cut in &old_scene.cuts {
-            let Some(dest) = dest_index(&state.scenes[index], old_cut) else {
-                continue;
+            match correspond_cut(&state.scenes[index], old_cut) {
+                Ok(Some(dest)) => {
+                    if !claimed_dests.insert(dest) {
+                        return Err(format!(
+                            "duplicate saved source origin mapping: two old cuts claim destination cut {} in scene {}",
+                            dest, old_scene.id
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(message) => return Err(message),
+            }
+        }
+        for old_cut in &old_scene.cuts {
+            let dest = match correspond_cut(&state.scenes[index], old_cut) {
+                Ok(Some(index)) => index,
+                Ok(None) => continue,
+                Err(message) => return Err(message),
             };
             let cut = &mut state.scenes[index].cuts[dest];
             if cut.stable_id.is_empty() && !old_cut.stable_id.is_empty() {
@@ -139,8 +162,10 @@ pub fn adopt(state: &mut ProjectState, previous: &ProjectState) {
             }
         }
         for old_cut in &old_scene.cuts {
-            let Some(dest) = dest_index(&state.scenes[index], old_cut) else {
-                continue;
+            let dest = match correspond_cut(&state.scenes[index], old_cut) {
+                Ok(Some(index)) => index,
+                Ok(None) => continue,
+                Err(message) => return Err(message),
             };
             claim_takes(&mut state.scenes[index], dest, old_cut);
         }
@@ -155,6 +180,7 @@ pub fn adopt(state: &mut ProjectState, previous: &ProjectState) {
             );
         }
     }
+    Ok(())
 }
 
 pub fn record_version(state: &mut ProjectState, asset_id: &str, status: AssetStatus) {
@@ -393,21 +419,85 @@ fn retarget_assets(
     }
 }
 
-fn dest_index(scene: &SceneRecord, old: &CutRecord) -> Option<usize> {
-    if let Some(path) = &old.production_note_path {
-        if let Some(index) = scene
+/// Common one-to-one source correspondence between a saved cut and the cuts
+/// currently held in a scene.
+///
+/// Keys on the saved source production path plus the captured source origin
+/// (`source_scene`/`cut`) whenever one exists. This makes reorder-then-reimport
+/// of a shared production master stable: two cuts pointing at the same
+/// `production_note_path` stay distinct by their source origin.
+///
+/// Legacy originless records key on a unique production path only, or on the
+/// display label pair when no production path survived. Unique per-cut source
+/// paths therefore keep working unchanged.
+///
+/// Returns `Ok(Some(index))` for an unambiguous match, `Ok(None)` when the
+/// saved source is gone, and `Err(...)` when a shared production path lacks a
+/// captured source origin and cannot be mapped unambiguously (never guesses).
+pub fn correspond_cut(scene: &SceneRecord, old: &CutRecord) -> Result<Option<usize>, String> {
+    let Some(path) = old.production_note_path.clone() else {
+        // Legacy fallback: no production path survived. Match the display label
+        // pair, falling back to the stable id for renumbered saved cuts.
+        return Ok(scene
             .cuts
             .iter()
-            .position(|cut| cut.production_note_path.as_ref() == Some(path))
-        {
-            return Some(index);
+            .position(|cut| cut.id.cut == old.id.cut)
+            .or_else(|| scene.cuts.iter().position(|cut| cut.stable_id == old.stable_id)));
+    };
+    let origin = old.source_origin.as_ref();
+    let path_filter = |cut: &CutRecord| cut.production_note_path.as_ref() == Some(&path);
+    let origin_filter = |cut: &CutRecord| cut.source_origin.as_ref() == origin;
+
+    // Prefer exact (source path, source origin) correspondence.
+    if let Some(origin) = origin {
+        let matches: Vec<usize> = scene
+            .cuts
+            .iter()
+            .enumerate()
+            .filter(|(_, cut)| path_filter(*cut) && origin_filter(*cut))
+            .map(|(index, _)| index)
+            .collect();
+        match matches.len() {
+            0 => return Ok(None),
+            1 => return Ok(Some(matches[0])),
+            _ => {
+                return Err(format!(
+                    "ambiguous source origin for saved shot `{}`: {}/{} cuts share source `{path}` \
+                     and origin `{}`",
+                    old.stable_id,
+                    matches.len(),
+                    scene.cuts.len(),
+                    CutId {
+                        source_scene: origin.source_scene,
+                        cut: origin.cut,
+                    }
+                ));
+            }
         }
     }
-    scene.cuts.iter().position(|cut| {
-        cut.id.cut == old.id.cut
-            && (old.production_note_path.is_none()
-                || cut.production_note_path == old.production_note_path)
-    })
+
+    // Fall back for originless saved records or missed origins: match by source
+    // path alone. Shared paths without a saved origin are ambiguous.
+    let matches: Vec<usize> = scene
+        .cuts
+        .iter()
+        .enumerate()
+        .filter(|(_, cut)| path_filter(*cut))
+        .map(|(index, _)| index)
+        .collect();
+    if matches.is_empty() {
+        return Ok(None);
+    }
+    if matches.len() > 1 && origin.is_none() {
+        return Err(format!(
+            "ambiguous production path `{path}` for saved shot `{}`: {}/{} current cuts share \
+             the path but the saved cut has no source origin; refusing to guess a source",
+            old.stable_id,
+            matches.len(),
+            scene.cuts.len()
+        ));
+    }
+    Ok(matches.first().copied())
 }
 
 fn claim_takes(scene: &mut SceneRecord, dest: usize, old: &CutRecord) {
@@ -604,7 +694,7 @@ mod tests {
         let second = cut(1, 2, "shot_a", "Scene_Prompts/Scene1/Cut1.txt");
         scene.cuts = vec![first, second];
 
-        adopt(&mut fresh, &previous);
+        adopt(&mut fresh, &previous).unwrap();
 
         let scene = fresh.scene(1).unwrap();
         assert_eq!(scene.stable_id, "scene_4");

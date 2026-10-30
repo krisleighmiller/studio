@@ -32,7 +32,9 @@ Trust, in order:
 2. The user’s current question
 3. General workbench pipeline knowledge below
 
-If a needed file is missing, say exactly which path to attach or open. Do not invent file contents.
+When a needed source file is missing or unreadable, identify the source and stop. Do not invent file contents, produce a completed digest from incomplete sources, or return an error/status message as digest content to save.
+
+Source paths identify the existing documents to read. A host-provided `output_path` identifies only where a requested digest will be saved; it is not another source and need not exist yet. For example, digesting `script.md` and `prod.md` into `Research/stop_check.md` requires the first two files, not an existing `stop_check.md`. Use the documents actually attached by the host, not unrelated focused/selected documents.
 
 ## Pipeline shapes (quick checks)
 

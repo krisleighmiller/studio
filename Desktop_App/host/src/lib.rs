@@ -15,6 +15,7 @@ pub mod http_util;
 pub mod kling;
 pub mod luma;
 pub mod media;
+pub mod media_inspect;
 pub mod media_util;
 pub mod openai_images;
 pub mod output_paths;
@@ -36,6 +37,10 @@ pub mod text_writes;
 pub mod voice;
 pub mod voice_spend;
 pub mod workflow;
+pub(crate) mod workflow_continuation;
+
+#[cfg(test)]
+mod cancellation_publication_tests;
 
 use crate::ctx::HostCtx;
 use crate::voice::RecorderState;
@@ -48,6 +53,13 @@ pub fn dispatch(
     cmd: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    let progress_id = if matches!(cmd, "director_turn" | "director_approve") {
+        args.get("progressId").and_then(Value::as_str)
+    } else {
+        None
+    };
+    let request_app = app.for_request().with_progress_id(progress_id);
+    let app = &request_app;
     match cmd {
         "open_project" => {
             let path = arg_string(args, "path")?;
@@ -176,29 +188,7 @@ pub fn dispatch(
             let id = arg_string(args, "id")?;
             to_value(director::director_approve(app.clone(), id))
         }
-        "confirm_spend" => {
-            let root = crate::session::command_root(opt_string(args, "projectRoot").as_deref())?;
-            let provider = arg_string(args, "provider")?;
-            let category = arg_string(args, "category")?;
-            let operation = arg_string(args, "operation")?;
-            let capability = arg_string(args, "capability")?;
-            let model = arg_string(args, "model")?;
-            let revision = arg_string(args, "ledgerRevision")?;
-            let amount = args
-                .get("amountMinor")
-                .and_then(Value::as_i64)
-                .ok_or("Missing quoted amountMinor")?;
-            to_value(crate::workflow::spend::confirm_quoted(
-                &root,
-                &provider,
-                &category,
-                &operation,
-                &capability,
-                &model,
-                &revision,
-                amount,
-            ))
-        }
+        "confirm_spend" => Err("Project accounting has been retired.".into()),
         "confirm_unbounded_spend" => {
             let root = crate::session::command_root(opt_string(args, "projectRoot").as_deref())?;
             let provider = arg_string(args, "provider")?;
@@ -279,7 +269,7 @@ pub fn dispatch(
                     out.push_str(&note);
                 }
             }
-            Ok(json!(out))
+            if let Some(continuation) = app.take_workflow_reply() { Ok(json!({"mediaResult": out, "continuation": continuation})) } else { Ok(json!(out)) }
         }
         "media_recovery_status" => to_value(media::recovery_status(
             opt_string(args, "projectRoot").as_deref(),
@@ -318,30 +308,7 @@ pub fn dispatch(
                 arg_string(args, "ledgerRevision")?,
             ))
         }
-        "elevenlabs_confirm_voice_spend" => {
-            let project_root = arg_string(args, "projectRoot")?;
-            let operation = arg_string(args, "operation")?;
-            let model = arg_string(args, "model")?;
-            let input = arg_string(args, "input")?;
-            let ceiling_minor = args
-                .get("ceilingMinor")
-                .and_then(|v| v.as_i64())
-                .ok_or("Positive integer USD cents ceiling required")?;
-            let evidence = arg_string(args, "evidence")?;
-            let attested = args
-                .get("attested")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            to_value(elevenlabs::elevenlabs_confirm_voice_spend(
-                project_root,
-                operation,
-                model,
-                input,
-                ceiling_minor,
-                evidence,
-                attested,
-            ))
-        }
+        "elevenlabs_confirm_voice_spend" => Err("Project accounting has been retired.".into()),
         "elevenlabs_tts_preview" => {
             let voice_id = arg_string(args, "voiceId")?;
             let text = arg_string(args, "text")?;
@@ -434,15 +401,15 @@ pub fn dispatch(
         }
         "workflow_import" => workflow::cmd_import(args),
         "workflow_status" => workflow::cmd_status(args),
-        "workflow_unsettled_spend" => workflow::cmd_unsettled_spend(args),
-        "workflow_reconcile_spend" => workflow::cmd_reconcile_spend(args),
+        "workflow_unsettled_spend" => Err("Project accounting has been retired.".into()),
+        "workflow_reconcile_spend" => Err("Project accounting has been retired.".into()),
         "workflow_save_character" => workflow::cmd_save_character(args),
         "workflow_draft_intent" => workflow::cmd_draft_intent(app, args),
         "workflow_save_intent" => workflow::cmd_save_intent(args),
         "workflow_approve_intent" => workflow::cmd_approve_intent(args),
         "workflow_set_strategy" => workflow::cmd_set_strategy(args),
         "workflow_save_profile" => workflow::cmd_save_profile(args),
-        "workflow_set_budget" => workflow::cmd_set_budget(args),
+        "workflow_set_budget" => Err("Project accounting has been retired.".into()),
         "workflow_set_requirement_status" => workflow::cmd_set_requirement_status(args),
         "workflow_add_requirement" => workflow::cmd_add_requirement(args),
         "workflow_backfill_sketches" => workflow::cmd_backfill_sketches(args),
@@ -491,7 +458,11 @@ pub fn dispatch(
         "workflow_approve_start_frame" => workflow::cmd_approve_start_frame(args),
         "workflow_reject_start_frame" => workflow::cmd_reject_start_frame(args),
         "workflow_delete_start_frame" => workflow::cmd_delete_start_frame(args),
-        "director_cancel" => Ok(json!({ "cancelled": true })),
+        "director_cancel" => {
+            app.cancel_director();
+            pending::cancel_workflow();
+            Ok(json!({ "cancelled": true }))
+        }
         "ping" => Ok(json!("pong")),
         // Build identity: lets test harnesses prove which binary the app
         // loaded. `mock_provider` is true only in builds compiled with
@@ -659,6 +630,18 @@ mod protected_workflow_tests {
         }
         // A mock provider is invoked only after the reservation; rejected generic
         // writes must not change the running job, revision or active lock.
+        let request_hash = workflow::spend::fingerprint(b"mock reservation request bytes").unwrap();
+        let quote = workflow::spend::quote_unbounded_scoped(&root, &request_hash).unwrap();
+        let token = workflow::spend::confirm_unbounded_scoped(
+            &root,
+            "atlas-cloud",
+            "media",
+            "atlas_generate_image",
+            "model",
+            &request_hash,
+            &quote.ledger_revision,
+        )
+        .unwrap();
         workflow::spend::run_scoped_with_request(
             &root,
             "atlas-cloud",
@@ -666,12 +649,17 @@ mod protected_workflow_tests {
             "atlas_generate_image",
             "image.text_to_image",
             "model",
+            Some(&token),
             None,
+            Some(workflow::state::SpendRequestMetadata {
+                request_hash,
+                disclosure: None,
+                duration_seconds: None,
+                width: None,
+                height: None,
+                prediction_id: None,
+            }),
             None,
-            None,
-            Some(workflow::spend::VerifiedMaximum::synthetic_for_test(
-                "USD", 7,
-            )),
             || {
                 let reserved_bytes = fs::read(&state).unwrap();
                 let before = workflow::state::ProjectState::from_json(

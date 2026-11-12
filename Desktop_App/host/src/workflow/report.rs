@@ -226,6 +226,7 @@ pub fn project_report(state: &ProjectState) -> ProjectReport {
     let scenes: Vec<SceneReport> = state
         .scenes
         .iter()
+        .filter(|scene| !scene.source_missing)
         .map(|scene| scene_report(scene, &active))
         .collect();
     let identity_ready = state.characters.iter().filter(|c| c.identity_ready).count();

@@ -1,0 +1,51 @@
+{
+  "assets": [],
+  "characters": [],
+  "jobs": [
+    {
+      "actual_verified": false,
+      "error": "Preserve history",
+      "id": "history",
+      "kind": "render",
+      "status": "failed",
+      "unbounded_exposure": false
+    }
+  ],
+  "profile": {
+    "deliverables": [
+      {
+        "id": "del_untitled",
+        "name": "Untitled"
+      }
+    ],
+    "recipe": "narrative_dialogue"
+  },
+  "scenes": [
+    {
+      "cuts": [],
+      "id": 1,
+      "intent": {
+        "narrative_purpose": "An offline room reference"
+      },
+      "intent_approved": true,
+      "stable_id": "scene_1",
+      "stages": {
+        "assemble": "missing",
+        "characters": "missing",
+        "cut_sketches": "missing",
+        "production_notes": "missing",
+        "reference_images": "missing",
+        "render": "missing",
+        "scene_intent": "approved",
+        "scene_look": "missing",
+        "script": "missing",
+        "take_review": "missing"
+      },
+      "title": "Local look"
+    }
+  ],
+  "scripts": [],
+  "settings": {},
+  "state_revision": 3,
+  "version": 2
+}

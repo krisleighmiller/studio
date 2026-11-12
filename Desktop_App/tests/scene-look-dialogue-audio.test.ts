@@ -1,0 +1,21 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { renderSceneDialogueAudio } from '../src/studio/sceneDialogueAudio';
+import { bindSurfaceHost, resetSurfaceSession } from '../src/studio/surfaces/session';
+import type { SurfaceHost } from '../src/studio/surfaces/host';
+const fixture = JSON.parse(readFileSync('tests/fixtures/sb15-native-card.json', 'utf8'));
+afterEach(() => { resetSurfaceSession(); document.body.replaceChildren(); });
+it('prepares speech for the exact cut and explicitly chosen voice, without an image or video prompt', () => {
+ const state = structuredClone(fixture.initial.state), scene = state.scenes[0], cut = scene.cuts[0];
+ cut.speech_mode='source_video_lipsync'; cut.dialogue=[{speaker:'A',text:'All of the first line.'},{speaker:'A',text:'And the second line.'}];
+ cut.production_note_path=null; cut.approved_start_frame=null;
+ state.assets.push({id:'voice-one',path:'Characters/A/voice.wav',role:'voice_sample',status:'draft'});
+ bindSurfaceHost({state,busy:null,resolvePath:(p:string)=>p,mediaUrl:async(p:string)=>p} as unknown as SurfaceHost);
+ const emit=vi.fn(), root=renderSceneDialogueAudio(scene,emit); document.body.append(root);
+ expect(root.textContent).toContain('And the second line.');
+ const generate=[...root.querySelectorAll('button')].find(b=>b.textContent==='Generate dialogue audio…')!;
+ expect(generate.disabled).toBe(true);
+ const voice=root.querySelector('select')!; voice.value='voice-one'; voice.dispatchEvent(new Event('change')); generate.click();
+ expect(emit).toHaveBeenCalledWith({type:'generate-dialogue',cut:cut.id.cut,voiceAssetId:'voice-one'});
+ expect(root.textContent).not.toContain('Prepare video only with selected WAV');
+});

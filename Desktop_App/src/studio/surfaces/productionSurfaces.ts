@@ -16,6 +16,7 @@
  */
 export { bindSurfaceHost, resetSurfaceSession, setProfileOpen, noteCharacterSaved, stopRoughCut } from "./session";
 export type {
+  ScriptDraftIntent,
   SketchIntent,
   ReferenceIntent,
   NotesIntent,
@@ -34,3 +35,5 @@ export { renderAssembleStage } from "./assembleStage";
 export { renderCharactersStage } from "./charactersStage";
 export { renderProjectProfile } from "./profileStage";
 export { renderReadiness } from "./readinessStage";
+export { renderScriptDraftForm } from "./scriptDraftForm";
+export type { ScriptDraft, ScriptDraftText } from "./scriptDraftForm";

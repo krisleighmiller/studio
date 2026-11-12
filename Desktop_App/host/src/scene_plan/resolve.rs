@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 const NATURAL_AIR_SECONDS: f64 = 1.0;
+pub const HELD_DIALOGUE_BEAT_SECONDS: f64 = 1.0;
 const DEFAULT_ASPECT: &str = "9:16";
 
 fn cue_suffix_re() -> &'static Regex {
@@ -71,7 +72,7 @@ pub fn apply_host_defaults(
 
 /// Dialogue Tight/Natural editorial time is speech / speech + natural air.
 /// Handles and provider buckets belong to source coverage, not editorial time.
-/// Held and silent-shot policies retain their existing bucket-based behavior.
+/// Held dialogue has a deliberate beat; silent shots retain bucket-based holds.
 pub fn resolve_duration(
     speech_total: f64,
     pace: Pace,
@@ -91,16 +92,19 @@ pub fn resolve_duration(
     let floor = match pace {
         Pace::Tight => speech_total + head + tail,
         Pace::Natural => speech_total + head + tail + NATURAL_AIR_SECONDS,
+        Pace::Held if speech_total > 0.0 => speech_total + HELD_DIALOGUE_BEAT_SECONDS + head + tail,
         Pace::Held => speech_total + head + tail,
     };
     let tight = config.choose_render_duration(lane, floor.max(speech_total + head + tail))?;
     let render = match pace {
         Pace::Tight | Pace::Natural => tight,
-        Pace::Held => config.policy_for(lane).next_above(tight).unwrap_or(tight),
+        Pace::Held if speech_total <= 0.0 => config.policy_for(lane).next_above(tight).unwrap_or(tight),
+        Pace::Held => tight,
     };
     let screen = match pace {
         Pace::Tight if speech_total > 0.0 => speech_total,
         Pace::Natural if speech_total > 0.0 => speech_total + NATURAL_AIR_SECONDS,
+        Pace::Held if speech_total > 0.0 => speech_total + HELD_DIALOGUE_BEAT_SECONDS,
         // Held intentionally requests a longer hold; no new hold policy is
         // inferred here. Silent shots have no dialogue-derived duration.
         _ => (render - head - tail).max(speech_total),
@@ -234,7 +238,7 @@ fn usable_existing(assets: &[ReferenceAsset]) -> Vec<ReferenceAsset> {
         .filter(|a| {
             matches!(
                 a.role,
-                AssetRole::StartFrame | AssetRole::CharacterReference
+                AssetRole::StartFrame | AssetRole::CharacterReference | AssetRole::StyleReference
             ) && !a.path.trim().is_empty()
         })
         .cloned()
@@ -275,6 +279,15 @@ pub fn apply_duration(handoff: &mut SceneHandoff, timing: &ResolvedDuration) {
 mod tests {
     use super::*;
     use crate::scene_plan::handoff::Cue;
+
+    #[test]
+    fn lip_sync_preserves_an_explicit_shared_scene_reference() {
+        let asset = ReferenceAsset { path: "Preproduction/Scene1/references/interior_1.png".into(), role: AssetRole::StyleReference };
+        let speaker = BTreeSet::from(["Kris".to_string()]);
+        let resolved = resolve_generation(Some(SpeechMode::SourceVideoLipsync), &speaker, &[], None, &[asset.clone()]);
+        assert_eq!(resolved.reference_assets, vec![asset]);
+        assert_eq!(resolved.source_mode, SourceMode::ReferenceToVideo);
+    }
 
     #[test]
     fn cue_ids_are_rewritten_to_the_cut() {
@@ -359,7 +372,7 @@ mod tests {
             (0.0, Pace::Tight, 4.0, 5.0),
             (0.0, Pace::Natural, 4.0, 5.0),
             (0.0, Pace::Held, 9.0, 10.0),
-            (2.0, Pace::Held, 9.0, 10.0),
+            (2.0, Pace::Held, 3.0, 5.0),
             (8.0, Pace::Held, 9.0, 10.0),
         ] {
             let d = resolve_duration(speech, pace, RenderLane::AudioDrivenI2v, &cfg).unwrap();
@@ -368,6 +381,15 @@ mod tests {
             assert!(d.screen_seconds >= speech);
             assert!(d.render_duration_seconds >= d.minimum_source_seconds);
         }
+    }
+
+    #[test]
+    fn held_dialogue_keeps_a_deliberate_beat_without_filling_the_provider_bucket() {
+        let cfg = HostConfig::default();
+        let d = resolve_duration(4.73, Pace::Held, RenderLane::AudioDrivenI2v, &cfg).unwrap();
+        assert_eq!(d.screen_seconds, 5.73);
+        assert_eq!(d.render_duration_seconds, 10.0);
+        assert_eq!(d.minimum_source_seconds, 6.73);
     }
 
     #[test]

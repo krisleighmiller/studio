@@ -63,9 +63,11 @@ pub fn sync(state: &mut ProjectState) -> bool {
                 id: format!("anim_shot_{next_shot}"),
                 cut_id,
                 duration_seconds: duration,
+                auto_duration_seed_seconds: Some(duration),
                 scratch_audio_path: None,
                 trim_in_seconds: None,
                 trim_out_seconds: None,
+                trim_source_take_id: None,
                 transition: None,
             });
             next_shot += 1;
@@ -77,6 +79,44 @@ pub fn sync(state: &mut ProjectState) -> bool {
         }
     }
     changed
+}
+
+/// Reconcile a newly selected talking take only when the animatic still has
+/// its untouched word-count seed. Never stretch the source or override trims,
+/// approval, or a distinct editorial duration. The extra second is deliberate
+/// post-line air, not provider bucket padding.
+pub fn reconcile_measured_performance(
+    scene: &mut SceneRecord,
+    cut_id: CutId,
+    speech_seconds: f64,
+    lead_seconds: f64,
+    source_seconds: f64,
+) -> Result<bool, String> {
+    if !speech_seconds.is_finite() || speech_seconds <= 0.0
+        || !lead_seconds.is_finite() || lead_seconds < 0.0
+        || !source_seconds.is_finite() || source_seconds <= 0.0
+    {
+        return Err("Measured performance, lead, and source durations must be finite and nonnegative.".into());
+    }
+    let Some(cut) = scene.cuts.iter().find(|cut| cut.id == cut_id) else { return Ok(false) };
+    if cut.speech_mode != Some(crate::scene_plan::handoff::SpeechMode::SourceVideoLipsync) {
+        return Ok(false);
+    }
+    let seed = suggested_duration(cut);
+    let target = round2(lead_seconds + speech_seconds + crate::scene_plan::resolve::HELD_DIALOGUE_BEAT_SECONDS);
+    let Some(animatic) = &scene.animatic else { return Ok(false) };
+    if animatic.approved { return Ok(false); }
+    let Some(shot) = animatic.shots.iter().find(|shot| shot.cut_id == cut_id) else { return Ok(false) };
+    if shot.auto_duration_seed_seconds != Some(seed)
+        || shot.trim_in_seconds.is_some() || shot.trim_out_seconds.is_some()
+        || (shot.duration_seconds - seed).abs() > 0.001
+        || target <= seed || target > source_seconds || target > MAX_DURATION
+    {
+        return Ok(false);
+    }
+    let shot_id = shot.id.clone();
+    set_duration(scene, &shot_id, target)?;
+    Ok(true)
 }
 
 pub fn set_duration(scene: &mut SceneRecord, shot_id: &str, seconds: f64) -> Result<(), String> {
@@ -101,9 +141,11 @@ pub fn set_duration(scene: &mut SceneRecord, shot_id: &str, seconds: f64) -> Res
             return Err("Trim points leave the shot with no runtime. Set a longer duration or smaller trim.".into());
         }
         if (animatic.shots[index].duration_seconds - seconds).abs() < 0.001 {
+            animatic.shots[index].auto_duration_seed_seconds = None;
             return Ok(());
         }
         animatic.shots[index].duration_seconds = seconds;
+        animatic.shots[index].auto_duration_seed_seconds = None;
         animatic.approved = false;
         index
     };
@@ -147,6 +189,9 @@ pub fn set_trim(
         }
         shot.trim_in_seconds = trim_in;
         shot.trim_out_seconds = trim_out;
+        // Preserve source lineage when the sketch timing controls revise an edit.
+        // Only the source-bound Assemble action may rebind it to another take.
+        shot.auto_duration_seed_seconds = None;
         animatic.approved = false;
         index
     };
@@ -403,14 +448,18 @@ fn suggested_duration(cut: &crate::workflow::state::CutRecord) -> f64 {
         }
     }
     let words = normalized_words(&text).len();
-    if words > 0 {
-        return round2((words as f64 * 60.0 / SPEAKING_RATE_WPM).max(1.5));
-    }
     let pace = cut
         .sketch
         .as_ref()
         .and_then(|sketch| sketch.pace)
         .unwrap_or(Pace::Natural);
+    if words > 0 {
+        let speech = words as f64 * 60.0 / SPEAKING_RATE_WPM;
+        let beat = if pace == Pace::Held && cut.speech_mode == Some(crate::scene_plan::handoff::SpeechMode::SourceVideoLipsync) {
+            crate::scene_plan::resolve::HELD_DIALOGUE_BEAT_SECONDS
+        } else { 0.0 };
+        return round2((speech + beat).max(1.5));
+    }
     match pace {
         Pace::Tight => 2.0,
         Pace::Natural => 3.0,
@@ -664,6 +713,68 @@ mod tests {
     }
 
     #[test]
+    fn measured_performance_replaces_only_unedited_seed_with_air() {
+        let mut state = ProjectState::new();
+        let scene = state.scene_mut(2, "Talking shot");
+        let mut talking = packaged(2, 1, ShotRole::Performance, "This takes longer than estimated.");
+        talking.speech_mode = Some(crate::scene_plan::handoff::SpeechMode::SourceVideoLipsync);
+        scene.cuts.push(talking);
+        scene.cuts.push(packaged(2, 2, ShotRole::Reaction, ""));
+        sync(&mut state);
+        let scene = state.scene_mut(2, "Talking shot");
+        let seed = scene.animatic.as_ref().unwrap().shots[0].duration_seconds;
+        assert!(reconcile_measured_performance(scene, CutId::new(2, 1), 5.746, 0.65, 10.042).unwrap());
+        assert_eq!(scene.animatic.as_ref().unwrap().shots[0].duration_seconds, 7.4);
+        assert_eq!(scene.animatic.as_ref().unwrap().shots[1].duration_seconds, 3.0);
+        assert!(!reconcile_measured_performance(scene, CutId::new(2, 1), 5.746, 0.65, 10.042).unwrap());
+        assert_ne!(seed, 7.4);
+        let shot_id = scene.animatic.as_ref().unwrap().shots[0].id.clone();
+        set_duration(scene, &shot_id, 7.5).unwrap();
+        assert!(!reconcile_measured_performance(scene, CutId::new(2, 1), 5.746, 0.65, 10.042).unwrap());
+        assert_eq!(scene.animatic.as_ref().unwrap().shots[0].duration_seconds, 7.5);
+    }
+
+    #[test]
+    fn measured_performance_preserves_reviewed_timing_and_insufficient_sources() {
+        let mut state = ProjectState::new();
+        let scene = state.scene_mut(2, "Talking shot");
+        let mut talking = packaged(2, 1, ShotRole::Performance, "This takes longer than estimated.");
+        talking.speech_mode = Some(crate::scene_plan::handoff::SpeechMode::SourceVideoLipsync);
+        scene.cuts.push(talking);
+        sync(&mut state);
+        let scene = state.scene_mut(2, "Talking shot");
+        let id = CutId::new(2, 1);
+        let seed = scene.animatic.as_ref().unwrap().shots[0].duration_seconds;
+        let shot_id = scene.animatic.as_ref().unwrap().shots[0].id.clone();
+        set_duration(scene, &shot_id, seed).unwrap();
+        assert_eq!(scene.animatic.as_ref().unwrap().shots[0].auto_duration_seed_seconds, None);
+        assert!(!reconcile_measured_performance(scene, id, 5.746, 0.65, 10.042).unwrap());
+        assert!(!reconcile_measured_performance(scene, id, 5.746, 0.65, 6.0).unwrap());
+        scene.animatic.as_mut().unwrap().approved = true;
+        assert!(!reconcile_measured_performance(scene, id, 5.746, 0.65, 10.042).unwrap());
+        scene.animatic.as_mut().unwrap().approved = false;
+        scene.animatic.as_mut().unwrap().shots[0].trim_in_seconds = Some(0.1);
+        assert!(!reconcile_measured_performance(scene, id, 5.746, 0.65, 10.042).unwrap());
+        assert_eq!(scene.animatic.as_ref().unwrap().shots[0].duration_seconds, seed);
+    }
+
+    #[test]
+    fn legacy_seed_without_edit_provenance_is_not_rewritten() {
+        let mut state = ProjectState::new();
+        let scene = state.scene_mut(2, "Talking shot");
+        let mut talking = packaged(2, 1, ShotRole::Performance, "This takes longer than estimated.");
+        talking.speech_mode = Some(crate::scene_plan::handoff::SpeechMode::SourceVideoLipsync);
+        scene.cuts.push(talking);
+        sync(&mut state);
+        let scene = state.scene_mut(2, "Talking shot");
+        let shot = &mut scene.animatic.as_mut().unwrap().shots[0];
+        let seed = shot.duration_seconds;
+        shot.auto_duration_seed_seconds = None; // older state may have been manually edited
+        assert!(!reconcile_measured_performance(scene, CutId::new(2, 1), 5.746, 0.65, 10.042).unwrap());
+        assert_eq!(scene.animatic.as_ref().unwrap().shots[0].duration_seconds, seed);
+    }
+
+    #[test]
     fn timing_change_marks_later_packages_and_keeps_renders() {
         let mut state = ProjectState::new();
         let scene = state.scene_mut(1, "The last train");
@@ -783,9 +894,11 @@ mod tests {
                 id: "shot".into(),
                 cut_id: CutId::new(1, 1),
                 duration_seconds: 2.0,
+                auto_duration_seed_seconds: None,
                 scratch_audio_path: Some(rel.into()),
                 trim_in_seconds: None,
                 trim_out_seconds: None,
+                trim_source_take_id: None,
                 transition: None,
             }],
             warnings: Vec::new(),
@@ -868,9 +981,11 @@ mod tests {
                 id: "shot".into(),
                 cut_id: CutId::new(1, 1),
                 duration_seconds: 10.0,
+                auto_duration_seed_seconds: None,
                 scratch_audio_path: None,
                 trim_in_seconds: None,
                 trim_out_seconds: None,
+                trim_source_take_id: None,
                 transition: None,
             }],
             warnings: Vec::new(),

@@ -29,8 +29,15 @@ if (bridgeAllowed()) contextBridge.exposeInMainWorld("workbench", {
     ipcRenderer.on("spend-confirmation-required", listener);
     return () => ipcRenderer.removeListener("spend-confirmation-required", listener);
   },
+  onCloseRequested: (handler) => {
+    const listener = () => handler();
+    ipcRenderer.on("app:close-requested", listener);
+    return () => ipcRenderer.removeListener("app:close-requested", listener);
+  },
+  respondToClose: (decision) => ipcRenderer.send("app:close-response", decision),
   toMediaUrl: (filePath) =>
     ipcRenderer.sendSync("host:toMediaUrlSync", filePath),
+  pasteFocused: () => ipcRenderer.invoke("edit:pasteFocused"),
   openProject: () => ipcRenderer.invoke("project:open"),
   useProject: (projectPath) => ipcRenderer.invoke("project:use", projectPath),
   closeProject: () => ipcRenderer.invoke("project:close"),

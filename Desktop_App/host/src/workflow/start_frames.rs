@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAX_SCENE_REFS: usize = 4;
-const START_FRAME_INSTRUCTION: &str = "Create one production-ready still image: the frozen opening frame before any dialogue or movement begins. Preserve the named characters' identities from their model sheets and match approved scene references. Any visible mouth must be naturally relaxed and closed, ready for later animation. Do not render speech, lip movement, captions, labels, contact sheets, or model-sheet layouts.";
+const START_FRAME_INSTRUCTION: &str = "Create one production-ready still image: the frozen opening frame before any dialogue or movement begins. Use any explicitly supplied images as references. Any visible mouth must be naturally relaxed and closed, ready for later animation. Do not render speech, lip movement, captions, labels, contact sheets, or model-sheet layouts.";
 
 fn approval_details(
     app: Option<&crate::ctx::HostCtx>,
@@ -486,7 +486,7 @@ pub fn prepare_generate(
     scene_id: u32,
     cut_number: u32,
 ) -> Result<(String, String), String> {
-    prepare_generate_inner(root, state, scene_id, cut_number, None)
+    prepare_generate_inner(root, state, scene_id, cut_number, &[], None)
 }
 
 pub fn prepare_generate_with_host(
@@ -495,8 +495,9 @@ pub fn prepare_generate_with_host(
     state: &mut ProjectState,
     scene_id: u32,
     cut_number: u32,
+    reference_asset_ids: &[String],
 ) -> Result<(String, String), String> {
-    prepare_generate_inner(root, state, scene_id, cut_number, Some(app))
+    prepare_generate_inner(root, state, scene_id, cut_number, reference_asset_ids, Some(app))
 }
 
 fn prepare_generate_inner(
@@ -504,6 +505,7 @@ fn prepare_generate_inner(
     state: &mut ProjectState,
     scene_id: u32,
     cut_number: u32,
+    reference_asset_ids: &[String],
     approval_app: Option<&crate::ctx::HostCtx>,
 ) -> Result<(String, String), String> {
     let cut = state
@@ -563,7 +565,11 @@ fn prepare_generate_inner(
             negative,
         )
     };
-    let refs = generation_refs(root, state, scene_id, cut_number)?;
+    let refs: Vec<GenerationRef> = reference_asset_ids.iter().map(|id| {
+        let (asset_id, path) = look::selected_look_reference(root, state, scene_id, id)?;
+        let wardrobe_plate = state.asset(id).is_some_and(|asset| asset.role == AssetRole::WardrobePlate);
+        Ok(GenerationRef { label: path.clone(), asset_id, path, wardrobe_plate })
+    }).collect::<Result<_, String>>()?;
     let rel = next_frame_rel(root, state, scene_id, cut_number, "png");
     create_parent(root, &rel)?;
     let mut generation_prompt = format!("{prompt}\n\n{START_FRAME_INSTRUCTION}");
@@ -1294,6 +1300,7 @@ mod tests {
             voice_ready: false,
             profile_path: None,
             model_sheet_manifest_path: None,
+            reference_asset_ids: Vec::new(),
             profile: Default::default(),
             asset_ids: vec!["tom_identity".into(), "tom_body".into()],
             notes: Vec::new(),
@@ -1419,6 +1426,15 @@ mod tests {
     }
 
     #[test]
+    fn default_generation_does_not_attach_automatic_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fixture(dir.path());
+        let (card, _) = prepare_generate(dir.path(), &mut state, 1, 1).unwrap();
+        assert!(!card.contains("tom_closeup_front.png"));
+        assert!(!card.contains("wardrobe_1.png"));
+    }
+
+    #[test]
     fn generation_uses_identity_and_approved_requested_scene_refs() {
         let dir = tempfile::tempdir().unwrap();
         let state = fixture(dir.path());
@@ -1472,6 +1488,7 @@ mod tests {
             voice_ready: false,
             profile_path: None,
             model_sheet_manifest_path: None,
+            reference_asset_ids: Vec::new(),
             profile: Default::default(),
             asset_ids: vec!["pip_plate_close".into(), "pip_plate_standing".into()],
             notes: Vec::new(),
@@ -1508,7 +1525,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let mut state = fixture(root);
-        let (card, _) = prepare_generate(root, &mut state, 1, 1).unwrap();
+        let ids = vec!["wardrobe".to_string(), "tom_identity".to_string()];
+        let (card, _) = prepare_generate_inner(root, &mut state, 1, 1, &ids, None).unwrap();
+        assert_eq!(state.jobs.last().unwrap().input_asset_ids, ids);
         assert!(card.contains("Preproduction/Scene1/start_frames/cut_1_v1.png"));
         assert!(card.contains("Characters/Tom Vale/model_sheet/tom_closeup_front.png"));
         assert!(card.contains("Preproduction/Scene1/references/wardrobe_1.png"));
@@ -1522,7 +1541,7 @@ mod tests {
         let job = state.jobs.last().unwrap();
         assert_eq!(job.kind, "cut_start_frame");
         assert_eq!(job.status, JobStatus::Pending);
-        assert_eq!(job.input_asset_ids.len(), 4);
+        assert_eq!(job.input_asset_ids.len(), 2);
     }
 
     #[test]
@@ -1567,6 +1586,7 @@ mod tests {
             spend_category: None,
             reconciliation: None,
             assembly_snapshot: None,
+            performance_asset_id: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,

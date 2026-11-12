@@ -25,6 +25,11 @@ fn validate_binding(state: &ProjectState, job: &JobRecord, rel: &str) -> Result<
         .filter(|(_, cut)| cut.stable_id == scope.id);
     let (scene, cut) = cuts.next().ok_or("prepared render shot no longer exists")?;
     if cuts.next().is_some() { return Err("prepared render shot identity is ambiguous".into()); }
+    if let Some(selected) = job.performance_asset_id.as_deref() {
+        if cut.selected_performance_asset_id.as_deref() != Some(selected) {
+            return Err("Selected performance changed; prepare a fresh video-only card".into());
+        }
+    }
     let parts: Vec<_> = rel.split('/').collect();
     if parts.len() != 4 || parts[0] != "Scenes" || parts[1] != format!("Scene{}", scene.id)
         || parts[2] != format!("Cut{}", cut.id.cut) || parts[3].is_empty()
@@ -38,7 +43,7 @@ fn validate_binding(state: &ProjectState, job: &JobRecord, rel: &str) -> Result<
 #[derive(Clone)]
 pub(crate) struct Binding { pub(crate) id: String, pub(crate) path: String, pub(crate) shot: String }
 
-fn begin(root: &Path, raw: &str) -> Result<Option<Binding>, String> {
+fn begin(root: &Path, raw: &str, current_spend_id: Option<&str>) -> Result<Option<Binding>, String> {
     let (requested, rel) = output(root, raw)?;
     let _lock = import::lock_project(root)?;
     let mut state = read_persisted(root)?;
@@ -62,6 +67,29 @@ fn begin(root: &Path, raw: &str) -> Result<Option<Binding>, String> {
     if state.jobs[index].status != JobStatus::Pending { return Err("prepared render destination is already reserved by an existing attempt".into()); }
     if requested.exists() { return Err("prepared render destination already exists; prepare a new take".into()); }
     let shot = validate_binding(&state, &state.jobs[index], &rel)?;
+    if let Some(prior_id) = state.jobs[index].retry_of.as_deref() {
+        let prior = state.jobs.iter().find(|job| job.id == prior_id && job.kind == "render"
+            && job.scope == state.jobs[index].scope)
+            .ok_or("saved-audio retry predecessor missing or changed")?;
+        // The spend ledger reserves its own Running child before entering this
+        // closure. Exclude only that exact reservation, never another attempt.
+        let current = current_spend_id.and_then(|id| state.jobs.iter().find(|job| job.id == id));
+        if current_spend_id.is_some() && !current.is_some_and(|job|
+            job.kind == "atlas_generate_video" && job.status == JobStatus::Running
+                && job.request_metadata.as_ref().is_some_and(|request| request.prediction_id.is_none()))
+            || !super::production::verified_pre_submit_failure(&state, prior)
+            || state.jobs.iter().any(|job| job.id != current_spend_id.unwrap_or("")
+                && job.kind.starts_with("atlas_generate_")
+                && matches!(job.status, JobStatus::Pending | JobStatus::Running)) {
+            return Err("saved-audio retry is no longer proven pre-submit; no video submitted".into());
+        }
+        let prior_path = prior.output_path.as_deref().ok_or("failed render output missing")?;
+        let (old_video, _) = output(root, prior_path)?;
+        if old_video.exists() || !old_video.with_extension("wav").is_file()
+            || requested.with_extension("wav").exists() {
+            return Err("saved-audio retry output or protected WAV changed before dispatch".into());
+        }
+    }
     let binding = Binding { id: state.jobs[index].id.clone(), path: rel, shot };
     state.jobs[index].mark_running("actual authorized dispatch in flight");
     import::persist_state_locked(root, &state)?;
@@ -104,8 +132,13 @@ where F: FnOnce() -> Result<String, String> {
 /// Preserve the adapter's typed result through the existing bound lifecycle.
 pub fn with_render_job_outcome<F, T>(root: &Path, save_path: &str, dispatch: F) -> Result<T, String>
 where F: FnOnce() -> Result<T, String> {
+    with_render_job_outcome_for_spend(root, save_path, None, dispatch)
+}
+
+pub fn with_render_job_outcome_for_spend<F, T>(root: &Path, save_path: &str, current_spend_id: Option<&str>, dispatch: F) -> Result<T, String>
+where F: FnOnce() -> Result<T, String> {
     let root = crate::session::command_root(Some(root.to_str().ok_or("invalid project root")?))?;
-    let binding = begin(&root, save_path)?;
+    let binding = begin(&root, save_path, current_spend_id)?;
     let result = dispatch();
     if let Some(binding) = binding {
         if let Err(error) = finish(&root, &binding, &result) {

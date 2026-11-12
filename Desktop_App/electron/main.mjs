@@ -2,8 +2,10 @@ import {
   app,
   BrowserWindow,
   Menu,
+  clipboard,
   dialog,
   ipcMain,
+  net,
   protocol,
   session,
   shell,
@@ -11,9 +13,11 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { Sidecar } from "./sidecar.mjs";
+import { installEditableContextMenu } from "./editableContextMenu.mjs";
+import { generateScriptDraft } from "./scriptDraft.mjs";
 
 const require = createRequire(import.meta.url);
 const { isAppUrl, externalUrl, windowOpenAction, externalOpenDecision, contentSecurityPolicy, launchTarget } = require("./navigationPolicy.cjs");
@@ -219,8 +223,19 @@ function createMenu(recentProjects = loadRecentProjects()) {
 
   const template = [
     {
-      label: "File",
+      label: "&File",
       submenu: [
+        {
+          label: "New File",
+          accelerator: "CmdOrCtrl+N",
+          click: () => send("new-file"),
+        },
+        {
+          label: "Open File…",
+          accelerator: "CmdOrCtrl+Shift+O",
+          click: () => send("open-file"),
+        },
+        { type: "separator" },
         {
           label: "Open Project…",
           accelerator: "CmdOrCtrl+O",
@@ -244,6 +259,11 @@ function createMenu(recentProjects = loadRecentProjects()) {
           label: "Save As…",
           accelerator: "CmdOrCtrl+Shift+S",
           click: () => send("save-as"),
+        },
+        {
+          label: "Close File",
+          accelerator: "CmdOrCtrl+W",
+          click: () => send("close-file"),
         },
         { type: "separator" },
         { role: "quit" },
@@ -308,7 +328,7 @@ function createMenu(recentProjects = loadRecentProjects()) {
           click: () => send("open-workflow"),
         },
         {
-          label: "Toggle Chat",
+          label: "Toggle Finish and History",
           accelerator: "CmdOrCtrl+Alt+H",
           click: () => send("toggle-chat"),
         },
@@ -326,14 +346,8 @@ function createMenu(recentProjects = loadRecentProjects()) {
       label: "Help",
       submenu: [
         {
-          label: "Copy Chat Transcript",
-          accelerator: "CmdOrCtrl+Shift+C",
-          click: () => send("copy-chat"),
-        },
-        {
-          label: "Save Chat Transcript…",
-          accelerator: "CmdOrCtrl+Shift+E",
-          click: () => send("save-chat"),
+          label: "Saved Conversations…",
+          click: () => send("open-conversation-history"),
         },
         { type: "separator" },
         {
@@ -382,6 +396,9 @@ function wireAppShortcuts(win) {
     let action = null;
 
     if (key === "o" && !input.shift && !input.alt) action = "open-project";
+    else if (key === "o" && input.shift && !input.alt) action = "open-file";
+    else if (key === "n" && !input.shift && !input.alt) action = "new-file";
+    else if (key === "w" && !input.shift && !input.alt) action = "close-file";
     else if (key === "s" && input.shift) action = "save-as";
     else if (key === "s" && !input.alt) action = "save";
     else if (key === "f" && !input.shift && !input.alt) action = "find";
@@ -393,8 +410,6 @@ function wireAppShortcuts(win) {
     else if (key === "v" && input.alt) action = "open-voice";
     else if (key === "p" && input.alt) action = "open-workflow";
     else if (key === "h" && input.alt) action = "toggle-chat";
-    else if (key === "c" && input.shift && !input.alt) action = "copy-chat";
-    else if (key === "e" && input.shift && !input.alt) action = "save-chat";
 
     if (!action) return;
     event.preventDefault();
@@ -403,6 +418,8 @@ function wireAppShortcuts(win) {
 }
 
 function createWindow() {
+  let closeApproved = false;
+  let closeRequestPending = false;
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -418,7 +435,22 @@ function createWindow() {
   });
 
   wireAppShortcuts(mainWindow);
+  installEditableContextMenu(mainWindow, Menu, clipboard);
   lockNavigation(mainWindow.webContents);
+
+  mainWindow.on("close", (event) => {
+    if (closeApproved || mainWindow?.webContents.isLoadingMainFrame()) return;
+    event.preventDefault();
+    if (closeRequestPending) return;
+    closeRequestPending = true;
+    mainWindow.webContents.send("app:close-requested");
+  });
+  mainWindow.__respondToClose = (decision) => {
+    closeRequestPending = false;
+    if (decision !== "close") return;
+    closeApproved = true;
+    mainWindow?.close();
+  };
 
   const launch = launchTarget({
     dev: isDev,
@@ -499,6 +531,7 @@ function migrateSettings() {
 
 /** @type {string | null} */
 let sessionRoot = null;
+let sessionRevision = 0;
 /** @type {Set<string>} */
 const pathGrants = new Set();
 
@@ -526,6 +559,7 @@ function mediaAllowed(filePath) {
 }
 
 async function openSession(projectPath) {
+  sessionRevision++;
   if (!sidecar) throw new Error("Host sidecar is not started");
   const result = await sidecar.invoke("open_project", { path: projectPath });
   sessionRoot = realPathOrAbsolute(result?.root || projectPath);
@@ -536,6 +570,7 @@ async function openSession(projectPath) {
 }
 
 async function closeSession() {
+  sessionRevision++;
   if (sidecar) await sidecar.invoke("close_project", {});
   sessionRoot = null;
   pathGrants.clear();
@@ -559,14 +594,42 @@ function assertAppSender(event) {
   }
 }
 
+async function nativeAsk(message, opts = {}) {
+  const result = await dialog.showMessageBox({
+    type: opts.kind === "warning" ? "warning" : opts.kind === "error" ? "error" : "question",
+    title: opts.title || "Confirm", message: String(message),
+    buttons: ["Cancel", "OK"], defaultId: 1, cancelId: 0,
+  });
+  return result.response === 1;
+}
+
 function registerIpc() {
+  ipcMain.handle("edit:pasteFocused", (event) => {
+    assertAppSender(event);
+    if (event.sender !== mainWindow?.webContents) {
+      throw new Error("Paste requires the app window");
+    }
+    event.sender.paste();
+  });
+  ipcMain.on("app:close-response", (event, decision) => {
+    assertAppSender(event);
+    if (event.sender !== mainWindow?.webContents) return;
+    mainWindow.__respondToClose?.(decision);
+  });
   ipcMain.handle("host:invoke", async (event, cmd, args) => {
     assertAppSender(event);
     if (!sidecar) throw new Error("Host sidecar is not started");
     if (!HOST_COMMANDS.has(String(cmd))) {
       throw new Error(`Command is not available to the window: ${cmd}`);
     }
+    if (cmd === "workflow_generate_script") {
+      const revision = sessionRevision;
+      const root = sessionRoot;
+      return generateScriptDraft((command, values) => sidecar.invoke(command, values), nativeAsk,
+        () => sessionRevision === revision && sessionRoot === root && root !== null, args ?? {});
+    }
     if (cmd === "close_project") {
+      sessionRevision++;
       sessionRoot = null;
       pathGrants.clear();
     }
@@ -645,20 +708,7 @@ function registerIpc() {
 
   ipcMain.handle("dialog:ask", async (event, message, opts = {}) => {
     assertAppSender(event);
-    const result = await dialog.showMessageBox({
-      type:
-        opts.kind === "warning"
-          ? "warning"
-          : opts.kind === "error"
-            ? "error"
-            : "question",
-      title: opts.title || "Confirm",
-      message: String(message),
-      buttons: ["Cancel", "OK"],
-      defaultId: 1,
-      cancelId: 0,
-    });
-    return result.response === 1;
+    return nativeAsk(message, opts);
   });
 
   ipcMain.handle("shell:openExternal", async (event, target) => {
@@ -704,11 +754,21 @@ function registerIpc() {
 }
 
 app.whenReady().then(() => {
-  protocol.handle(MEDIA_SCHEME, (request) => {
+  protocol.handle(MEDIA_SCHEME, async (request) => {
     try {
       const filePath = pathFromMediaUrl(request.url);
       if (!mediaAllowed(filePath)) return new Response("Not found", { status: 404 });
-      return mediaFileResponse(filePath, request);
+      // Electron's net.fetch handles file:// byte streams correctly for
+      // <audio>/<video>, where a manually constructed Readable.toWeb()
+      // response is not playable by Chromium's media pipeline (Electron
+      // #38749, #51442). net.fetch omits Content-Length/Accept-Ranges, which
+      // leaves duration unknown and disables seeking, so re-add them.
+      const response = await net.fetch(pathToFileURL(filePath).toString());
+      const headers = new Headers(response.headers);
+      headers.set("Content-Type", mimeForMediaPath(filePath));
+      headers.set("Content-Length", String(fs.statSync(filePath).size));
+      headers.set("Accept-Ranges", "bytes");
+      return new Response(response.body, { status: response.status, headers });
     } catch (error) {
       console.error("media protocol error", error);
       return new Response("Not found", { status: 404 });

@@ -49,7 +49,7 @@ pub fn look_system_prompt() -> &'static str {
 Roles (use these exact strings): interior_reference, exterior_reference, wardrobe_reference, prop_reference, mood_reference, location_reference, lighting_reference, composition_reference, group_reference.\n\
 Always include the five core roles: interior, exterior, wardrobe, prop, mood. Add others only if they earn a still.\n\
 Prompts describe the scene world (place, clothes, props, light, mood).\n\
-When people belong in a still (interior, wardrobe, group), name them exactly as in the character list (e.g. Tom Vale, Pip Vale). The host will attach their model-sheet identity and body images at generate time. Do not invent faces. Do not output model-sheet closeups; the still is a scene reference.\n\
+When people belong in a still (interior, wardrobe, group), name them exactly as in the character list (e.g. Tom Vale, Pip Vale). The user can opt in to attaching model-sheet identity and body images at generate time. Do not invent faces. Do not output model-sheet closeups; the still is a scene reference.\n\
 Do not emit file paths, asset ids, models, or production notes. The host owns those."
 }
 
@@ -67,7 +67,7 @@ pub fn look_user_prompt(
         push_intent(&mut s, intent);
     }
     if !characters.is_empty() {
-        s.push_str("\nCharacters (model sheets are identity inputs; host attaches them when generating people stills):\n");
+        s.push_str("\nCharacters (model sheets can be attached as identity inputs when selected by the user):\n");
         for (name, notes) in characters {
             if notes.is_empty() {
                 s.push_str(&format!("- {name}\n"));
@@ -634,6 +634,30 @@ fn is_image_path(path: &Path) -> bool {
         })
 }
 
+pub fn save_reference_description(
+    scene: &mut SceneRecord, slot_id: Option<&str>, description: &str, category: &str,
+) -> Result<(), String> {
+    let description = description.trim();
+    if description.is_empty() { return Err("Enter a reference image description.".into()); }
+    let role = if category == "user_defined" { AssetRole::MoodReference }
+        else { AssetRole::parse_look(category).filter(|r| r.is_scene_look()).ok_or("Invalid reference category")? };
+    let scene_id = scene.id;
+    let board = scene.look_board.get_or_insert_with(LookBoard::default);
+    if let Some(id) = slot_id {
+        let slot = board.slot_mut(id).ok_or_else(|| format!("look slot `{id}` not found"))?;
+        slot.prompt = Some(description.to_owned());
+        slot.role = role;
+        if slot.title == "User Defined" && category != "user_defined" { slot.title = role.display_label().into(); }
+    } else {
+        let id = next_slot_id(board, scene_id);
+        let title = if category == "user_defined" { "User Defined" } else { role.display_label() };
+        let mut slot = LookSlot::new(id, role, title);
+        slot.prompt = Some(description.to_owned());
+        board.slots.push(slot);
+    }
+    Ok(())
+}
+
 pub fn patch_slot(
     scene: &mut SceneRecord,
     slot_id: &str,
@@ -673,6 +697,35 @@ fn nonempty_opt(value: &str) -> Option<String> {
     }
 }
 
+pub fn attach_to_slot(
+    root: &Path,
+    state: &mut ProjectState,
+    scene_id: u32,
+    slot_id: Option<&str>,
+    new_role: Option<AssetRole>,
+    source: &str,
+) -> Result<(String, String), String> {
+    let slot_id = match slot_id {
+        Some(id) => id.to_owned(),
+        None => {
+            let role = new_role.filter(|r| r.is_scene_look())
+                .ok_or("Choose a scene look role for the first image.")?;
+            let scene = state.scenes.iter_mut().find(|s| s.id == scene_id)
+                .ok_or_else(|| format!("scene {scene_id} not found"))?;
+            let board = scene.look_board.get_or_insert_with(LookBoard::default);
+            if !board.slots.is_empty() {
+                return Err("Choose an existing look slot before attaching an image.".into());
+            }
+            let id = next_slot_id(board, scene_id);
+            board.slots.push(LookSlot::new(id.clone(), role, role.display_label()));
+            id
+        }
+    };
+    // The caller saves only after the copy succeeds, so a refusal creates no saved slot.
+    let asset_id = attach_image(root, state, scene_id, &slot_id, source)?;
+    Ok((slot_id, asset_id))
+}
+
 pub fn attach_image(
     root: &Path,
     state: &mut ProjectState,
@@ -680,7 +733,7 @@ pub fn attach_image(
     slot_id: &str,
     source: &str,
 ) -> Result<String, String> {
-    let abs = resolve_source(root, source)?;
+    let abs = crate::session::authorize_user_path(source, crate::project_path::PathIntent::Read)?;
     if !abs.is_file() {
         return Err(format!("image not found: {}", abs.display()));
     }
@@ -710,12 +763,29 @@ pub fn attach_image(
         slot.role
     };
     let rel = next_look_rel_for_state(root, state, scene_id, role, &ext);
-    let dest = root.join(&rel);
-    if dest != abs {
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("could not create look folder: {e}"))?;
+    let root_string = root.to_string_lossy();
+    let confined_destination = || -> Result<PathBuf, String> {
+        let dest = crate::project_path::resolve(&rel, Some(&root_string), crate::project_path::PathIntent::Write)
+            .map_err(|e| e.to_string())?.into_path_buf();
+        if crate::project_path::relative_to_root(root, &dest)? != Path::new(&rel) {
+            return Err("Look destination must remain in the exact scene references bucket.".into());
         }
-        fs::copy(&abs, &dest).map_err(|e| format!("could not copy image: {e}"))?;
+        Ok(dest)
+    };
+    let dest = confined_destination()?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("could not create look folder: {e}"))?;
+    }
+    let dest = confined_destination()?;
+    // Never overwrite prior media (including dangling symlinks or a raced reservation).
+    use std::io::Write;
+    let bytes = fs::read(&abs).map_err(|e| format!("could not read image: {e}"))?;
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&dest)
+        .map_err(|e| format!("could not reserve look image: {e}"))?;
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(&dest);
+        return Err(format!("could not copy image: {error}"));
     }
     let parent_id = state
         .scene(scene_id)
@@ -804,6 +874,15 @@ pub fn set_asset_status(
         }
         crate::workflow::identity::record_version(state, previous, AssetStatus::Superseded);
         crate::workflow::identity::mark_asset_dependents(state, scene_id, previous);
+        // Prepared video cards carry the old image ID. They are no longer
+        // executable decisions after a scene-look revision.
+        for job in &mut state.jobs {
+            if job.kind == "render" && job.status == JobStatus::Pending
+                && job.input_asset_ids.iter().any(|id| id == previous) {
+                job.status = JobStatus::Failed;
+                job.error = Some("Look image revised before video authorization; review and prepare a new request.".into());
+            }
+        }
     }
     if status == AssetStatus::Approved {
         crate::workflow::identity::record_version(state, &target, AssetStatus::Approved);
@@ -872,13 +951,63 @@ pub fn delete_image(
     Ok(rel)
 }
 
+/// Remove only the board entry; registered media and files remain untouched.
+pub fn delete_slot(state: &mut ProjectState, scene_id: u32, slot_id: &str) -> Result<(), String> {
+    let slot = state.scene(scene_id).and_then(|s| s.look_board.as_ref())
+        .and_then(|b| b.slots.iter().find(|s| s.id == slot_id))
+        .ok_or_else(|| format!("look slot `{slot_id}` not found"))?;
+    let mut ids = slot.asset_ids.clone();
+    if let Some(id) = &slot.approved_asset_id { if !ids.contains(id) { ids.push(id.clone()); } }
+    let paths: Vec<&str> = ids.iter().filter_map(|id| state.asset(id).map(|a| a.path.as_str())).collect();
+    for scene in &state.scenes {
+        for cut in &scene.cuts {
+            if cut.visual_source.as_ref().and_then(|v| v.asset_id.as_ref()).is_some_and(|id| ids.contains(id))
+                || cut.approved_start_frame.as_deref().is_some_and(|p| paths.contains(&p))
+                || cut.identity_ref_paths.iter().any(|p| paths.contains(&p.as_str())) {
+                return Err(format!("look slot `{slot_id}` is referenced by a cut"));
+            }
+        }
+    }
+    if state.jobs.iter().any(|j| matches!(j.status, JobStatus::Pending | JobStatus::Running)
+        && ((j.kind == "scene_look" && j.raw_provider_id.as_deref() == Some(slot_id))
+            || j.input_asset_ids.iter().chain(&j.output_asset_ids).any(|id| ids.contains(id))
+            || j.output_path.as_deref().is_some_and(|p| paths.contains(&p)))) {
+        return Err(format!("look slot `{slot_id}` is referenced by an active job"));
+    }
+    if crate::pending::current().is_some_and(|action| {
+        action.inputs.get("source_frame").and_then(Value::as_str).is_some_and(|p| paths.contains(&p))
+            || action.inputs.get("reference_images").and_then(Value::as_array)
+                .is_some_and(|v| v.iter().filter_map(Value::as_str).any(|p| paths.contains(&p)))
+    }) {
+        return Err(format!("look slot `{slot_id}` is referenced by a pending approval"));
+    }
+    let board = state.scenes.iter_mut().find(|s| s.id == scene_id).unwrap().look_board.as_mut().unwrap();
+    board.slots.retain(|s| s.id != slot_id);
+    board.sync_asset_ids();
+    Ok(())
+}
+
+pub(super) fn selected_look_reference(root: &Path, state: &ProjectState, _scene_id: u32, id: &str) -> Result<(String, String), String> {
+    let asset = state.asset(id).filter(|a| a.status != AssetStatus::Rejected)
+        .ok_or_else(|| format!("look reference `{id}` is invalid or rejected"))?;
+    let ext = Path::new(&asset.path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !["png", "jpg", "jpeg", "webp", "gif"].contains(&ext.as_str()) {
+        return Err(format!("look reference `{id}` is not an image"));
+    }
+    let root_s = root.to_string_lossy();
+    let path = crate::project_path::resolve(&asset.path, Some(&root_s), crate::project_path::PathIntent::Read)
+        .map_err(|e| e.to_string())?.into_path_buf();
+    if !path.is_file() { return Err(format!("look reference `{id}` file is missing")); }
+    Ok((asset.id.clone(), asset.path.clone()))
+}
+
 pub fn prepare_generate(
     root: &Path,
     state: &mut ProjectState,
     scene_id: u32,
     slot_id: &str,
 ) -> Result<(String, String), String> {
-    prepare_generate_inner(root, state, scene_id, slot_id, None)
+    prepare_generate_inner(root, state, scene_id, slot_id, false, &[], None, None)
 }
 
 pub fn prepare_generate_with_host(
@@ -887,8 +1016,11 @@ pub fn prepare_generate_with_host(
     state: &mut ProjectState,
     scene_id: u32,
     slot_id: &str,
+    attach_character_image: bool,
+    reference_asset_ids: &[String],
+    image_capability: Option<&str>,
 ) -> Result<(String, String), String> {
-    prepare_generate_inner(root, state, scene_id, slot_id, Some(app))
+    prepare_generate_inner(root, state, scene_id, slot_id, attach_character_image, reference_asset_ids, Some(app), image_capability)
 }
 
 fn prepare_generate_inner(
@@ -896,8 +1028,12 @@ fn prepare_generate_inner(
     state: &mut ProjectState,
     scene_id: u32,
     slot_id: &str,
+    attach_character_image: bool,
+    reference_asset_ids: &[String],
     approval_app: Option<&crate::ctx::HostCtx>,
+    image_capability: Option<&str>,
 ) -> Result<(String, String), String> {
+    let selected_refs: Vec<_> = reference_asset_ids.iter().map(|id| selected_look_reference(root, state, scene_id, id)).collect::<Result<_, _>>()?;
     let aspect = state.settings.aspect_ratio.clone();
     let (prompt, title, role_label, role) = {
         let scene = state
@@ -924,16 +1060,15 @@ fn prepare_generate_inner(
             slot.role,
         )
     };
-    let named = mentioned_look_characters(state, scene_id, role, &prompt, &title);
-    let identity_refs = keep_existing_identity_refs(
-        root,
-        collect_look_identity_refs(state, scene_id, role, &prompt, &title),
-    );
+    let named = if attach_character_image { mentioned_look_characters(state, scene_id, role, &prompt, &title) } else { Vec::new() };
+    let identity_refs = if attach_character_image {
+        keep_existing_identity_refs(root, collect_look_identity_refs(state, scene_id, role, &prompt, &title))
+    } else { Vec::new() };
     let continuity_refs = collect_approved_look_continuity_refs(
         root,
         state,
         scene_id,
-        role.look_usually_shows_people() || !identity_refs.is_empty(),
+        attach_character_image && (role.look_usually_shows_people() || !identity_refs.is_empty()),
     );
     let missing: Vec<String> = named
         .iter()
@@ -955,19 +1090,24 @@ fn prepare_generate_inner(
         gen_prompt.push_str(LOOK_WARDROBE_INSTRUCTION);
     }
     let mut inputs = Map::new();
+    if let Some(capability) = image_capability {
+        inputs.insert("image_capability".into(), Value::String(capability.to_owned()));
+    }
     inputs.insert("prompt".into(), Value::String(gen_prompt));
     inputs.insert("output_path".into(), Value::String(rel.clone()));
     if let Some(ar) = aspect {
         inputs.insert("aspect_ratio".into(), Value::String(ar));
     }
-    let mut reference_images: Vec<String> = identity_refs
-        .iter()
-        .map(|reference| reference.path.clone())
-        .collect();
+    // Explicit selections lead the list so ordinal references match the picker.
+    let mut reference_images: Vec<String> = Vec::new();
+    for (_, path) in &selected_refs {
+        if !reference_images.contains(path) { reference_images.push(path.clone()); }
+    }
+    for reference in &identity_refs {
+        if !reference_images.contains(&reference.path) { reference_images.push(reference.path.clone()); }
+    }
     for reference in &continuity_refs {
-        if !reference_images.contains(&reference.path) {
-            reference_images.push(reference.path.clone());
-        }
+        if !reference_images.contains(&reference.path) { reference_images.push(reference.path.clone()); }
     }
     if !reference_images.is_empty() {
         inputs.insert("reference_images".into(), json!(reference_images));
@@ -989,6 +1129,13 @@ fn prepare_generate_inner(
     let mut card = format!(
         "Scene look generate · {title} ({role_label})\nHost will save to `{rel}`.\nThis is a scene reference, not a character model-sheet closeup."
     );
+    if let Some(app) = approval_app {
+        let context = crate::director::current_workflow_context(app, &root.to_path_buf())?;
+        crate::specialists::resolve_still_image_model(&context, &action.inputs)?;
+    }
+    for (id, path) in &selected_refs {
+        card.push_str(&format!("\nSelected look reference: `{id}` · `{path}`"));
+    }
     if !identity_refs.is_empty() {
         card.push_str("\nIdentity refs (model sheets as inputs, not outputs):");
         for r in &identity_refs {
@@ -1022,14 +1169,15 @@ fn prepare_generate_inner(
         &root_s,
     )?);
     let job_id = state.next_job_id();
-    let mut input_asset_ids: Vec<String> = identity_refs
-        .iter()
-        .map(|reference| reference.asset_id.clone())
-        .collect();
+    let mut input_asset_ids: Vec<String> = Vec::new();
+    for (id, _) in &selected_refs {
+        if !input_asset_ids.contains(id) { input_asset_ids.push(id.clone()); }
+    }
+    for reference in &identity_refs {
+        if !input_asset_ids.contains(&reference.asset_id) { input_asset_ids.push(reference.asset_id.clone()); }
+    }
     for reference in &continuity_refs {
-        if !input_asset_ids.contains(&reference.asset_id) {
-            input_asset_ids.push(reference.asset_id.clone());
-        }
+        if !input_asset_ids.contains(&reference.asset_id) { input_asset_ids.push(reference.asset_id.clone()); }
     }
     let mut job = JobRecord {
         input_asset_ids,
@@ -1084,7 +1232,12 @@ pub fn prepare_wardrobe_plate(
     state: &mut ProjectState,
     scene_id: u32,
 ) -> Result<(String, String), String> {
-    prepare_wardrobe_plate_inner(root, state, scene_id, None)
+    prepare_wardrobe_plate_inner(root, state, scene_id, None, None)
+}
+
+#[cfg(test)]
+fn prepare_wardrobe_plate_selected(root: &Path, state: &mut ProjectState, scene_id: u32, character_id: &str, wardrobe_id: &str) -> Result<(String, String), String> {
+    prepare_wardrobe_plate_inner(root, state, scene_id, Some((character_id, wardrobe_id)), None)
 }
 
 pub fn prepare_wardrobe_plate_with_host(
@@ -1092,18 +1245,30 @@ pub fn prepare_wardrobe_plate_with_host(
     root: &Path,
     state: &mut ProjectState,
     scene_id: u32,
+    character_id: &str,
+    wardrobe_id: &str,
 ) -> Result<(String, String), String> {
-    prepare_wardrobe_plate_inner(root, state, scene_id, Some(app))
+    prepare_wardrobe_plate_inner(root, state, scene_id, Some((character_id, wardrobe_id)), Some(app))
 }
 
 fn prepare_wardrobe_plate_inner(
     root: &Path,
     state: &mut ProjectState,
     scene_id: u32,
+    selection: Option<(&str, &str)>,
     approval_app: Option<&crate::ctx::HostCtx>,
 ) -> Result<(String, String), String> {
-    let wardrobe = approved_wardrobe(root, state, scene_id)?;
-    let characters = wardrobe_plate_characters(state, scene_id);
+    let wardrobe = match selection {
+        Some((_, wardrobe_id)) => collect_approved_look_continuity_refs(root, state, scene_id, true)
+            .into_iter().find(|reference| reference.asset_id == wardrobe_id)
+            .ok_or_else(|| "Select an approved wardrobe still for this scene that exists on disk.".to_string())?,
+        None => approved_wardrobe(root, state, scene_id)?,
+    };
+    let characters = match selection {
+        Some((character_id, _)) => vec![state.characters.iter().find(|character| character.id == character_id)
+            .ok_or_else(|| "Selected character not found.".to_string())?],
+        None => wardrobe_plate_characters(state, scene_id),
+    };
     if characters.is_empty() {
         return Err(
             "No named characters to dress. Name them on the wardrobe prompt or in the scene."
@@ -1923,6 +2088,7 @@ mod tests {
             spend_category: None,
             reconciliation: None,
             assembly_snapshot: None,
+            performance_asset_id: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,
@@ -1968,6 +2134,7 @@ mod tests {
             spend_category: None,
             reconciliation: None,
             assembly_snapshot: None,
+            performance_asset_id: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,
@@ -2031,6 +2198,7 @@ mod tests {
             spend_category: None,
             reconciliation: None,
             assembly_snapshot: None,
+            performance_asset_id: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,
@@ -2090,6 +2258,7 @@ mod tests {
             voice_ready: false,
             profile_path: None,
             model_sheet_manifest_path: None,
+            reference_asset_ids: Vec::new(),
             profile: Default::default(),
             asset_ids: vec![ident_id, body_id],
             notes: vec![],
@@ -2193,6 +2362,109 @@ mod tests {
         assert!(names.contains(&"Pip Vale"));
     }
 
+    fn reference_fixture(root: &Path) -> ProjectState {
+        let mut state = tom_pip_state();
+        let rel = "Preproduction/Scene1/references/selected.png";
+        fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
+        fs::write(root.join(rel), b"image").unwrap();
+        state.assets.push(AssetRecord { id: "selected".into(), path: rel.into(), role: AssetRole::InteriorReference,
+            status: AssetStatus::Draft, scene_id: Some(1), cut_id: None, character_id: None,
+            source_job_id: None, parent_asset_id: None, notes: None });
+        let board = state.scene_mut(1, "").look_board.as_mut().unwrap();
+        let mut slot = LookSlot::new("reference-slot", AssetRole::InteriorReference, "Reference");
+        slot.asset_ids.push("selected".into()); board.slots.push(slot); board.sync_asset_ids();
+        state
+    }
+
+    #[test]
+    fn look_reference_can_come_from_another_scene() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = reference_fixture(dir.path());
+        state.asset_mut("selected").unwrap().scene_id = Some(2);
+        assert!(selected_look_reference(dir.path(), &state, 1, "selected").is_ok());
+    }
+
+    #[test]
+    fn multiple_explicit_references_keep_user_order_in_approval_and_job() {
+        let _session_guard = crate::session::test_session_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = reference_fixture(dir.path());
+        let mut other = state.asset("selected").unwrap().clone();
+        other.id = "other".into();
+        other.path = "Preproduction/Scene1/references/other.png".into();
+        other.scene_id = Some(2);
+        fs::write(dir.path().join(&other.path), b"image").unwrap();
+        state.assets.push(other);
+        let (card, _) = prepare_generate_inner(dir.path(), &mut state, 1, "s1_look_01", false,
+            &["other".into(), "selected".into()], None, None).unwrap();
+        assert!(card.find("Selected look reference: `other`").unwrap() < card.find("Selected look reference: `selected`").unwrap());
+        assert_eq!(state.jobs.last().unwrap().input_asset_ids, vec!["other", "selected"]);
+    }
+
+    #[test]
+    fn manual_look_reference_is_explicit_and_validated() {
+        let _session_guard = crate::session::test_session_lock();
+        let dir = tempfile::tempdir().unwrap(); let root = dir.path();
+        let mut state = reference_fixture(root);
+        let (card, _) = prepare_generate_inner(root, &mut state, 1, "s1_look_01", false, &["selected".into()], None, None).unwrap();
+        assert!(card.contains("Selected look reference: `selected`"));
+        assert!(card.contains("Preproduction/Scene1/references/selected.png"));
+        assert!(card.contains("reference_images"));
+        assert!(!card.contains("source_frame"));
+        assert_eq!(state.jobs.last().unwrap().input_asset_ids, vec!["selected"]);
+        let mut no_ref = reference_fixture(root);
+        let (card, _) = prepare_generate_inner(root, &mut no_ref, 1, "s1_look_01", false, &[], None, None).unwrap();
+        assert!(!card.contains("reference_images"));
+        assert!(no_ref.jobs.last().unwrap().input_asset_ids.is_empty());
+        state.asset_mut("selected").unwrap().status = AssetStatus::Rejected;
+        assert!(selected_look_reference(root, &state, 1, "selected").is_err());
+        state.asset_mut("selected").unwrap().status = AssetStatus::Draft;
+        state.asset_mut("selected").unwrap().scene_id = Some(2);
+        assert!(selected_look_reference(root, &state, 1, "selected").is_ok());
+        state.asset_mut("selected").unwrap().scene_id = Some(1);
+        fs::remove_file(root.join("Preproduction/Scene1/references/selected.png")).unwrap();
+        assert!(selected_look_reference(root, &state, 1, "selected").is_err());
+    }
+
+    #[test]
+    fn delete_look_slot_preserves_assets_and_refuses_dependencies() {
+        let dir = tempfile::tempdir().unwrap(); let root = dir.path();
+        let mut state = reference_fixture(root);
+        state.scene_mut(1, "").look_board.as_mut().unwrap().slots.push(LookSlot::new("empty-description", AssetRole::MoodReference, "Description"));
+        delete_slot(&mut state, 1, "empty-description").unwrap();
+        let mut visual = crate::workflow::state::VisualSourceSpec::new(crate::workflow::state::VisualSourceStrategy::SharedReference);
+        visual.asset_id = Some("selected".into());
+        state.scene_mut(1, "").cut_mut(1).visual_source = Some(visual);
+        assert!(delete_slot(&mut state, 1, "reference-slot").is_err());
+        state.scene_mut(1, "").cut_mut(1).visual_source = None;
+        let mut job = JobRecord::open("pending", "scene_look"); job.input_asset_ids.push("selected".into()); state.jobs.push(job);
+        assert!(delete_slot(&mut state, 1, "reference-slot").is_err());
+        state.jobs.last_mut().unwrap().status = JobStatus::Completed;
+        let mut generating = JobRecord::open("generating", "scene_look");
+        generating.raw_provider_id = Some("reference-slot".into());
+        state.jobs.push(generating);
+        assert!(delete_slot(&mut state, 1, "reference-slot").is_err());
+        state.jobs.pop();
+        delete_slot(&mut state, 1, "reference-slot").unwrap();
+        assert!(state.asset("selected").is_some());
+        assert!(root.join("Preproduction/Scene1/references/selected.png").is_file());
+        assert_eq!(state.jobs.last().unwrap().input_asset_ids, vec!["selected"]);
+    }
+
+    #[test]
+    fn prepare_generate_without_opt_in_does_not_attach_scene_characters() {
+        let _session_guard = crate::session::test_session_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = tom_pip_state();
+        let path = root.join("Characters/Tom Vale/model_sheet/tom_closeup_front.png");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let (card, _) = prepare_generate(root, &mut state, 1, "s1_look_01").unwrap();
+        assert!(state.jobs.last().unwrap().input_asset_ids.is_empty());
+        assert!(!card.contains("Identity refs"));
+    }
+
     #[test]
     fn prepare_generate_attaches_sheets_not_as_source_or_output() {
         let _session_guard = crate::session::test_session_lock();
@@ -2209,7 +2481,7 @@ mod tests {
             fs::create_dir_all(abs.parent().unwrap()).unwrap();
             fs::write(&abs, b"\x89PNG\r\n\x1a\nrest").unwrap();
         }
-        let (card, _) = prepare_generate(root, &mut state, 1, "s1_look_01").unwrap();
+        let (card, _) = prepare_generate_inner(root, &mut state, 1, "s1_look_01", true, &[], None, None).unwrap();
         assert!(card.contains("Characters/Tom Vale/model_sheet/tom_closeup_front.png"));
         assert!(card.contains("Characters/Pip Vale/model_sheet/pip_closeup_front.png"));
         assert!(card.contains("Identity refs"));
@@ -2267,7 +2539,7 @@ mod tests {
         board.slots.push(wardrobe);
         board.sync_asset_ids();
 
-        let (card, _) = prepare_generate(root, &mut state, 1, "s1_look_01").unwrap();
+        let (card, _) = prepare_generate_inner(root, &mut state, 1, "s1_look_01", true, &[], None, None).unwrap();
         assert!(card.contains("Approved continuity refs"));
         assert!(card.contains("Preproduction/Scene1/references/wardrobe_1.png"));
         let job = state.jobs.last().unwrap();
@@ -2395,6 +2667,53 @@ mod tests {
     }
 
     #[test]
+    fn selected_wardrobe_plate_never_plans_other_characters() {
+        let _session_guard = crate::session::test_session_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut state = tom_pip_state();
+        for path in [
+            "Characters/Tom Vale/model_sheet/tom_closeup_front.png",
+            "Characters/Tom Vale/model_sheet/tom_standing_front.png",
+            "Characters/Pip Vale/model_sheet/pip_closeup_front.png",
+            "Characters/Pip Vale/model_sheet/pip_standing_front.png",
+            "Preproduction/Scene1/references/wardrobe_1.png",
+        ] {
+            let abs = root.join(path);
+            fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            fs::write(&abs, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        }
+        state.assets.push(AssetRecord {
+            id: "wardrobe_lock".into(),
+            path: "Preproduction/Scene1/references/wardrobe_1.png".into(),
+            role: AssetRole::WardrobeReference,
+            status: AssetStatus::Approved,
+            scene_id: Some(1),
+            cut_id: None,
+            character_id: None,
+            source_job_id: None,
+            parent_asset_id: None,
+            notes: None,
+        });
+        let scene = state.scenes.iter_mut().find(|scene| scene.id == 1).unwrap();
+        let mut wardrobe =
+            LookSlot::new("s1_look_03", AssetRole::WardrobeReference, "Travel coats");
+        wardrobe.prompt = Some("Tom Vale and Pip Vale in worn period coats".into());
+        wardrobe.asset_ids.push("wardrobe_lock".into());
+        wardrobe.approved_asset_id = Some("wardrobe_lock".into());
+        scene.look_board.as_mut().unwrap().slots.push(wardrobe);
+
+        let (card, _) = prepare_wardrobe_plate_selected(root, &mut state, 1, "tom_vale", "wardrobe_lock").unwrap();
+        assert!(card.contains("2 stills"));
+        assert!(card.contains("Tom Vale"));
+        assert!(!card.contains("Pip Vale"));
+        assert_eq!(state.jobs.iter().filter(|j| j.kind == "wardrobe_plate").count(), 2);
+        assert!(state.jobs.iter().filter(|j| j.kind == "wardrobe_plate").all(|j| j.raw_provider_id.as_deref().unwrap().starts_with("tom_vale|")));
+        assert!(prepare_wardrobe_plate_selected(root, &mut state, 1, "nobody", "wardrobe_lock").is_err());
+        assert!(prepare_wardrobe_plate_selected(root, &mut state, 1, "tom_vale", "not-approved").is_err());
+    }
+
+    #[test]
     fn delete_image_removes_exact_version_file_and_registry_links() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -2439,6 +2758,7 @@ mod tests {
             spend_category: None,
             reconciliation: None,
             assembly_snapshot: None,
+            performance_asset_id: None,
             reserved_max_minor: None,
             actual_verified: false,
             unbounded_exposure: false,

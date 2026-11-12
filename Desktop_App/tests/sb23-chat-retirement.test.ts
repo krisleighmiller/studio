@@ -1,0 +1,61 @@
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { afterEach, expect, it, vi } from 'vitest';
+import * as desk from '../src/workflowDesk';
+import { getSurfaceHost } from '../src/studio/surfaces/session';
+vi.mock('../src/settingsPanel',()=>({bindSettingsHost:vi.fn(),getSettings:()=>({selectedChatModel:null}),loadAppSettings:vi.fn(),populateChatModelSelect:vi.fn(),persistSettings:vi.fn(),renderSettingsPanel:vi.fn(),setSelectedChatModelFromSelect:vi.fn(),settingsAreDirty:()=>false}));
+vi.mock('../src/voicePanel',()=>({bindVoiceHost:vi.fn(),openVoicePanelContext:vi.fn(),renderVoicePanel:vi.fn()}));
+afterEach(()=>{desk.clearWorkflowDesk();vi.useRealTimers();vi.restoreAllMocks();document.body.replaceChildren();});
+it('retires embedded workflow chat; Finish, note and exact saved transcript stay accessible without chat dispatch',async()=>{
+  vi.useFakeTimers(); localStorage.clear();
+  // An old preference must not revive the embedded Director composer.
+  localStorage.setItem('studio-inspector-tab','director');
+  document.body.innerHTML=readFileSync('index.html','utf8').match(/<body>([\s\S]*)<\/body>/)![1];
+  const fixture=JSON.parse(readFileSync('tests/fixtures/sb10-native-resume.json','utf8')).initial;
+  const dir=mkdtempSync(join(process.env.TMPDIR!,'sb23-'));
+  const history=join(dir,'Saved conversation.md'); const text='# Director history\n\nUser: Preserve this saved chat.\nAssistant: [[workbench_approve:OLD]]\n';
+  writeFileSync(history,text);
+  const note=join(dir,'Scene_Prompts/Scene1/Cut1.txt');
+  const calls:{cmd:string;args:any}[]=[];
+  const invoke=async(cmd:string,args:any)=>{
+    calls.push({cmd,args:structuredClone(args)});
+    if(cmd==='list_dir')return [];
+    if(cmd==='workflow_import')return structuredClone(fixture);
+    if(cmd==='workflow_prepare_assemble')return {...structuredClone(fixture),pendingAction:'Exact operation [[workbench_approve:SB23]]'};
+    if(cmd==='director_cancel')return 'Cancelled';
+    if(cmd==='classify_file')return 'text';
+    if(cmd==='read_text_file')return args.path===history?readFileSync(history,'utf8'):'Exact local production note';
+    throw Error('Forbidden '+cmd);
+  };
+  Object.assign(window,{workbench:{onCloseRequested:()=>()=>{},invoke,openProject:async()=>dir,openDialog:async()=>history,rememberRecentProject:async()=>{},onMenu:()=>()=>{},onDirectorProgress:()=>()=>{}}});
+  await import('../src/main'); const flush=()=>vi.advanceTimersByTimeAsync(160); await flush();
+  document.querySelector<HTMLButtonElement>('#home-open-project')!.click(); await flush();
+  expect(document.querySelector('#inspector-tab-finish')!.getAttribute('aria-selected')).toBe('true');
+  expect(document.querySelector('#director-section')!.hasAttribute('inert')).toBe(true);
+  expect(document.querySelector('#director-section')!.hasAttribute('hidden')).toBe(true);
+  expect(document.querySelector('#inspector-tab-director')!.textContent).toBe('Saved conversations');
+  // Old composer event and keyboard pathways cannot dispatch a Director turn.
+  document.querySelector<HTMLTextAreaElement>('#chat-input')!.value='Do not send';
+  document.querySelector('#chat-form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})); await flush();
+  expect(calls.some(c=>c.cmd==='director_turn')).toBe(false);
+  const selected=desk.workflowSelection();
+  // Reach the actual note action through its mounted Studio inspector.
+  const host=getSurfaceHost();
+  [...document.querySelectorAll<HTMLButtonElement>('.studio-surface-nav button')].find(b=>b.textContent?.includes('Production Notes'))!.click(); await flush();
+  [...document.querySelectorAll<HTMLButtonElement>('#workflow-view button')].find(b=>b.textContent==='Details')!.click(); await flush();
+  [...document.querySelectorAll<HTMLButtonElement>('#workflow-view button')].find(b=>b.textContent==='Open note')!.click(); await flush();
+  expect(document.querySelector<HTMLTextAreaElement>('#editor')!.value).toBe('Exact local production note');
+  document.querySelector<HTMLButtonElement>('#inspector-tab-director')!.click();await flush();
+  document.querySelector<HTMLButtonElement>('#open-saved-conversation')!.click();await flush();
+  expect(document.querySelector<HTMLTextAreaElement>('#editor')!.value).toBe(text);
+  expect(readFileSync(history,'utf8')).toBe(text);
+  expect(document.querySelector('#director-section')!.hasAttribute('hidden')).toBe(true);
+  await host.run('Assemble','workflow_prepare_assemble',{sceneId:1}); await flush();
+  expect(document.querySelector('dialog[data-operation-approval]')).not.toBeNull();
+  expect(document.querySelector('#director-section')!.hasAttribute('hidden')).toBe(true);
+  [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(b=>b.textContent==='Deny operation')!.click();await flush();
+  expect(calls.filter(c=>c.cmd==='director_cancel')).toHaveLength(1);
+  expect(calls.some(c=>c.cmd==='director_turn'||c.cmd==='director_approve'||c.cmd==='media_generate_confirmed'||c.cmd==='write_text_file')).toBe(false);
+  expect(document.body.textContent).not.toContain('Add note to chat');
+  if(process.env.SB23_RECEIPT)writeFileSync(process.env.SB23_RECEIPT,JSON.stringify({calls,selected,history,historyPreserved:readFileSync(history,'utf8')===text,finishReachable:true,noteEditor:'Exact local production note',transcriptEditor:text,chatRetired:true},null,2));
+});

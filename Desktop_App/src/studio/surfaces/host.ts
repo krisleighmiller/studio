@@ -12,6 +12,7 @@ import type {
 /** Studio surfaces mutate the project only through these existing host commands. */
 export type SurfaceHost = {
   busy: string | null;
+  busyControl: string | null;
   error: string | null;
   chatReady: boolean;
   state: ProjectState | null;

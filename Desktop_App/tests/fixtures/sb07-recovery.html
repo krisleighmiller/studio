@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"><title>SB07 isolated draft recovery</title></head><body><div id="desk"></div><script type="module">
+import '/src/styles.css';
+import * as desk from '/src/workflowDesk.ts';
+import fixture from './sc05-import-result.json';
+const root = document.querySelector('#desk');
+const empty = structuredClone(fixture); empty.state.scenes=[]; empty.report.scenes=[];
+window.calls=[]; window.providerAttempts=0;
+window.workbench={
+  invoke: async (command,args)=>{window.calls.push({command,args}); if(command==='workflow_import') return structuredClone(empty); throw new Error('Forbidden native/provider call: '+command);},
+  ask: async ()=>true
+};
+const forbidden=()=>{window.providerAttempts++; throw new Error('No provider/chat allowed');};
+let project='/disposable/sb07/A';
+desk.bindWorkflowDesk({root,projectRoot:()=>project,chatModel:()=>null,onOpenPath:forbidden,onAddToChat:forbidden,onOpenVoice:forbidden,onComposeChat:forbidden,onSelectionChange:()=>{},onStatus:()=>{}});
+window.openProject=async path=>{desk.clearWorkflowDesk();project=path;await desk.loadWorkflowDesk(path);};
+window.clickLabel=label=>{const button=[...root.querySelectorAll('button')].find(b=>b.textContent===label);if(!button) throw new Error('Missing '+label);button.click();};
+window.editDraft=(name,value)=>{const field=root.querySelector(`[name="${name}"]`);field.value=value;field.dispatchEvent(new Event('input'));};
+window.readDraft=()=>Object.fromEntries(['title','notes','script'].map(name=>[name,root.querySelector(`[name="${name}"]`)?.value]));
+window.expected={title:'  Rain — 未完  ',notes:'  First thought\n\nLast thought ☔\n',script:'Not a complete script.\n  Keep whitespace.\n'};
+window.largeText='Retain after real quota failure.\n'+'Draft ☔. '.repeat(100000)+'\n';
+await window.openProject(project); window.fixtureReady=true;
+</script></body></html>

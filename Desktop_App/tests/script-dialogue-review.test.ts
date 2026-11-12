@@ -1,0 +1,42 @@
+import { readFileSync } from "node:fs";
+import { afterEach, expect, it, vi } from "vitest";
+import * as desk from "../src/workflowDesk";
+import { renderSketchStage } from "../src/studio/surfaces/sketchStage";
+import type { WorkflowImportResult } from "../src/workflowTypes";
+
+const native = JSON.parse(readFileSync("tests/fixtures/fx02-import-result.json", "utf8")) as WorkflowImportResult;
+afterEach(() => { desk.clearWorkflowDesk(); document.body.replaceChildren(); vi.restoreAllMocks(); });
+it("shows scene and cut script diff, and keeps revision intent explicit", async () => {
+  const result = structuredClone(native);
+  const scene = result.state.scenes.find(s => s.source_path)!;
+  scene.cuts = [structuredClone(JSON.parse(readFileSync("tests/fixtures/sb12-native-performance.json", "utf8")).selected.state.scenes[0].cuts[0])];
+  const cut = scene.cuts[0];
+  const previous = [{ speaker: "MARA", text: "Original long line" }];
+  const current = [{ speaker: "MARA", text: "Short line" }];
+  scene.dialogue = current;
+  scene.script_dialogue_review = { previous, current };
+  cut.script_dialogue_review = { previous, current };
+  cut.dialogue = [{ speaker: "MARA", text: "Retained production cue" }];
+  cut.sketch = { ...cut.sketch!, dialogue: [{ speaker: "MARA", text: "Retained sketch line" }] };
+  const invoke = vi.fn(async () => result);
+  vi.stubGlobal("window", { workbench: { invoke } });
+  const root = document.createElement("main"); document.body.append(root);
+  desk.bindWorkflowDesk({ root, projectRoot: () => "/fixture/project", onOpenPath: vi.fn(), onAddToChat: vi.fn(), onOpenVoice: vi.fn(), onComposeChat: vi.fn(), onSelectionChange: vi.fn(), chatModel: () => null, onStatus: vi.fn() });
+  await desk.loadWorkflowDesk("/fixture/project");
+  const choose = (label: string) => {
+    const button = [...root.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.includes(label));
+    expect(button, label).toBeDefined(); button!.click();
+  };
+  choose("Script");
+  expect(root.textContent).toContain("Original long line");
+  expect(root.textContent).toContain("Short line");
+  const emit = vi.fn();
+  const sketch = renderSketchStage(scene, undefined, emit, vi.fn());
+  expect(sketch.textContent).toContain("Retained production cue");
+  expect(sketch.textContent).toContain("Retained sketch line");
+  expect(sketch.textContent).toContain("Revise cut dialogue");
+  const keep = [...sketch.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent?.includes("Keep authored dialogue"))!;
+  expect(keep.disabled).toBe(false);
+  keep.click();
+  expect(emit).toHaveBeenCalledWith({ type: "resolve-script-dialogue", shotId: cut.stable_id, choice: "keep" });
+});

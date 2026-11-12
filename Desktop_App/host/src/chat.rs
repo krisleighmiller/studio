@@ -292,9 +292,15 @@ fn bearer_headers(api_key: &str) -> Vec<(String, String)> {
     ]
 }
 
+const CHAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 fn post_json(url: &str, headers: Vec<(String, String)>, body: &Value) -> Result<Value, String> {
+    post_json_with_timeout(url, headers, body, CHAT_TIMEOUT)
+}
+
+fn post_json_with_timeout(url: &str, headers: Vec<(String, String)>, body: &Value, timeout: std::time::Duration) -> Result<Value, String> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(timeout)
         .build()
         .map_err(|error| format!("Could not build HTTP client: {error}"))?;
     let mut request = client.post(url).json(body);
@@ -303,11 +309,15 @@ fn post_json(url: &str, headers: Vec<(String, String)>, body: &Value) -> Result<
     }
     let response = request
         .send()
-        .map_err(|error| format!("Chat request failed: {error}"))?;
+        .map_err(|error| if error.is_timeout() {
+            format!("Chat request timed out after {} seconds. The provider may still charge for the request; check its status before retrying.", timeout.as_secs())
+        } else { format!("Chat request failed: {error}") })?;
     let status = response.status();
     let text = response
         .text()
-        .map_err(|error| format!("Could not read chat response: {error}"))?;
+        .map_err(|error| if error.is_timeout() {
+            format!("Chat response timed out after {} seconds. The provider may still charge for the request; check its status before retrying.", timeout.as_secs())
+        } else { format!("Could not read chat response: {error}") })?;
     if !status.is_success() {
         return Err(format!("Chat request failed ({status}): {text}"));
     }
@@ -507,6 +517,31 @@ mod tests {
             );
             assert!(received.contains("hi"));
         }
+    }
+
+    #[test]
+    fn chat_timeout_is_long_enough_for_extended_drafts() {
+        assert!(CHAT_TIMEOUT >= std::time::Duration::from_secs(600), "drafting needs more than the old 120-second deadline");
+    }
+
+    #[test]
+    fn stalled_chat_response_reports_timeout_clearly() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            stream.read(&mut request).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n").unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        let error = post_json_with_timeout(&url, vec![], &json!({}), Duration::from_millis(80)).unwrap_err();
+        server.join().unwrap();
+        assert!(error.to_lowercase().contains("timed out"), "{error}");
     }
 
     #[test]

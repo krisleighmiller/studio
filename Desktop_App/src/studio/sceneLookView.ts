@@ -1,20 +1,19 @@
 import { LOOK_ROLES } from "../workflowTypes";
-import type { LookVersionModel, PlateModel, SceneListItemModel, SceneLookModel } from "./sceneLookModel";
+import type { LookVersionModel, SceneListItemModel, SceneLookModel } from "./sceneLookModel";
 
 export type SceneLookIntent =
   | { type: "select-slot"; slotId: string }
   | { type: "select-version"; assetId: string }
   | { type: "draft-board" }
   | { type: "save-prompt"; slotId: string; role: string; title: string; prompt: string; negative: string }
-  | { type: "attach"; slotId: string }
-  | { type: "generate"; slotId: string; role: string; title: string; prompt: string; negative: string }
+  | { type: "attach"; slotId?: string; role?: string }
+  | { type: "crop"; slotId: string; assetId: string; path: string }
+  | { type: "generate"; slotId: string; role: string; title: string; prompt: string; negative: string; attachCharacterImage: boolean; referenceAssetIds: string[]; imageCapability?: string }
   | { type: "approve"; slotId: string; assetId: string }
   | { type: "reject"; slotId: string; assetId: string }
   | { type: "delete"; slotId: string; assetId: string }
   | { type: "open"; path: string }
-  | { type: "attach-director"; slotId: string }
-  | { type: "build-plates" }
-  | { type: "delete-plate"; assetId: string };
+  | { type: "attach-director"; slotId: string };
 
 export function renderSceneListView(
   items: SceneListItemModel[],
@@ -63,6 +62,7 @@ export function renderSceneListView(
 export function renderSceneLookView(
   model: SceneLookModel,
   onIntent: (intent: SceneLookIntent) => void,
+  compact = false,
 ): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "scene-look-workspace";
@@ -80,18 +80,31 @@ export function renderSceneLookView(
       : model.slots.find((item) => item.id === model.selectedSlotId) ?? null;
   if (activeSlot) header.append(approvalPill(activeSlot));
   wrap.append(header);
+  if (model.affectedCuts.length) {
+    const affected = document.createElement("section");
+    affected.className = "scene-look-affected-cuts";
+    affected.append(note("workflow-field-hint", "Cuts bound to this look slot. Approving a replacement does not swap their image or authorize video. Review each stale cut in Production, rebind its visual source, and refresh its production note before preparing video."));
+    for (const cut of model.affectedCuts) {
+      affected.append(note(cut.stale ? "workflow-banner warn" : "workflow-field-hint",
+        `${cut.label} · source ${cut.assetId} · ${cut.stale ? "Needs review/rebind" : "Bound"} · note ${cut.notePath ?? "none"}${cut.pending ? " · pending video approval must be prepared again" : ""}`));
+    }
+    wrap.append(affected);
+  }
 
   if (model.blockers.length || model.failedJobs.length) {
     wrap.append(compactBlockerSummary(model, onIntent));
   }
 
   if (model.emptySlots || !model.selectedSlotId) {
+    const role = roleSelect("interior_reference");
+    role.select.setAttribute("aria-label", "New look slot role");
+    role.select.disabled = !!model.busyReason;
     wrap.append(
+      note("workflow-missing", "No look slots yet. Choose a role and attach an existing image to create the first slot locally. This is a scene look reference, not a cut start frame; no generation or approval is performed."),
+      role.label,
+      button("Attach existing image", model.busyReason, () => onIntent({ type: "attach", role: role.select.value })),
       button("Draft look board", model.busyReason, () => onIntent({ type: "draft-board" })),
-      note(
-        "workflow-missing",
-        "No look slots yet. Draft from scene intent, or wait until intent is approved if you want the model to use it.",
-      ),
+      note("workflow-field-hint", "Or draft a look board from scene intent using your configured model."),
     );
     return wrap;
   }
@@ -101,6 +114,8 @@ export function renderSceneLookView(
   const titleInput = textField("Title", slot.title);
   const promptInput = areaField("Prompt", slot.prompt, 3);
   const negativeInput = areaField("Negative", slot.negativePrompt, 2);
+  const characterImage = document.createElement("input");
+  characterImage.type = "checkbox";
   const promptValues = () => ({
     slotId: slot.id,
     role: role.select.value,
@@ -109,13 +124,52 @@ export function renderSceneLookView(
     negative: negativeInput.input.value,
   });
 
+  const selectedReferences: string[] = [];
+  const referenceLabel = document.createElement("label");
+  referenceLabel.textContent = "Optional reference images (added in order)";
+  const reference = document.createElement("select");
+  reference.setAttribute("aria-label", "Reference image");
+  const noReference = document.createElement("option"); noReference.value = ""; noReference.textContent = "Choose an image"; reference.append(noReference);
+  for (const choice of model.referenceChoices ?? []) {
+    const option = document.createElement("option"); option.value = choice.assetId; option.textContent = choice.label; reference.append(option);
+  }
+  const selectedList = document.createElement("ol");
+  const redrawReferences = () => {
+    selectedList.replaceChildren();
+    selectedReferences.forEach((id, index) => {
+      const item = document.createElement("li");
+      item.textContent = model.referenceChoices?.find(choice => choice.assetId === id)?.label ?? id;
+      const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "Remove";
+      remove.setAttribute("aria-label", `Remove reference ${index + 1}`);
+      remove.addEventListener("click", () => { selectedReferences.splice(index, 1); redrawReferences(); });
+      item.append(remove); selectedList.append(item);
+    });
+  };
+  const add = document.createElement("button"); add.type = "button"; add.textContent = "Add reference";
+  add.setAttribute("aria-label", "Add reference image");
+  add.addEventListener("click", () => { if (reference.value && !selectedReferences.includes(reference.value)) { selectedReferences.push(reference.value); redrawReferences(); } });
+  referenceLabel.append(reference); wrap.append(referenceLabel, add, selectedList);
+  const route = document.createElement("select");
+  route.setAttribute("aria-label", "Image generation model");
+  for (const choice of model.imageRoutes ?? []) {
+    const option = document.createElement("option"); option.value = choice.id; option.textContent = choice.label; route.append(option);
+  }
+  if (model.imageRoutes?.some(choice => choice.id === "image.text_to_image")) route.value = "image.text_to_image";
+  if (model.imageRoutes?.length) {
+    const label = document.createElement("label"); label.textContent = "Image generation model"; label.append(route); wrap.append(label);
+  }
   const layout = document.createElement("div");
   layout.className = "scene-look scene-look-hero";
   layout.append(
     primaryStage(model, slot.id, onIntent),
-    alternateColumn(model, onIntent, () => onIntent({ type: "generate", ...promptValues() })),
+    alternateColumn(model, onIntent, characterImage, () => onIntent({ type: "generate", ...promptValues(), attachCharacterImage: characterImage.checked, referenceAssetIds: [...selectedReferences], imageCapability: route.value || undefined }),
+      () => onIntent({ type: "attach", slotId: slot.id })),
   );
-  wrap.append(layout);
+  wrap.insertBefore(layout, referenceLabel);
+
+  // The Reference Images page supplies its own description editor and one
+  // workspace per slot; do not duplicate slot navigation or prompt editors.
+  if (compact) return wrap;
 
   const slotRow = document.createElement("div");
   slotRow.className = "scene-look-slots";
@@ -172,26 +226,9 @@ export function renderSceneLookView(
       onIntent({ type: "attach-director", slotId: slot.id }),
     ),
     button("Save prompt", model.busyReason, () => onIntent({ type: "save-prompt", ...promptValues() })),
-    button("Attach image", model.busyReason, () => onIntent({ type: "attach", slotId: slot.id })),
-    button("Generate still", model.busyReason, () => onIntent({ type: "generate", ...promptValues() })),
     button("Draft look board", model.busyReason, () => onIntent({ type: "draft-board" })),
   );
-  if (model.canBuildPlates) {
-    actions.append(
-      button("Build wardrobe plates", model.busyReason, () => onIntent({ type: "build-plates" })),
-    );
-  }
   wrap.append(disclosure("Advanced actions", actions, false));
-
-  if (model.showPlates) {
-    const plates = document.createElement("section");
-    plates.className = "scene-look-plates";
-    plates.append(note("workflow-field-hint", model.plateNote));
-    for (const plate of model.plates) {
-      plates.append(plateCard(plate, model.busyReason, onIntent));
-    }
-    wrap.append(disclosure(`Plates (${model.plates.length})`, plates, false));
-  }
   return wrap;
 }
 
@@ -264,6 +301,9 @@ function primaryStage(
     button("Open", primary.path ? model.busyReason : "This still has no file path.", () => {
       if (primary.path) onIntent({ type: "open", path: primary.path });
     }),
+    button("Crop locally", primary.path ? model.busyReason : "This still has no file path.", () => {
+      if (primary.path) onIntent({ type: "crop", slotId, assetId: primary.assetId, path: primary.path });
+    }),
     button("Delete", model.busyReason, () => onIntent({ type: "delete", slotId, assetId: primary.assetId })),
   );
   stage.append(caption, row);
@@ -273,7 +313,9 @@ function primaryStage(
 function alternateColumn(
   model: SceneLookModel,
   onIntent: (intent: SceneLookIntent) => void,
+  characterImage: HTMLInputElement,
   onGenerate: () => void,
+  onAttach: () => void,
 ): HTMLElement {
   const column = document.createElement("div");
   column.className = "scene-look-alts";
@@ -305,7 +347,9 @@ function alternateColumn(
     const open = button("Open", version.path ? model.busyReason : "This still has no file path.", () => {
       if (version.path) onIntent({ type: "open", path: version.path });
     });
-    actions.append(approve, open);
+    actions.append(approve, open, button("Crop locally", version.path ? model.busyReason : "This still has no file path.", () => {
+      if (version.path && model.selectedSlotId) onIntent({ type: "crop", slotId: model.selectedSlotId, assetId: version.assetId, path: version.path });
+    }));
     if (!version.approved && !version.rejected) {
       actions.append(
         button("Reject", model.busyReason, () => {
@@ -321,34 +365,23 @@ function alternateColumn(
   const generate = document.createElement("button");
   generate.type = "button";
   generate.className = "scene-look-generate";
-  generate.textContent = "Add alternate";
+  generate.textContent = model.versions.length ? "Add alternate" : "Generate still";
   if (model.busyReason) {
     generate.disabled = true;
     generate.title = model.busyReason;
   }
   generate.addEventListener("click", onGenerate);
-  column.append(generate);
+  const characterLabel = document.createElement("label");
+  characterLabel.append(characterImage, document.createTextNode(" Attach character images and approved wardrobe references"));
+  column.append(
+    button("Attach existing image", model.busyReason, onAttach),
+    characterLabel,
+    generate,
+    note("workflow-field-hint", "Attaches a project-owned copy to this selected scene look slot, not a cut start frame. Generation uses your configured image provider and requires approval before submission; provider charges may apply. Attaching an existing image does not generate media."),
+  );
   return column;
 }
 
-function plateCard(
-  plate: PlateModel,
-  busyReason: string | null,
-  onIntent: (intent: SceneLookIntent) => void,
-): HTMLElement {
-  const fig = document.createElement("figure");
-  fig.className = "scene-look-alt";
-  fig.append(stillImage(
-    { assetId: plate.assetId, path: plate.path, statusLabel: plate.label, approved: true, rejected: false },
-    () => {
-      if (plate.path) onIntent({ type: "open", path: plate.path });
-    },
-  ));
-  const caption = document.createElement("figcaption");
-  caption.textContent = plate.path ? plate.label : `${plate.label} · file missing`;
-  fig.append(caption, button("Delete", busyReason, () => onIntent({ type: "delete-plate", assetId: plate.assetId })));
-  return fig;
-}
 
 function stillImage(version: LookVersionModel, onOpen?: () => void): HTMLElement {
   if (!version.path) {

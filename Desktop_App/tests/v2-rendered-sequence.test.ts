@@ -1,0 +1,36 @@
+import { afterEach, expect, it } from "vitest";
+import { renderAssembleStage } from "../src/studio/surfaces/assembleStage";
+import { bindSurfaceHost, resetSurfaceSession } from "../src/studio/surfaces/session";
+import type { SurfaceHost } from "../src/studio/surfaces/host";
+import type { SceneRecord, ProjectState } from "../src/workflowTypes";
+
+afterEach(() => { resetSurfaceSession(); document.body.replaceChildren(); });
+it("reorders selected cuts in Assemble and marks the old rendered master stale after a saved reorder/trim", async () => {
+  const scene = {id:1,stable_id:"scene-1",cuts:[1,2,3].map(i=>({id:{source_scene:1,cut:i},stable_id:`cut-${i}`,selected_take:`take-${i}`,takes:[{id:`take-${i}`,path:`paid-${i}.mp4`,status:"selected"}]})),animatic:{shots:[1,2,3].map(i=>({id:`anim-${i}`,cut_id:{source_scene:1,cut:i},duration_seconds:2,transition:"cut"}))}} as SceneRecord;
+  const snapshot = [1,2,3].map(i=>({shot_id:`cut-${i}`,cut_label:i,take_id:`take-${i}`,path:`paid-${i}.mp4`,start_seconds:0,duration_seconds:2,transition:"cut"}));
+  const state = {scenes:[scene],jobs:[{id:"master-1",kind:"assemble",status:"completed",scope:{kind:"project",id:"project"},raw_provider_id:"project",output_path:"Final/Project_master.mp4",assembly_snapshot:snapshot}],rendered_review:{job_id:"master-1"}} as ProjectState;
+  const intents: unknown[] = [];
+  bindSurfaceHost({state,busy:null,error:null,blockerNames:()=>[],reviewExportPath:()=>null,resolvePath:(p:string)=>p,mediaUrl:async(p:string)=>p} as unknown as SurfaceHost);
+  const paint = () => { document.body.replaceChildren(renderAssembleStage(scene,intent=>intents.push(intent))); return document.body; };
+  let view = paint();
+  expect(view.textContent).toContain("Approved rendered sequence");
+  view.querySelector<HTMLButtonElement>('[aria-label="Move earlier rendered cut 3"]')!.click();
+  expect(intents).toEqual([{type:"reorder-sequence",shotIds:["anim-1","anim-3","anim-2"]}]);
+  scene.animatic!.shots = [scene.animatic!.shots![0]!,scene.animatic!.shots![2]!,scene.animatic!.shots![1]!];
+  state.rendered_review = undefined;
+  view = paint();
+  expect(view.textContent).toContain("Stale master");
+  expect([...view.querySelectorAll<HTMLLIElement>('.workflow-readiness li')].slice(-3).map(li=>li.textContent?.match(/Cut \d/)?.[0])).toEqual(["Cut 1","Cut 3","Cut 2"]);
+  expect([...view.querySelectorAll("button")].find(b=>b.textContent==="Approve rendered rough cut")?.disabled).toBe(true);
+  expect(state.jobs![0]!.assembly_snapshot).toEqual(snapshot);
+  scene.animatic!.shots![0]!.trim_in_seconds = 0.5;
+  expect(paint().textContent).toContain("Stale master");
+  state.jobs!.push({...state.jobs![0]!,id:"master-2",output_path:"Final/Project_master_v2.mp4",assembly_snapshot:[{...snapshot[0]!,start_seconds:0.5,duration_seconds:1.5},snapshot[2]!,snapshot[1]! ]});
+  const reopened = paint();
+  expect(reopened.textContent).toContain("Draft · not a creative approval");
+  const player = reopened.querySelector<HTMLVideoElement>('video[aria-label="Selected rendered takes · saved project master"]');
+  expect(player?.controls).toBe(true);
+  await Promise.resolve();
+  expect(player?.getAttribute("src")).toBe("Final/Project_master_v2.mp4");
+  expect(reopened.textContent).toContain("Final/Project_master_v2.mp4");
+});

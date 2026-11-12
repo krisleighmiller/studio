@@ -3,6 +3,7 @@ import type { JobFilter, JobRowModel, JobsModel } from "./jobsModel";
 export type JobsIntent =
   | { type: "toggle" }
   | { type: "filter"; filter: JobFilter | "all" }
+  | { type: "output-context"; jobId: string; x: number; y: number }
   | { type: "open"; jobId: string };
 
 const FILTERS: Array<{ id: JobFilter | "all"; label: string }> = [
@@ -78,6 +79,8 @@ export function renderJobsView(
 }
 
 function jobRow(row: JobRowModel, onIntent: (intent: JobsIntent) => void): HTMLElement {
+  const container = document.createElement("div");
+  container.className = "studio-job-row";
   const button = document.createElement("button");
   button.type = "button";
   button.className = "studio-job";
@@ -94,25 +97,51 @@ function jobRow(row: JobRowModel, onIntent: (intent: JobsIntent) => void): HTMLE
   title.textContent = `${row.title}: ${row.statusLabel}`;
   const meta = document.createElement("span");
   meta.className = "studio-job-meta";
-  meta.textContent = row.elapsed === "unknown" ? `${row.detail} · time unknown` : `${row.elapsed} · ${row.detail}`;
+  if (row.failureError) {
+    meta.append(document.createTextNode(row.elapsed === "unknown" ? "" : `${row.elapsed} · `));
+    const error = document.createElement("span");
+    error.className = "studio-job-error";
+    error.textContent = row.failureError;
+    error.addEventListener("contextmenu", () => {
+      const selection = window.getSelection();
+      if (!selection) return;
+      const range = document.createRange();
+      range.selectNodeContents(error);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    meta.append(error);
+    if (row.elapsed === "unknown") meta.append(document.createTextNode(" · time unknown"));
+  } else {
+    meta.textContent = row.elapsed === "unknown" ? `${row.detail} · time unknown` : `${row.elapsed} · ${row.detail}`;
+  }
   const facts = document.createElement("span");
   facts.className = "studio-job-facts";
-  facts.textContent = [
+  facts.append(document.createTextNode([
     `Created ${row.created}`,
     `Started ${row.started}`,
     `Completed ${row.completed}`,
     `Scope ${row.scope}`,
-    `Progress ${row.progress}`,
-    `Retry ${row.retry}`,
-    `Prediction ${row.predictionId ?? "unknown"}`,
-  ].join(" · ");
-  copy.append(title, meta, facts);
+  ].join(" · ") + " · Progress "));
+  const progress = document.createElement("span");
+  progress.className = "studio-job-progress";
+  progress.textContent = row.progress;
+  progress.addEventListener("contextmenu", () => {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(progress);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  facts.append(progress, document.createTextNode(` · Retry ${row.retry} · Prediction ${row.predictionId ?? "unknown"}`));
+  copy.append(meta, facts);
   const support = document.createElement("span");
   support.className = "studio-job-support";
   support.textContent = `Cancel: ${row.cancellation} · Resume: ${row.resume}`;
   copy.append(support);
 
-  button.append(dot, copy);
+  button.append(dot, title);
   if (row.actionLabel) {
     const action = document.createElement("span");
     action.className = "studio-job-action";
@@ -120,5 +149,14 @@ function jobRow(row: JobRowModel, onIntent: (intent: JobsIntent) => void): HTMLE
     button.append(action);
     button.addEventListener("click", () => onIntent({ type: "open", jobId: row.id }));
   }
-  return button;
+  container.append(button, copy);
+  if (row.bucket === "completed" || row.bucket === "awaiting") {
+    container.addEventListener("contextmenu", (event) => {
+      if (!row.outputPath) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onIntent({ type: "output-context", jobId: row.id, x: event.clientX, y: event.clientY });
+    });
+  }
+  return container;
 }

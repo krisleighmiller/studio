@@ -1589,10 +1589,13 @@ fn concat_with_xfades(
         args.push("-i".into());
         args.push(crate::ffmpeg_path::ffmpeg_local_arg(clip)?);
     }
-    // Build video xfade + acrossfade chain
-    let mut filter = String::new();
-    let mut v_label = "0:v".to_string();
-    let mut a_label = "0:a".to_string();
+    // Concat uses AVTB; normalize every input so a later xfade can follow
+    // either another fade or an exact hard cut with the same time base.
+    let mut filter = (0..clips.len()).map(|i| format!(
+        "[{i}:v]settb=AVTB[input_v{i}];[{i}:a]asetpts=PTS-STARTPTS[input_a{i}];"
+    )).collect::<String>();
+    let mut v_label = "input_v0".to_string();
+    let mut a_label = "input_a0".to_string();
     let mut offset = durations[0];
     for i in 1..clips.len() {
         let kind = transitions
@@ -1600,7 +1603,7 @@ fn concat_with_xfades(
             .copied()
             .unwrap_or(TransitionKind::Cut);
         let use_fade = !matches!(kind, TransitionKind::Cut);
-        let d = if use_fade { fade_dur } else { 0.01 };
+        let d = if use_fade { fade_dur } else { 0.0 };
         let next_v = format!("v{i}");
         let next_a = format!("a{i}");
         let xfade_offset = (offset - d).max(0.0);
@@ -1609,15 +1612,17 @@ fn concat_with_xfades(
             TransitionKind::Fade => "fadeblack",
             TransitionKind::Cut => "fade",
         };
-        if i == 1 {
+        if i > 1 { filter.push(';'); }
+        if use_fade {
             filter.push_str(&format!(
-                "[{v_label}][{i}:v]xfade=transition={transition}:duration={d}:offset={xfade_offset}[{next_v}];\
-[{a_label}][{i}:a]acrossfade=d={d}[{next_a}]"
+                "[{v_label}][input_v{i}]xfade=transition={transition}:duration={d}:offset={xfade_offset}[{next_v}];\
+[{a_label}][input_a{i}]acrossfade=d={d}[{next_a}]"
             ));
         } else {
+            // A sub-frame xfade is not a cut: it can reach EOF before its
+            // offset and silently omit the entire next clip. Keep all frames.
             filter.push_str(&format!(
-                ";[{v_label}][{i}:v]xfade=transition={transition}:duration={d}:offset={xfade_offset}[{next_v}];\
-[{a_label}][{i}:a]acrossfade=d={d}[{next_a}]"
+                "[{v_label}][{a_label}][input_v{i}][input_a{i}]concat=n=2:v=1:a=1[cut_v{i}][{next_a}];[cut_v{i}]fps=24,settb=AVTB[{next_v}]"
             ));
         }
         v_label = next_v;

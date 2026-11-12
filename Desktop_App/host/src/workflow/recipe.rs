@@ -517,8 +517,10 @@ fn readiness(stage: WorkflowStage, scene: &SceneRecord, any_characters: bool) ->
                 .count();
             if sketches == 0 {
                 StageStatus::Missing
+            } else if scene.animatic.as_ref().is_some_and(|animatic| animatic.approved) {
+                StageStatus::Approved
             } else {
-                StageStatus::Draft
+                StageStatus::Present
             }
         }
         WorkflowStage::ReferenceImages => {
@@ -625,6 +627,7 @@ mod tests {
             voice_ready: false,
             profile_path: None,
             model_sheet_manifest_path: None,
+            reference_asset_ids: Vec::new(),
             profile: CharacterProfile::default(),
             asset_ids: Vec::new(),
             notes: Vec::new(),
@@ -662,7 +665,7 @@ mod tests {
         let scene = state.scene(1).unwrap();
         assert_eq!(scene.stages.characters, StageStatus::Missing);
         assert_eq!(scene.stages.script, StageStatus::Present);
-        assert_eq!(scene.stages.cut_sketches, StageStatus::Draft);
+        assert_eq!(scene.stages.cut_sketches, StageStatus::Present);
         assert_eq!(scene.stages.render, StageStatus::Present);
         assert_eq!(scene.stages.take_review, StageStatus::Present);
         assert!(scene.cuts[0]
@@ -684,6 +687,7 @@ mod tests {
             voice_ready: false,
             profile_path: None,
             model_sheet_manifest_path: None,
+            reference_asset_ids: Vec::new(),
             profile: CharacterProfile::default(),
             asset_ids: Vec::new(),
             notes: Vec::new(),
@@ -715,6 +719,7 @@ mod tests {
             voice_ready: true,
             profile_path: None,
             model_sheet_manifest_path: None,
+            reference_asset_ids: Vec::new(),
             profile: CharacterProfile::default(),
             asset_ids: Vec::new(),
             notes: Vec::new(),
@@ -810,6 +815,15 @@ mod tests {
             Some("Waiting on Characters.")
         );
         assert!(nav.iter().any(|item| item.id == "script" && item.available));
+    }
+
+    #[test]
+    fn production_prompts_follow_sketches_not_optional_reference_images() {
+        for recipe in [ProductionRecipe::narrative(), ProductionRecipe::montage()] {
+            let graph = graph(recipe);
+            let notes = graph.stages.iter().find(|stage| stage.id == "production_notes").unwrap();
+            assert_eq!(notes.depends_on, vec!["cut_sketches"], "production prompt is not an image attachment");
+        }
     }
 
     #[test]

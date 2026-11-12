@@ -72,6 +72,68 @@ captures the rendered page, and asserts a renderer has zero effective
 capabilities and extra seccomp filters. It does not open projects or submit
 work. Native display smoke was exercised on the laptop's active Xwayland `:0`.
 
+## Real interactive/provider testing (explicit opt-in)
+
+The default `./native-display` above is **an offline disposable fixture**, not a
+usable provider-enabled dev session. It cannot preserve API credentials across
+container removal and is not evidence that live generation works.
+
+From the laptop graphical terminal, deliberately choose:
+
+```bash
+cd /home/kris/Content_Creation/Studio/dev-container
+./native-display --interactive-providers
+```
+
+No rebuild or dependency install is needed for this launcher repair. It uses
+ordinary Docker bridge networking (outbound access), not host networking. This
+mode permits provider calls made by Studio/user actions; the launcher itself
+never fetches a provider catalog or makes inference requests. Studio may probe
+container-local Ollama during startup; Docker `localhost` is not the host.
+Existing provider approval/spending rules are unchanged.
+
+**First launch:** a native GNOME prompt says **Choose password for new keyring**,
+for **Studio Docker**. Type a new **non-empty** keyring password and confirm it,
+then click **Continue**. Type this password only into that native prompt, never
+chat, shell arguments, an environment variable, or an agent tool. This is a
+container-only keyring password, not your API key or host login password. On
+later launches, unlock it in the native prompt. Cancellation/failure prevents
+Studio from starting; unencrypted or session-only keyrings are refused. There
+is no blank-password default and no plaintext API-key fallback.
+
+Then enter the API key directly in Studio Settings and click **Save**. **Reload**
+should show **Saved on this computer — leave blank to keep it** with a blank
+key field. Fetching models/generating scripts is a separate deliberate user
+action; no real provider was called by the repair verification.
+
+Settings/Electron home and the native encrypted keyring persist under the
+machine-local, owner-only directory:
+
+```
+~/.local/share/studio-docker/interactive/
+```
+
+It is not inside the synchronized source tree, not the host keyring, and is
+never mounted in offline fixture mode. A process lock prevents two interactive
+launches sharing it. Settings metadata is plaintext (keys stripped by Studio);
+keyring secrets are encrypted by GNOME Keyring. Both the keyring and settings
+must be retained together. Do not synchronize or share this directory. Keep
+its password safe: there is no agent-held recovery password. `compose down
+--volumes` does not delete this bind-mounted directory. Resetting it is a
+separate destructive user decision and loses stored settings/keys.
+
+An already-open old offline window is **not upgraded**. Do not stop it while it
+has unsaved work: close it yourself when ready, then use the explicit command
+above and re-enter the key directly in the new window. Do not copy private
+host credentials or mount host D-Bus to repair it.
+
+Implementation reuses installed libsecret/Secret Service `CreateCollection`
+with alias `default`, native GCR password/unlock prompts, and a private session
+bus with the correct container HOME/display activation environment. The default
+Rust keyring store expects that alias; it does not create it automatically.
+`compose.interactive.yaml` alone changes networking/persistence; the default
+Compose `ui` remains `network_mode: none` and disposable.
+
 ## Identity: rootless server versus rootful laptop
 
 `./studio` discovers daemon rootless mode on each invocation. Workbench UID/GID

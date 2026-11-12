@@ -1,0 +1,3603 @@
+{
+  "initial": {
+    "report": {
+      "character_count": 0,
+      "identity_ready": 0,
+      "project_name": null,
+      "recipe": {
+        "id": "narrative_dialogue",
+        "label": "Narrative dialogue",
+        "stages": [
+          {
+            "depends_on": [],
+            "id": "script",
+            "label": "Script",
+            "required_roles": [],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "script"
+            ],
+            "id": "characters",
+            "label": "Characters",
+            "required_roles": [
+              "cast",
+              "voice"
+            ],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "characters"
+            ],
+            "id": "scene_intent",
+            "label": "Scene Intent",
+            "required_roles": [],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "scene_intent"
+            ],
+            "id": "scene_look",
+            "label": "Scene Look",
+            "required_roles": [],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "scene_look"
+            ],
+            "id": "cut_sketches",
+            "label": "Cut Sketches",
+            "required_roles": [
+              "mouth_policy"
+            ],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "cut_sketches"
+            ],
+            "id": "reference_images",
+            "label": "Reference Images",
+            "required_roles": [],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "cut_sketches"
+            ],
+            "id": "production_notes",
+            "label": "Production Notes",
+            "required_roles": [],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "production_notes"
+            ],
+            "id": "render",
+            "label": "Render",
+            "required_roles": [],
+            "work_area": "produce"
+          },
+          {
+            "depends_on": [
+              "render"
+            ],
+            "id": "take_review",
+            "label": "Take Review",
+            "required_roles": [],
+            "work_area": "produce"
+          },
+          {
+            "depends_on": [
+              "take_review"
+            ],
+            "id": "assemble",
+            "label": "Assemble",
+            "required_roles": [],
+            "work_area": "finish"
+          }
+        ]
+      },
+      "recipes": [
+        {
+          "id": "narrative_dialogue",
+          "label": "Narrative dialogue"
+        },
+        {
+          "id": "montage",
+          "label": "Montage"
+        }
+      ],
+      "scenes": [
+        {
+          "approved_start_frames": 0,
+          "can_backfill_sketches": false,
+          "cut_sketches": true,
+          "cuts_found": 1,
+          "effectively_performance_heavy": false,
+          "id": 1,
+          "mix": {
+            "lipsync": 1,
+            "silent": 0,
+            "voice_over": 0
+          },
+          "mix_verdict": {
+            "messages": [],
+            "mix": {
+              "other_dialogue": 0,
+              "performance": 1,
+              "silent": 0
+            },
+            "status": "ok",
+            "strategy": "cinematic_balanced"
+          },
+          "navigation": [
+            {
+              "available": true,
+              "depends_on": [],
+              "disabled_reason": null,
+              "id": "script",
+              "label": "Script",
+              "status": "missing",
+              "work_area": "plan"
+            },
+            {
+              "available": false,
+              "depends_on": [
+                "script"
+              ],
+              "disabled_reason": "Waiting on Script.",
+              "id": "characters",
+              "label": "Characters",
+              "status": "missing",
+              "work_area": "plan"
+            },
+            {
+              "available": false,
+              "depends_on": [
+                "characters"
+              ],
+              "disabled_reason": "Waiting on Characters.",
+              "id": "scene_intent",
+              "label": "Scene Intent",
+              "status": "missing",
+              "work_area": "plan"
+            },
+            {
+              "available": false,
+              "depends_on": [
+                "scene_intent"
+              ],
+              "disabled_reason": "Waiting on Scene Intent.",
+              "id": "scene_look",
+              "label": "Scene Look",
+              "status": "missing",
+              "work_area": "plan"
+            },
+            {
+              "available": true,
+              "depends_on": [
+                "scene_look"
+              ],
+              "disabled_reason": null,
+              "id": "cut_sketches",
+              "label": "Cut Sketches",
+              "status": "present",
+              "work_area": "plan"
+            },
+            {
+              "available": true,
+              "depends_on": [
+                "cut_sketches"
+              ],
+              "disabled_reason": null,
+              "id": "reference_images",
+              "label": "Reference Images",
+              "status": "approved",
+              "work_area": "plan"
+            },
+            {
+              "available": true,
+              "depends_on": [
+                "cut_sketches"
+              ],
+              "disabled_reason": null,
+              "id": "production_notes",
+              "label": "Production Notes",
+              "status": "present",
+              "work_area": "plan"
+            },
+            {
+              "available": true,
+              "depends_on": [
+                "production_notes"
+              ],
+              "disabled_reason": null,
+              "id": "render",
+              "label": "Render",
+              "status": "missing",
+              "work_area": "produce"
+            },
+            {
+              "available": false,
+              "depends_on": [
+                "render"
+              ],
+              "disabled_reason": "Waiting on Render.",
+              "id": "take_review",
+              "label": "Take Review",
+              "status": "missing",
+              "work_area": "produce"
+            },
+            {
+              "available": false,
+              "depends_on": [
+                "take_review"
+              ],
+              "disabled_reason": "Waiting on Take Review.",
+              "id": "assemble",
+              "label": "Assemble",
+              "status": "missing",
+              "work_area": "finish"
+            }
+          ],
+          "planned_visual_sources": 1,
+          "production_notes": true,
+          "render_ready_sources": 1,
+          "scene_intent": false,
+          "scene_look": false,
+          "sketch_mix": {
+            "other_dialogue": 0,
+            "performance": 1,
+            "silent": 0
+          },
+          "strategy": "cinematic_balanced",
+          "summary": "Offline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+          "title": "Offline fixture",
+          "unresolved_visual_sources": 0,
+          "warnings": [
+            "scene look board missing",
+            "script scene text missing"
+          ]
+        }
+      ],
+      "script_count": 0,
+      "summary": "0 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 1 scene(s)\n\nOffline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+      "voice_ready": 0,
+      "warnings": [
+        "Scene 1: scene look board missing",
+        "Scene 1: script scene text missing"
+      ]
+    },
+    "state": {
+      "assets": [
+        {
+          "id": "asset_18",
+          "path": "Preproduction/Scene1/references/interior.png",
+          "role": "interior_reference",
+          "scene_id": 1,
+          "status": "approved"
+        }
+      ],
+      "characters": [],
+      "jobs": [
+        {
+          "actual_verified": false,
+          "attempts": [
+            {
+              "completed_at": "2026-11-01T23:07:36Z",
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "attempt_1",
+              "started_at": "2026-11-01T23:07:34Z",
+              "status": "failed"
+            }
+          ],
+          "created_at": "2026-11-01T23:00:00Z",
+          "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+          "id": "job_3",
+          "kind": "render",
+          "output_path": "Scenes/Scene1/Cut1/S01C01.mp4",
+          "raw_provider_id": "S01C01",
+          "scope": {
+            "id": "shot_1",
+            "kind": "shot"
+          },
+          "status": "failed",
+          "unbounded_exposure": false
+        },
+        {
+          "actual_verified": false,
+          "attempts": [
+            {
+              "completed_at": "2026-11-01T23:07:36Z",
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "attempt_1",
+              "started_at": "2026-11-01T23:07:34Z",
+              "status": "failed"
+            }
+          ],
+          "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+          "id": "spend_original",
+          "kind": "atlas_generate_video",
+          "status": "failed",
+          "unbounded_exposure": false
+        },
+        {
+          "actual_verified": false,
+          "attempts": [
+            {
+              "id": "job_4_attempt_1",
+              "status": "pending"
+            }
+          ],
+          "created_at": "2026-11-02T00:38:43Z",
+          "id": "job_4",
+          "kind": "render",
+          "output_path": "Scenes/Scene1/Cut1/S01C01_v2.mp4",
+          "raw_provider_id": "S01C01",
+          "retry_of": "job_3",
+          "scope": {
+            "id": "shot_1",
+            "kind": "shot"
+          },
+          "status": "pending",
+          "unbounded_exposure": false
+        },
+        {
+          "actual_verified": false,
+          "attempts": [
+            {
+              "completed_at": "2026-11-02T00:39:12Z",
+              "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+              "id": "attempt_1",
+              "started_at": "2026-11-02T00:39:12Z",
+              "status": "failed"
+            }
+          ],
+          "created_at": "2026-11-02T00:39:12Z",
+          "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+          "id": "spend_retry",
+          "kind": "atlas_generate_video",
+          "request_metadata": {
+            "request_hash": "offline-fixture"
+          },
+          "status": "failed",
+          "unbounded_exposure": false
+        }
+      ],
+      "scenes": [
+        {
+          "cuts": [
+            {
+              "dialogue": [
+                {
+                  "speaker": "Kris",
+                  "text": "This is one complete fixture line."
+                }
+              ],
+              "id": {
+                "cut": 1,
+                "source_scene": 1
+              },
+              "production_note_path": "Scene_Prompts/Scene1/Cut1.txt",
+              "prompt": "Speak the fixture line.",
+              "render_lane": "audio_driven_i2v",
+              "scene_type": "character_performance",
+              "sketch": {
+                "dialogue": [
+                  {
+                    "heard_as": "on_screen",
+                    "speaker": "Kris",
+                    "text": "This is one complete fixture line."
+                  }
+                ],
+                "mouth_policy": "speaking_visible",
+                "shot_role": "performance",
+                "speaker": "Kris",
+                "title": "Fixture",
+                "visual_prompt": "Speak the fixture line."
+              },
+              "speech_mode": "source_video_lipsync",
+              "stable_id": "shot_1",
+              "subject": "Kris",
+              "title": "Fixture",
+              "visual_source": {
+                "asset_id": "asset_18",
+                "strategy": "shared_reference"
+              }
+            }
+          ],
+          "id": 1,
+          "stages": {
+            "assemble": "missing",
+            "characters": "missing",
+            "cut_sketches": "present",
+            "production_notes": "present",
+            "reference_images": "approved",
+            "render": "missing",
+            "scene_intent": "missing",
+            "scene_look": "missing",
+            "script": "missing",
+            "take_review": "missing"
+          },
+          "title": "Offline fixture"
+        }
+      ],
+      "scripts": [],
+      "settings": {},
+      "state_revision": 0,
+      "version": 2
+    }
+  },
+  "prepared": {
+    "note": "Saved-audio recovery prepared; use its fresh native approval, not the original voice-clone card.",
+    "pendingAction": "Resume fresh retry of a proven pre-submit failure using saved audio. Historical approval context is not inferred: review the current image, prompt, model and exact WAV below. No speech synthesis is included.\n\n## Approval required\n\nOperation: `text_sync`\nProvider: Offline no-submit fixture (atlas-cloud)\nModel: video.lip_sync_text_narration: `atlascloud/van-2.5/image-to-video`\nOutput: `/tmp/.tmpK3tM8s/Scenes/Scene1/Cut1/S01C01_v3.mp4`\nUse the Approve button. Typing ok, yes, or continue will not run this plan.\n\n### Files read or uploaded\n- `handoff_path` \u2192 `/tmp/.tmpK3tM8s/Scene_Prompts/Scene1/Cut1.txt`\n- `source_frame` \u2192 `/tmp/.tmpK3tM8s/Preproduction/Scene1/references/interior.png`\n- `performance_wav` \u2192 `/tmp/.tmpK3tM8s/Scenes/Scene1/Cut1/S01C01.wav`\n\n### Artifacts modified\n- `output_path` \u2192 `/tmp/.tmpK3tM8s/Scenes/Scene1/Cut1/S01C01_v3.mp4`\n- `output_audio` \u2192 `/tmp/.tmpK3tM8s/Scenes/Scene1/Cut1/S01C01_v3.wav`\n\n[[workbench_approve:8c535a0821ca12b40ca867c398d6f7e2]]",
+    "persistedPath": "/tmp/.tmpK3tM8s/Preproduction/workflow_state.json",
+    "report": {
+      "character_count": 0,
+      "identity_ready": 0,
+      "project_name": null,
+      "recipe": {
+        "id": "narrative_dialogue",
+        "label": "Narrative dialogue",
+        "stages": [
+          {
+            "depends_on": [],
+            "id": "script",
+            "label": "Script",
+            "required_roles": [],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "script"
+            ],
+            "id": "characters",
+            "label": "Characters",
+            "required_roles": [
+              "cast",
+              "voice"
+            ],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "characters"
+            ],
+            "id": "scene_intent",
+            "label": "Scene Intent",
+            "required_roles": [],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "scene_intent"
+            ],
+            "id": "scene_look",
+            "label": "Scene Look",
+            "required_roles": [],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "scene_look"
+            ],
+            "id": "cut_sketches",
+            "label": "Cut Sketches",
+            "required_roles": [
+              "mouth_policy"
+            ],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "cut_sketches"
+            ],
+            "id": "reference_images",
+            "label": "Reference Images",
+            "required_roles": [],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "cut_sketches"
+            ],
+            "id": "production_notes",
+            "label": "Production Notes",
+            "required_roles": [],
+            "work_area": "plan"
+          },
+          {
+            "depends_on": [
+              "production_notes"
+            ],
+            "id": "render",
+            "label": "Render",
+            "required_roles": [],
+            "work_area": "produce"
+          },
+          {
+            "depends_on": [
+              "render"
+            ],
+            "id": "take_review",
+            "label": "Take Review",
+            "required_roles": [],
+            "work_area": "produce"
+          },
+          {
+            "depends_on": [
+              "take_review"
+            ],
+            "id": "assemble",
+            "label": "Assemble",
+            "required_roles": [],
+            "work_area": "finish"
+          }
+        ]
+      },
+      "recipes": [
+        {
+          "id": "narrative_dialogue",
+          "label": "Narrative dialogue"
+        },
+        {
+          "id": "montage",
+          "label": "Montage"
+        }
+      ],
+      "scenes": [
+        {
+          "approved_start_frames": 0,
+          "can_backfill_sketches": false,
+          "cut_sketches": true,
+          "cuts_found": 1,
+          "effectively_performance_heavy": false,
+          "id": 1,
+          "mix": {
+            "lipsync": 1,
+            "silent": 0,
+            "voice_over": 0
+          },
+          "mix_verdict": {
+            "messages": [],
+            "mix": {
+              "other_dialogue": 0,
+              "performance": 1,
+              "silent": 0
+            },
+            "status": "ok",
+            "strategy": "cinematic_balanced"
+          },
+          "navigation": [
+            {
+              "available": true,
+              "depends_on": [],
+              "disabled_reason": null,
+              "id": "script",
+              "label": "Script",
+              "status": "missing",
+              "work_area": "plan"
+            },
+            {
+              "available": false,
+              "depends_on": [
+                "script"
+              ],
+              "disabled_reason": "Waiting on Script.",
+              "id": "characters",
+              "label": "Characters",
+              "status": "missing",
+              "work_area": "plan"
+            },
+            {
+              "available": false,
+              "depends_on": [
+                "characters"
+              ],
+              "disabled_reason": "Waiting on Characters.",
+              "id": "scene_intent",
+              "label": "Scene Intent",
+              "status": "missing",
+              "work_area": "plan"
+            },
+            {
+              "available": false,
+              "depends_on": [
+                "scene_intent"
+              ],
+              "disabled_reason": "Waiting on Scene Intent.",
+              "id": "scene_look",
+              "label": "Scene Look",
+              "status": "missing",
+              "work_area": "plan"
+            },
+            {
+              "available": true,
+              "depends_on": [
+                "scene_look"
+              ],
+              "disabled_reason": null,
+              "id": "cut_sketches",
+              "label": "Cut Sketches",
+              "status": "present",
+              "work_area": "plan"
+            },
+            {
+              "available": true,
+              "depends_on": [
+                "cut_sketches"
+              ],
+              "disabled_reason": null,
+              "id": "reference_images",
+              "label": "Reference Images",
+              "status": "approved",
+              "work_area": "plan"
+            },
+            {
+              "available": true,
+              "depends_on": [
+                "cut_sketches"
+              ],
+              "disabled_reason": null,
+              "id": "production_notes",
+              "label": "Production Notes",
+              "status": "present",
+              "work_area": "plan"
+            },
+            {
+              "available": true,
+              "depends_on": [
+                "production_notes"
+              ],
+              "disabled_reason": null,
+              "id": "render",
+              "label": "Render",
+              "status": "missing",
+              "work_area": "produce"
+            },
+            {
+              "available": false,
+              "depends_on": [
+                "render"
+              ],
+              "disabled_reason": "Waiting on Render.",
+              "id": "take_review",
+              "label": "Take Review",
+              "status": "missing",
+              "work_area": "produce"
+            },
+            {
+              "available": false,
+              "depends_on": [
+                "take_review"
+              ],
+              "disabled_reason": "Waiting on Take Review.",
+              "id": "assemble",
+              "label": "Assemble",
+              "status": "missing",
+              "work_area": "finish"
+            }
+          ],
+          "planned_visual_sources": 1,
+          "production_notes": true,
+          "render_ready_sources": 1,
+          "scene_intent": false,
+          "scene_look": false,
+          "sketch_mix": {
+            "other_dialogue": 0,
+            "performance": 1,
+            "silent": 0
+          },
+          "strategy": "cinematic_balanced",
+          "summary": "Offline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+          "title": "Offline fixture",
+          "unresolved_visual_sources": 0,
+          "warnings": [
+            "scene look board missing",
+            "script scene text missing"
+          ]
+        }
+      ],
+      "script_count": 0,
+      "summary": "0 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 1 scene(s)\n\nOffline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+      "voice_ready": 0,
+      "warnings": [
+        "Scene 1: scene look board missing",
+        "Scene 1: script scene text missing"
+      ]
+    },
+    "state": {
+      "assets": [
+        {
+          "id": "asset_18",
+          "path": "Preproduction/Scene1/references/interior.png",
+          "role": "interior_reference",
+          "scene_id": 1,
+          "status": "approved"
+        }
+      ],
+      "characters": [],
+      "jobs": [
+        {
+          "actual_verified": false,
+          "attempts": [
+            {
+              "completed_at": "2026-11-01T23:07:36Z",
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "attempt_1",
+              "started_at": "2026-11-01T23:07:34Z",
+              "status": "failed"
+            }
+          ],
+          "created_at": "2026-11-01T23:00:00Z",
+          "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+          "id": "job_3",
+          "kind": "render",
+          "output_path": "Scenes/Scene1/Cut1/S01C01.mp4",
+          "raw_provider_id": "S01C01",
+          "scope": {
+            "id": "shot_1",
+            "kind": "shot"
+          },
+          "status": "failed",
+          "unbounded_exposure": false
+        },
+        {
+          "actual_verified": false,
+          "attempts": [
+            {
+              "completed_at": "2026-11-01T23:07:36Z",
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "attempt_1",
+              "started_at": "2026-11-01T23:07:34Z",
+              "status": "failed"
+            }
+          ],
+          "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+          "id": "spend_original",
+          "kind": "atlas_generate_video",
+          "status": "failed",
+          "unbounded_exposure": false
+        },
+        {
+          "actual_verified": false,
+          "attempts": [
+            {
+              "completed_at": "2026-11-02T00:39:12Z",
+              "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+              "id": "job_4_attempt_1",
+              "started_at": "2026-11-02T00:39:12Z",
+              "status": "failed"
+            }
+          ],
+          "completed_at": "2026-11-02T00:39:12Z",
+          "created_at": "2026-11-02T00:38:43Z",
+          "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+          "id": "job_4",
+          "kind": "render",
+          "output_path": "Scenes/Scene1/Cut1/S01C01_v2.mp4",
+          "progress": "Reconciled local pre-submit failure from spend_retry; identical saved WAV retained, no video submitted. This is history, not permission to retry.",
+          "raw_provider_id": "S01C01",
+          "retry_of": "job_3",
+          "scope": {
+            "id": "shot_1",
+            "kind": "shot"
+          },
+          "started_at": "2026-11-02T00:39:12Z",
+          "status": "failed",
+          "unbounded_exposure": false
+        },
+        {
+          "actual_verified": false,
+          "attempts": [
+            {
+              "completed_at": "2026-11-02T00:39:12Z",
+              "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+              "id": "attempt_1",
+              "started_at": "2026-11-02T00:39:12Z",
+              "status": "failed"
+            }
+          ],
+          "created_at": "2026-11-02T00:39:12Z",
+          "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+          "id": "spend_retry",
+          "kind": "atlas_generate_video",
+          "request_metadata": {
+            "request_hash": "offline-fixture"
+          },
+          "status": "failed",
+          "unbounded_exposure": false
+        },
+        {
+          "actual_verified": false,
+          "attempts": [
+            {
+              "id": "job_5_attempt_1",
+              "status": "pending"
+            }
+          ],
+          "created_at": "2026-11-02T06:45:20Z",
+          "id": "job_5",
+          "input_asset_ids": [
+            "asset_18"
+          ],
+          "kind": "render",
+          "output_path": "Scenes/Scene1/Cut1/S01C01_v3.mp4",
+          "raw_provider_id": "S01C01",
+          "retry_of": "job_3",
+          "scope": {
+            "id": "shot_1",
+            "kind": "shot"
+          },
+          "status": "pending",
+          "unbounded_exposure": false
+        }
+      ],
+      "profile": {
+        "deliverables": [
+          {
+            "id": "del_untitled",
+            "name": "Untitled"
+          }
+        ],
+        "recipe": "narrative_dialogue"
+      },
+      "scenes": [
+        {
+          "animatic": {
+            "id": "animatic_1",
+            "shots": [
+              {
+                "auto_duration_seed_seconds": 2.18,
+                "cut_id": {
+                  "cut": 1,
+                  "source_scene": 1
+                },
+                "duration_seconds": 2.18,
+                "id": "anim_shot_1"
+              }
+            ],
+            "warnings": [
+              {
+                "id": "cov_missing_reaction",
+                "kind": "missing_reaction",
+                "message": "No reaction shot is planned."
+              },
+              {
+                "id": "cov_missing_insert",
+                "kind": "missing_insert",
+                "message": "No insert or detail shot is planned."
+              },
+              {
+                "id": "cov_missing_establishing",
+                "kind": "missing_establishing",
+                "message": "No establishing shot is planned."
+              }
+            ]
+          },
+          "cuts": [
+            {
+              "dialogue": [
+                {
+                  "speaker": "Kris",
+                  "text": "This is one complete fixture line."
+                }
+              ],
+              "id": {
+                "cut": 1,
+                "source_scene": 1
+              },
+              "production_note_path": "Scene_Prompts/Scene1/Cut1.txt",
+              "prompt": "Speak the fixture line.",
+              "render_lane": "audio_driven_i2v",
+              "scene_type": "character_performance",
+              "sketch": {
+                "dialogue": [
+                  {
+                    "heard_as": "on_screen",
+                    "speaker": "Kris",
+                    "text": "This is one complete fixture line."
+                  }
+                ],
+                "mouth_policy": "speaking_visible",
+                "shot_role": "performance",
+                "speaker": "Kris",
+                "title": "Fixture",
+                "visual_prompt": "Speak the fixture line."
+              },
+              "speech_mode": "source_video_lipsync",
+              "stable_id": "shot_1",
+              "subject": "Kris",
+              "title": "Fixture",
+              "visual_source": {
+                "asset_id": "asset_18",
+                "strategy": "shared_reference"
+              }
+            }
+          ],
+          "id": 1,
+          "stable_id": "scene_1",
+          "stages": {
+            "assemble": "missing",
+            "characters": "missing",
+            "cut_sketches": "present",
+            "production_notes": "present",
+            "reference_images": "approved",
+            "render": "missing",
+            "scene_intent": "missing",
+            "scene_look": "missing",
+            "script": "missing",
+            "take_review": "missing"
+          },
+          "title": "Offline fixture"
+        }
+      ],
+      "scripts": [],
+      "settings": {},
+      "state_revision": 15,
+      "version": 2
+    },
+    "summary": "0 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 1 scene(s)\n\nOffline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted"
+  },
+  "refusals": {
+    "ambiguous": {
+      "error": "Occupied saved-audio retry is ambiguous; reconcile its failed child and complete WAV before retrying. No media changed.",
+      "initial": {
+        "report": {
+          "character_count": 0,
+          "identity_ready": 0,
+          "project_name": null,
+          "recipe": {
+            "id": "narrative_dialogue",
+            "label": "Narrative dialogue",
+            "stages": [
+              {
+                "depends_on": [],
+                "id": "script",
+                "label": "Script",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "script"
+                ],
+                "id": "characters",
+                "label": "Characters",
+                "required_roles": [
+                  "cast",
+                  "voice"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "characters"
+                ],
+                "id": "scene_intent",
+                "label": "Scene Intent",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_intent"
+                ],
+                "id": "scene_look",
+                "label": "Scene Look",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_look"
+                ],
+                "id": "cut_sketches",
+                "label": "Cut Sketches",
+                "required_roles": [
+                  "mouth_policy"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "reference_images",
+                "label": "Reference Images",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "production_notes",
+                "label": "Production Notes",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "production_notes"
+                ],
+                "id": "render",
+                "label": "Render",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "render"
+                ],
+                "id": "take_review",
+                "label": "Take Review",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "take_review"
+                ],
+                "id": "assemble",
+                "label": "Assemble",
+                "required_roles": [],
+                "work_area": "finish"
+              }
+            ]
+          },
+          "recipes": [
+            {
+              "id": "narrative_dialogue",
+              "label": "Narrative dialogue"
+            },
+            {
+              "id": "montage",
+              "label": "Montage"
+            }
+          ],
+          "scenes": [
+            {
+              "approved_start_frames": 0,
+              "can_backfill_sketches": false,
+              "cut_sketches": true,
+              "cuts_found": 1,
+              "effectively_performance_heavy": false,
+              "id": 1,
+              "mix": {
+                "lipsync": 1,
+                "silent": 0,
+                "voice_over": 0
+              },
+              "mix_verdict": {
+                "messages": [],
+                "mix": {
+                  "other_dialogue": 0,
+                  "performance": 1,
+                  "silent": 0
+                },
+                "status": "ok",
+                "strategy": "cinematic_balanced"
+              },
+              "navigation": [
+                {
+                  "available": true,
+                  "depends_on": [],
+                  "disabled_reason": null,
+                  "id": "script",
+                  "label": "Script",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "script"
+                  ],
+                  "disabled_reason": "Waiting on Script.",
+                  "id": "characters",
+                  "label": "Characters",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "characters"
+                  ],
+                  "disabled_reason": "Waiting on Characters.",
+                  "id": "scene_intent",
+                  "label": "Scene Intent",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "scene_intent"
+                  ],
+                  "disabled_reason": "Waiting on Scene Intent.",
+                  "id": "scene_look",
+                  "label": "Scene Look",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "scene_look"
+                  ],
+                  "disabled_reason": null,
+                  "id": "cut_sketches",
+                  "label": "Cut Sketches",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "reference_images",
+                  "label": "Reference Images",
+                  "status": "approved",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "production_notes",
+                  "label": "Production Notes",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "production_notes"
+                  ],
+                  "disabled_reason": null,
+                  "id": "render",
+                  "label": "Render",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "render"
+                  ],
+                  "disabled_reason": "Waiting on Render.",
+                  "id": "take_review",
+                  "label": "Take Review",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "take_review"
+                  ],
+                  "disabled_reason": "Waiting on Take Review.",
+                  "id": "assemble",
+                  "label": "Assemble",
+                  "status": "missing",
+                  "work_area": "finish"
+                }
+              ],
+              "planned_visual_sources": 1,
+              "production_notes": true,
+              "render_ready_sources": 1,
+              "scene_intent": false,
+              "scene_look": false,
+              "sketch_mix": {
+                "other_dialogue": 0,
+                "performance": 1,
+                "silent": 0
+              },
+              "strategy": "cinematic_balanced",
+              "summary": "Offline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+              "title": "Offline fixture",
+              "unresolved_visual_sources": 0,
+              "warnings": [
+                "scene look board missing",
+                "script scene text missing"
+              ]
+            }
+          ],
+          "script_count": 0,
+          "summary": "0 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 1 scene(s)\n\nOffline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+          "voice_ready": 0,
+          "warnings": [
+            "Scene 1: scene look board missing",
+            "Scene 1: script scene text missing"
+          ]
+        },
+        "state": {
+          "assets": [
+            {
+              "id": "asset_18",
+              "path": "Preproduction/Scene1/references/interior.png",
+              "role": "interior_reference",
+              "scene_id": 1,
+              "status": "approved"
+            }
+          ],
+          "characters": [],
+          "jobs": [
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-01T23:00:00Z",
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "job_3",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01.mp4",
+              "raw_provider_id": "S01C01",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "spend_original",
+              "kind": "atlas_generate_video",
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "id": "job_4_attempt_1",
+                  "status": "pending"
+                }
+              ],
+              "created_at": "2026-11-02T00:38:43Z",
+              "id": "job_4",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01_v2.mp4",
+              "raw_provider_id": "S01C01",
+              "retry_of": "job_3",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "pending",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-02T00:39:12Z",
+                  "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-02T00:39:12Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-02T00:39:12Z",
+              "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+              "id": "spend_retry",
+              "kind": "atlas_generate_video",
+              "request_metadata": {
+                "request_hash": "offline-fixture"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-02T00:39:12Z",
+                  "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-02T00:39:12Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-02T00:39:12Z",
+              "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+              "id": "other_child",
+              "kind": "atlas_generate_video",
+              "request_metadata": {
+                "request_hash": "offline-fixture"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            }
+          ],
+          "scenes": [
+            {
+              "cuts": [
+                {
+                  "dialogue": [
+                    {
+                      "speaker": "Kris",
+                      "text": "This is one complete fixture line."
+                    }
+                  ],
+                  "id": {
+                    "cut": 1,
+                    "source_scene": 1
+                  },
+                  "production_note_path": "Scene_Prompts/Scene1/Cut1.txt",
+                  "prompt": "Speak the fixture line.",
+                  "render_lane": "audio_driven_i2v",
+                  "scene_type": "character_performance",
+                  "sketch": {
+                    "dialogue": [
+                      {
+                        "heard_as": "on_screen",
+                        "speaker": "Kris",
+                        "text": "This is one complete fixture line."
+                      }
+                    ],
+                    "mouth_policy": "speaking_visible",
+                    "shot_role": "performance",
+                    "speaker": "Kris",
+                    "title": "Fixture",
+                    "visual_prompt": "Speak the fixture line."
+                  },
+                  "speech_mode": "source_video_lipsync",
+                  "stable_id": "shot_1",
+                  "subject": "Kris",
+                  "title": "Fixture",
+                  "visual_source": {
+                    "asset_id": "asset_18",
+                    "strategy": "shared_reference"
+                  }
+                }
+              ],
+              "id": 1,
+              "stages": {
+                "assemble": "missing",
+                "characters": "missing",
+                "cut_sketches": "present",
+                "production_notes": "present",
+                "reference_images": "approved",
+                "render": "missing",
+                "scene_intent": "missing",
+                "scene_look": "missing",
+                "script": "missing",
+                "take_review": "missing"
+              },
+              "title": "Offline fixture"
+            }
+          ],
+          "scripts": [],
+          "settings": {},
+          "state_revision": 0,
+          "version": 2
+        }
+      }
+    },
+    "different": {
+      "error": "Occupied saved-audio retry is ambiguous; reconcile its failed child and complete WAV before retrying. No media changed.",
+      "initial": {
+        "report": {
+          "character_count": 0,
+          "identity_ready": 0,
+          "project_name": null,
+          "recipe": {
+            "id": "narrative_dialogue",
+            "label": "Narrative dialogue",
+            "stages": [
+              {
+                "depends_on": [],
+                "id": "script",
+                "label": "Script",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "script"
+                ],
+                "id": "characters",
+                "label": "Characters",
+                "required_roles": [
+                  "cast",
+                  "voice"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "characters"
+                ],
+                "id": "scene_intent",
+                "label": "Scene Intent",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_intent"
+                ],
+                "id": "scene_look",
+                "label": "Scene Look",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_look"
+                ],
+                "id": "cut_sketches",
+                "label": "Cut Sketches",
+                "required_roles": [
+                  "mouth_policy"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "reference_images",
+                "label": "Reference Images",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "production_notes",
+                "label": "Production Notes",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "production_notes"
+                ],
+                "id": "render",
+                "label": "Render",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "render"
+                ],
+                "id": "take_review",
+                "label": "Take Review",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "take_review"
+                ],
+                "id": "assemble",
+                "label": "Assemble",
+                "required_roles": [],
+                "work_area": "finish"
+              }
+            ]
+          },
+          "recipes": [
+            {
+              "id": "narrative_dialogue",
+              "label": "Narrative dialogue"
+            },
+            {
+              "id": "montage",
+              "label": "Montage"
+            }
+          ],
+          "scenes": [
+            {
+              "approved_start_frames": 0,
+              "can_backfill_sketches": false,
+              "cut_sketches": true,
+              "cuts_found": 1,
+              "effectively_performance_heavy": false,
+              "id": 1,
+              "mix": {
+                "lipsync": 1,
+                "silent": 0,
+                "voice_over": 0
+              },
+              "mix_verdict": {
+                "messages": [],
+                "mix": {
+                  "other_dialogue": 0,
+                  "performance": 1,
+                  "silent": 0
+                },
+                "status": "ok",
+                "strategy": "cinematic_balanced"
+              },
+              "navigation": [
+                {
+                  "available": true,
+                  "depends_on": [],
+                  "disabled_reason": null,
+                  "id": "script",
+                  "label": "Script",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "script"
+                  ],
+                  "disabled_reason": "Waiting on Script.",
+                  "id": "characters",
+                  "label": "Characters",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "characters"
+                  ],
+                  "disabled_reason": "Waiting on Characters.",
+                  "id": "scene_intent",
+                  "label": "Scene Intent",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "scene_intent"
+                  ],
+                  "disabled_reason": "Waiting on Scene Intent.",
+                  "id": "scene_look",
+                  "label": "Scene Look",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "scene_look"
+                  ],
+                  "disabled_reason": null,
+                  "id": "cut_sketches",
+                  "label": "Cut Sketches",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "reference_images",
+                  "label": "Reference Images",
+                  "status": "approved",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "production_notes",
+                  "label": "Production Notes",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "production_notes"
+                  ],
+                  "disabled_reason": null,
+                  "id": "render",
+                  "label": "Render",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "render"
+                  ],
+                  "disabled_reason": "Waiting on Render.",
+                  "id": "take_review",
+                  "label": "Take Review",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "take_review"
+                  ],
+                  "disabled_reason": "Waiting on Take Review.",
+                  "id": "assemble",
+                  "label": "Assemble",
+                  "status": "missing",
+                  "work_area": "finish"
+                }
+              ],
+              "planned_visual_sources": 1,
+              "production_notes": true,
+              "render_ready_sources": 1,
+              "scene_intent": false,
+              "scene_look": false,
+              "sketch_mix": {
+                "other_dialogue": 0,
+                "performance": 1,
+                "silent": 0
+              },
+              "strategy": "cinematic_balanced",
+              "summary": "Offline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+              "title": "Offline fixture",
+              "unresolved_visual_sources": 0,
+              "warnings": [
+                "scene look board missing",
+                "script scene text missing"
+              ]
+            }
+          ],
+          "script_count": 0,
+          "summary": "0 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 1 scene(s)\n\nOffline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+          "voice_ready": 0,
+          "warnings": [
+            "Scene 1: scene look board missing",
+            "Scene 1: script scene text missing"
+          ]
+        },
+        "state": {
+          "assets": [
+            {
+              "id": "asset_18",
+              "path": "Preproduction/Scene1/references/interior.png",
+              "role": "interior_reference",
+              "scene_id": 1,
+              "status": "approved"
+            }
+          ],
+          "characters": [],
+          "jobs": [
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-01T23:00:00Z",
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "job_3",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01.mp4",
+              "raw_provider_id": "S01C01",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "spend_original",
+              "kind": "atlas_generate_video",
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "id": "job_4_attempt_1",
+                  "status": "pending"
+                }
+              ],
+              "created_at": "2026-11-02T00:38:43Z",
+              "id": "job_4",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01_v2.mp4",
+              "raw_provider_id": "S01C01",
+              "retry_of": "job_3",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "pending",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-02T00:39:12Z",
+                  "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-02T00:39:12Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-02T00:39:12Z",
+              "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+              "id": "spend_retry",
+              "kind": "atlas_generate_video",
+              "request_metadata": {
+                "request_hash": "offline-fixture"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            }
+          ],
+          "scenes": [
+            {
+              "cuts": [
+                {
+                  "dialogue": [
+                    {
+                      "speaker": "Kris",
+                      "text": "This is one complete fixture line."
+                    }
+                  ],
+                  "id": {
+                    "cut": 1,
+                    "source_scene": 1
+                  },
+                  "production_note_path": "Scene_Prompts/Scene1/Cut1.txt",
+                  "prompt": "Speak the fixture line.",
+                  "render_lane": "audio_driven_i2v",
+                  "scene_type": "character_performance",
+                  "sketch": {
+                    "dialogue": [
+                      {
+                        "heard_as": "on_screen",
+                        "speaker": "Kris",
+                        "text": "This is one complete fixture line."
+                      }
+                    ],
+                    "mouth_policy": "speaking_visible",
+                    "shot_role": "performance",
+                    "speaker": "Kris",
+                    "title": "Fixture",
+                    "visual_prompt": "Speak the fixture line."
+                  },
+                  "speech_mode": "source_video_lipsync",
+                  "stable_id": "shot_1",
+                  "subject": "Kris",
+                  "title": "Fixture",
+                  "visual_source": {
+                    "asset_id": "asset_18",
+                    "strategy": "shared_reference"
+                  }
+                }
+              ],
+              "id": 1,
+              "stages": {
+                "assemble": "missing",
+                "characters": "missing",
+                "cut_sketches": "present",
+                "production_notes": "present",
+                "reference_images": "approved",
+                "render": "missing",
+                "scene_intent": "missing",
+                "scene_look": "missing",
+                "script": "missing",
+                "take_review": "missing"
+              },
+              "title": "Offline fixture"
+            }
+          ],
+          "scripts": [],
+          "settings": {},
+          "state_revision": 0,
+          "version": 2
+        }
+      }
+    },
+    "incomplete": {
+      "error": "Saved WAV has no proof it covers the complete multi-line dialogue (legacy TTS may contain only the first line). Audition and select a complete performance before preparing video; do not resume this WAV or regenerate speech implicitly.",
+      "initial": {
+        "report": {
+          "character_count": 0,
+          "identity_ready": 0,
+          "project_name": null,
+          "recipe": {
+            "id": "narrative_dialogue",
+            "label": "Narrative dialogue",
+            "stages": [
+              {
+                "depends_on": [],
+                "id": "script",
+                "label": "Script",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "script"
+                ],
+                "id": "characters",
+                "label": "Characters",
+                "required_roles": [
+                  "cast",
+                  "voice"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "characters"
+                ],
+                "id": "scene_intent",
+                "label": "Scene Intent",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_intent"
+                ],
+                "id": "scene_look",
+                "label": "Scene Look",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_look"
+                ],
+                "id": "cut_sketches",
+                "label": "Cut Sketches",
+                "required_roles": [
+                  "mouth_policy"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "reference_images",
+                "label": "Reference Images",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "production_notes",
+                "label": "Production Notes",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "production_notes"
+                ],
+                "id": "render",
+                "label": "Render",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "render"
+                ],
+                "id": "take_review",
+                "label": "Take Review",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "take_review"
+                ],
+                "id": "assemble",
+                "label": "Assemble",
+                "required_roles": [],
+                "work_area": "finish"
+              }
+            ]
+          },
+          "recipes": [
+            {
+              "id": "narrative_dialogue",
+              "label": "Narrative dialogue"
+            },
+            {
+              "id": "montage",
+              "label": "Montage"
+            }
+          ],
+          "scenes": [
+            {
+              "approved_start_frames": 0,
+              "can_backfill_sketches": false,
+              "cut_sketches": true,
+              "cuts_found": 1,
+              "effectively_performance_heavy": false,
+              "id": 1,
+              "mix": {
+                "lipsync": 1,
+                "silent": 0,
+                "voice_over": 0
+              },
+              "mix_verdict": {
+                "messages": [],
+                "mix": {
+                  "other_dialogue": 0,
+                  "performance": 1,
+                  "silent": 0
+                },
+                "status": "ok",
+                "strategy": "cinematic_balanced"
+              },
+              "navigation": [
+                {
+                  "available": true,
+                  "depends_on": [],
+                  "disabled_reason": null,
+                  "id": "script",
+                  "label": "Script",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "script"
+                  ],
+                  "disabled_reason": "Waiting on Script.",
+                  "id": "characters",
+                  "label": "Characters",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "characters"
+                  ],
+                  "disabled_reason": "Waiting on Characters.",
+                  "id": "scene_intent",
+                  "label": "Scene Intent",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "scene_intent"
+                  ],
+                  "disabled_reason": "Waiting on Scene Intent.",
+                  "id": "scene_look",
+                  "label": "Scene Look",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "scene_look"
+                  ],
+                  "disabled_reason": null,
+                  "id": "cut_sketches",
+                  "label": "Cut Sketches",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "reference_images",
+                  "label": "Reference Images",
+                  "status": "approved",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "production_notes",
+                  "label": "Production Notes",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "production_notes"
+                  ],
+                  "disabled_reason": null,
+                  "id": "render",
+                  "label": "Render",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "render"
+                  ],
+                  "disabled_reason": "Waiting on Render.",
+                  "id": "take_review",
+                  "label": "Take Review",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "take_review"
+                  ],
+                  "disabled_reason": "Waiting on Take Review.",
+                  "id": "assemble",
+                  "label": "Assemble",
+                  "status": "missing",
+                  "work_area": "finish"
+                }
+              ],
+              "planned_visual_sources": 1,
+              "production_notes": true,
+              "render_ready_sources": 1,
+              "scene_intent": false,
+              "scene_look": false,
+              "sketch_mix": {
+                "other_dialogue": 0,
+                "performance": 1,
+                "silent": 0
+              },
+              "strategy": "cinematic_balanced",
+              "summary": "Offline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+              "title": "Offline fixture",
+              "unresolved_visual_sources": 0,
+              "warnings": [
+                "scene look board missing",
+                "script scene text missing"
+              ]
+            }
+          ],
+          "script_count": 0,
+          "summary": "0 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 1 scene(s)\n\nOffline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+          "voice_ready": 0,
+          "warnings": [
+            "Scene 1: scene look board missing",
+            "Scene 1: script scene text missing"
+          ]
+        },
+        "state": {
+          "assets": [
+            {
+              "id": "asset_18",
+              "path": "Preproduction/Scene1/references/interior.png",
+              "role": "interior_reference",
+              "scene_id": 1,
+              "status": "approved"
+            }
+          ],
+          "characters": [],
+          "jobs": [
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-01T23:00:00Z",
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "job_3",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01.mp4",
+              "raw_provider_id": "S01C01",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "spend_original",
+              "kind": "atlas_generate_video",
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "id": "job_4_attempt_1",
+                  "status": "pending"
+                }
+              ],
+              "created_at": "2026-11-02T00:38:43Z",
+              "id": "job_4",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01_v2.mp4",
+              "raw_provider_id": "S01C01",
+              "retry_of": "job_3",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "pending",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-02T00:39:12Z",
+                  "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-02T00:39:12Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-02T00:39:12Z",
+              "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+              "id": "spend_retry",
+              "kind": "atlas_generate_video",
+              "request_metadata": {
+                "request_hash": "offline-fixture"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            }
+          ],
+          "scenes": [
+            {
+              "cuts": [
+                {
+                  "dialogue": [
+                    {
+                      "speaker": "Kris",
+                      "text": "This is one complete fixture line."
+                    },
+                    {
+                      "speaker": "Kris",
+                      "text": "This is one complete fixture line."
+                    }
+                  ],
+                  "id": {
+                    "cut": 1,
+                    "source_scene": 1
+                  },
+                  "production_note_path": "Scene_Prompts/Scene1/Cut1.txt",
+                  "prompt": "Speak the fixture line.",
+                  "render_lane": "audio_driven_i2v",
+                  "scene_type": "character_performance",
+                  "sketch": {
+                    "dialogue": [
+                      {
+                        "heard_as": "on_screen",
+                        "speaker": "Kris",
+                        "text": "This is one complete fixture line."
+                      }
+                    ],
+                    "mouth_policy": "speaking_visible",
+                    "shot_role": "performance",
+                    "speaker": "Kris",
+                    "title": "Fixture",
+                    "visual_prompt": "Speak the fixture line."
+                  },
+                  "speech_mode": "source_video_lipsync",
+                  "stable_id": "shot_1",
+                  "subject": "Kris",
+                  "title": "Fixture",
+                  "visual_source": {
+                    "asset_id": "asset_18",
+                    "strategy": "shared_reference"
+                  }
+                }
+              ],
+              "id": 1,
+              "stages": {
+                "assemble": "missing",
+                "characters": "missing",
+                "cut_sketches": "present",
+                "production_notes": "present",
+                "reference_images": "approved",
+                "render": "missing",
+                "scene_intent": "missing",
+                "scene_look": "missing",
+                "script": "missing",
+                "take_review": "missing"
+              },
+              "title": "Offline fixture"
+            }
+          ],
+          "scripts": [],
+          "settings": {},
+          "state_revision": 0,
+          "version": 2
+        }
+      }
+    },
+    "prediction": {
+      "error": "Occupied saved-audio retry is ambiguous; reconcile its failed child and complete WAV before retrying. No media changed.",
+      "initial": {
+        "report": {
+          "character_count": 0,
+          "identity_ready": 0,
+          "project_name": null,
+          "recipe": {
+            "id": "narrative_dialogue",
+            "label": "Narrative dialogue",
+            "stages": [
+              {
+                "depends_on": [],
+                "id": "script",
+                "label": "Script",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "script"
+                ],
+                "id": "characters",
+                "label": "Characters",
+                "required_roles": [
+                  "cast",
+                  "voice"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "characters"
+                ],
+                "id": "scene_intent",
+                "label": "Scene Intent",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_intent"
+                ],
+                "id": "scene_look",
+                "label": "Scene Look",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_look"
+                ],
+                "id": "cut_sketches",
+                "label": "Cut Sketches",
+                "required_roles": [
+                  "mouth_policy"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "reference_images",
+                "label": "Reference Images",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "production_notes",
+                "label": "Production Notes",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "production_notes"
+                ],
+                "id": "render",
+                "label": "Render",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "render"
+                ],
+                "id": "take_review",
+                "label": "Take Review",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "take_review"
+                ],
+                "id": "assemble",
+                "label": "Assemble",
+                "required_roles": [],
+                "work_area": "finish"
+              }
+            ]
+          },
+          "recipes": [
+            {
+              "id": "narrative_dialogue",
+              "label": "Narrative dialogue"
+            },
+            {
+              "id": "montage",
+              "label": "Montage"
+            }
+          ],
+          "scenes": [
+            {
+              "approved_start_frames": 0,
+              "can_backfill_sketches": false,
+              "cut_sketches": true,
+              "cuts_found": 1,
+              "effectively_performance_heavy": false,
+              "id": 1,
+              "mix": {
+                "lipsync": 1,
+                "silent": 0,
+                "voice_over": 0
+              },
+              "mix_verdict": {
+                "messages": [],
+                "mix": {
+                  "other_dialogue": 0,
+                  "performance": 1,
+                  "silent": 0
+                },
+                "status": "ok",
+                "strategy": "cinematic_balanced"
+              },
+              "navigation": [
+                {
+                  "available": true,
+                  "depends_on": [],
+                  "disabled_reason": null,
+                  "id": "script",
+                  "label": "Script",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "script"
+                  ],
+                  "disabled_reason": "Waiting on Script.",
+                  "id": "characters",
+                  "label": "Characters",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "characters"
+                  ],
+                  "disabled_reason": "Waiting on Characters.",
+                  "id": "scene_intent",
+                  "label": "Scene Intent",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "scene_intent"
+                  ],
+                  "disabled_reason": "Waiting on Scene Intent.",
+                  "id": "scene_look",
+                  "label": "Scene Look",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "scene_look"
+                  ],
+                  "disabled_reason": null,
+                  "id": "cut_sketches",
+                  "label": "Cut Sketches",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "reference_images",
+                  "label": "Reference Images",
+                  "status": "approved",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "production_notes",
+                  "label": "Production Notes",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "production_notes"
+                  ],
+                  "disabled_reason": null,
+                  "id": "render",
+                  "label": "Render",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "render"
+                  ],
+                  "disabled_reason": "Waiting on Render.",
+                  "id": "take_review",
+                  "label": "Take Review",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "take_review"
+                  ],
+                  "disabled_reason": "Waiting on Take Review.",
+                  "id": "assemble",
+                  "label": "Assemble",
+                  "status": "missing",
+                  "work_area": "finish"
+                }
+              ],
+              "planned_visual_sources": 1,
+              "production_notes": true,
+              "render_ready_sources": 1,
+              "scene_intent": false,
+              "scene_look": false,
+              "sketch_mix": {
+                "other_dialogue": 0,
+                "performance": 1,
+                "silent": 0
+              },
+              "strategy": "cinematic_balanced",
+              "summary": "Offline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+              "title": "Offline fixture",
+              "unresolved_visual_sources": 0,
+              "warnings": [
+                "scene look board missing",
+                "script scene text missing"
+              ]
+            }
+          ],
+          "script_count": 0,
+          "summary": "0 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 1 scene(s)\n\nOffline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+          "voice_ready": 0,
+          "warnings": [
+            "Scene 1: scene look board missing",
+            "Scene 1: script scene text missing"
+          ]
+        },
+        "state": {
+          "assets": [
+            {
+              "id": "asset_18",
+              "path": "Preproduction/Scene1/references/interior.png",
+              "role": "interior_reference",
+              "scene_id": 1,
+              "status": "approved"
+            }
+          ],
+          "characters": [],
+          "jobs": [
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-01T23:00:00Z",
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "job_3",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01.mp4",
+              "raw_provider_id": "S01C01",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "spend_original",
+              "kind": "atlas_generate_video",
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "id": "job_4_attempt_1",
+                  "status": "pending"
+                }
+              ],
+              "created_at": "2026-11-02T00:38:43Z",
+              "id": "job_4",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01_v2.mp4",
+              "raw_provider_id": "S01C01",
+              "retry_of": "job_3",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "pending",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-02T00:39:12Z",
+                  "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-02T00:39:12Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-02T00:39:12Z",
+              "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+              "id": "spend_retry",
+              "kind": "atlas_generate_video",
+              "request_metadata": {
+                "prediction_id": "uncertain_remote",
+                "request_hash": "offline-fixture"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            }
+          ],
+          "scenes": [
+            {
+              "cuts": [
+                {
+                  "dialogue": [
+                    {
+                      "speaker": "Kris",
+                      "text": "This is one complete fixture line."
+                    }
+                  ],
+                  "id": {
+                    "cut": 1,
+                    "source_scene": 1
+                  },
+                  "production_note_path": "Scene_Prompts/Scene1/Cut1.txt",
+                  "prompt": "Speak the fixture line.",
+                  "render_lane": "audio_driven_i2v",
+                  "scene_type": "character_performance",
+                  "sketch": {
+                    "dialogue": [
+                      {
+                        "heard_as": "on_screen",
+                        "speaker": "Kris",
+                        "text": "This is one complete fixture line."
+                      }
+                    ],
+                    "mouth_policy": "speaking_visible",
+                    "shot_role": "performance",
+                    "speaker": "Kris",
+                    "title": "Fixture",
+                    "visual_prompt": "Speak the fixture line."
+                  },
+                  "speech_mode": "source_video_lipsync",
+                  "stable_id": "shot_1",
+                  "subject": "Kris",
+                  "title": "Fixture",
+                  "visual_source": {
+                    "asset_id": "asset_18",
+                    "strategy": "shared_reference"
+                  }
+                }
+              ],
+              "id": 1,
+              "stages": {
+                "assemble": "missing",
+                "characters": "missing",
+                "cut_sketches": "present",
+                "production_notes": "present",
+                "reference_images": "approved",
+                "render": "missing",
+                "scene_intent": "missing",
+                "scene_look": "missing",
+                "script": "missing",
+                "take_review": "missing"
+              },
+              "title": "Offline fixture"
+            }
+          ],
+          "scripts": [],
+          "settings": {},
+          "state_revision": 0,
+          "version": 2
+        }
+      }
+    },
+    "unbound": {
+      "error": "Occupied saved-audio retry is ambiguous; reconcile its failed child and complete WAV before retrying. No media changed.",
+      "initial": {
+        "report": {
+          "character_count": 0,
+          "identity_ready": 0,
+          "project_name": null,
+          "recipe": {
+            "id": "narrative_dialogue",
+            "label": "Narrative dialogue",
+            "stages": [
+              {
+                "depends_on": [],
+                "id": "script",
+                "label": "Script",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "script"
+                ],
+                "id": "characters",
+                "label": "Characters",
+                "required_roles": [
+                  "cast",
+                  "voice"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "characters"
+                ],
+                "id": "scene_intent",
+                "label": "Scene Intent",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_intent"
+                ],
+                "id": "scene_look",
+                "label": "Scene Look",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_look"
+                ],
+                "id": "cut_sketches",
+                "label": "Cut Sketches",
+                "required_roles": [
+                  "mouth_policy"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "reference_images",
+                "label": "Reference Images",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "production_notes",
+                "label": "Production Notes",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "production_notes"
+                ],
+                "id": "render",
+                "label": "Render",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "render"
+                ],
+                "id": "take_review",
+                "label": "Take Review",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "take_review"
+                ],
+                "id": "assemble",
+                "label": "Assemble",
+                "required_roles": [],
+                "work_area": "finish"
+              }
+            ]
+          },
+          "recipes": [
+            {
+              "id": "narrative_dialogue",
+              "label": "Narrative dialogue"
+            },
+            {
+              "id": "montage",
+              "label": "Montage"
+            }
+          ],
+          "scenes": [
+            {
+              "approved_start_frames": 0,
+              "can_backfill_sketches": false,
+              "cut_sketches": true,
+              "cuts_found": 1,
+              "effectively_performance_heavy": false,
+              "id": 1,
+              "mix": {
+                "lipsync": 1,
+                "silent": 0,
+                "voice_over": 0
+              },
+              "mix_verdict": {
+                "messages": [],
+                "mix": {
+                  "other_dialogue": 0,
+                  "performance": 1,
+                  "silent": 0
+                },
+                "status": "ok",
+                "strategy": "cinematic_balanced"
+              },
+              "navigation": [
+                {
+                  "available": true,
+                  "depends_on": [],
+                  "disabled_reason": null,
+                  "id": "script",
+                  "label": "Script",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "script"
+                  ],
+                  "disabled_reason": "Waiting on Script.",
+                  "id": "characters",
+                  "label": "Characters",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "characters"
+                  ],
+                  "disabled_reason": "Waiting on Characters.",
+                  "id": "scene_intent",
+                  "label": "Scene Intent",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "scene_intent"
+                  ],
+                  "disabled_reason": "Waiting on Scene Intent.",
+                  "id": "scene_look",
+                  "label": "Scene Look",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "scene_look"
+                  ],
+                  "disabled_reason": null,
+                  "id": "cut_sketches",
+                  "label": "Cut Sketches",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "reference_images",
+                  "label": "Reference Images",
+                  "status": "approved",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "production_notes",
+                  "label": "Production Notes",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "production_notes"
+                  ],
+                  "disabled_reason": null,
+                  "id": "render",
+                  "label": "Render",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "render"
+                  ],
+                  "disabled_reason": "Waiting on Render.",
+                  "id": "take_review",
+                  "label": "Take Review",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "take_review"
+                  ],
+                  "disabled_reason": "Waiting on Take Review.",
+                  "id": "assemble",
+                  "label": "Assemble",
+                  "status": "missing",
+                  "work_area": "finish"
+                }
+              ],
+              "planned_visual_sources": 1,
+              "production_notes": true,
+              "render_ready_sources": 1,
+              "scene_intent": false,
+              "scene_look": false,
+              "sketch_mix": {
+                "other_dialogue": 0,
+                "performance": 1,
+                "silent": 0
+              },
+              "strategy": "cinematic_balanced",
+              "summary": "Offline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+              "title": "Offline fixture",
+              "unresolved_visual_sources": 0,
+              "warnings": [
+                "scene look board missing",
+                "script scene text missing"
+              ]
+            }
+          ],
+          "script_count": 0,
+          "summary": "0 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 1 scene(s)\n\nOffline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+          "voice_ready": 0,
+          "warnings": [
+            "Scene 1: scene look board missing",
+            "Scene 1: script scene text missing"
+          ]
+        },
+        "state": {
+          "assets": [
+            {
+              "id": "asset_18",
+              "path": "Preproduction/Scene1/references/interior.png",
+              "role": "interior_reference",
+              "scene_id": 1,
+              "status": "approved"
+            }
+          ],
+          "characters": [],
+          "jobs": [
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-01T23:00:00Z",
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "job_3",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01.mp4",
+              "raw_provider_id": "S01C01",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "spend_original",
+              "kind": "atlas_generate_video",
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "id": "job_4_attempt_1",
+                  "status": "pending"
+                }
+              ],
+              "created_at": "2026-11-02T00:38:43Z",
+              "id": "job_4",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01_v2.mp4",
+              "raw_provider_id": "S01C01",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "pending",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-02T00:39:12Z",
+                  "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-02T00:39:12Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-02T00:39:12Z",
+              "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+              "id": "spend_retry",
+              "kind": "atlas_generate_video",
+              "request_metadata": {
+                "request_hash": "offline-fixture"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            }
+          ],
+          "scenes": [
+            {
+              "cuts": [
+                {
+                  "dialogue": [
+                    {
+                      "speaker": "Kris",
+                      "text": "This is one complete fixture line."
+                    }
+                  ],
+                  "id": {
+                    "cut": 1,
+                    "source_scene": 1
+                  },
+                  "production_note_path": "Scene_Prompts/Scene1/Cut1.txt",
+                  "prompt": "Speak the fixture line.",
+                  "render_lane": "audio_driven_i2v",
+                  "scene_type": "character_performance",
+                  "sketch": {
+                    "dialogue": [
+                      {
+                        "heard_as": "on_screen",
+                        "speaker": "Kris",
+                        "text": "This is one complete fixture line."
+                      }
+                    ],
+                    "mouth_policy": "speaking_visible",
+                    "shot_role": "performance",
+                    "speaker": "Kris",
+                    "title": "Fixture",
+                    "visual_prompt": "Speak the fixture line."
+                  },
+                  "speech_mode": "source_video_lipsync",
+                  "stable_id": "shot_1",
+                  "subject": "Kris",
+                  "title": "Fixture",
+                  "visual_source": {
+                    "asset_id": "asset_18",
+                    "strategy": "shared_reference"
+                  }
+                }
+              ],
+              "id": 1,
+              "stages": {
+                "assemble": "missing",
+                "characters": "missing",
+                "cut_sketches": "present",
+                "production_notes": "present",
+                "reference_images": "approved",
+                "render": "missing",
+                "scene_intent": "missing",
+                "scene_look": "missing",
+                "script": "missing",
+                "take_review": "missing"
+              },
+              "title": "Offline fixture"
+            }
+          ],
+          "scripts": [],
+          "settings": {},
+          "state_revision": 0,
+          "version": 2
+        }
+      }
+    },
+    "video": {
+      "error": "Render already submitted or output exists; collect the existing result instead",
+      "initial": {
+        "report": {
+          "character_count": 0,
+          "identity_ready": 0,
+          "project_name": null,
+          "recipe": {
+            "id": "narrative_dialogue",
+            "label": "Narrative dialogue",
+            "stages": [
+              {
+                "depends_on": [],
+                "id": "script",
+                "label": "Script",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "script"
+                ],
+                "id": "characters",
+                "label": "Characters",
+                "required_roles": [
+                  "cast",
+                  "voice"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "characters"
+                ],
+                "id": "scene_intent",
+                "label": "Scene Intent",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_intent"
+                ],
+                "id": "scene_look",
+                "label": "Scene Look",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "scene_look"
+                ],
+                "id": "cut_sketches",
+                "label": "Cut Sketches",
+                "required_roles": [
+                  "mouth_policy"
+                ],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "reference_images",
+                "label": "Reference Images",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "cut_sketches"
+                ],
+                "id": "production_notes",
+                "label": "Production Notes",
+                "required_roles": [],
+                "work_area": "plan"
+              },
+              {
+                "depends_on": [
+                  "production_notes"
+                ],
+                "id": "render",
+                "label": "Render",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "render"
+                ],
+                "id": "take_review",
+                "label": "Take Review",
+                "required_roles": [],
+                "work_area": "produce"
+              },
+              {
+                "depends_on": [
+                  "take_review"
+                ],
+                "id": "assemble",
+                "label": "Assemble",
+                "required_roles": [],
+                "work_area": "finish"
+              }
+            ]
+          },
+          "recipes": [
+            {
+              "id": "narrative_dialogue",
+              "label": "Narrative dialogue"
+            },
+            {
+              "id": "montage",
+              "label": "Montage"
+            }
+          ],
+          "scenes": [
+            {
+              "approved_start_frames": 0,
+              "can_backfill_sketches": false,
+              "cut_sketches": true,
+              "cuts_found": 1,
+              "effectively_performance_heavy": false,
+              "id": 1,
+              "mix": {
+                "lipsync": 1,
+                "silent": 0,
+                "voice_over": 0
+              },
+              "mix_verdict": {
+                "messages": [],
+                "mix": {
+                  "other_dialogue": 0,
+                  "performance": 1,
+                  "silent": 0
+                },
+                "status": "ok",
+                "strategy": "cinematic_balanced"
+              },
+              "navigation": [
+                {
+                  "available": true,
+                  "depends_on": [],
+                  "disabled_reason": null,
+                  "id": "script",
+                  "label": "Script",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "script"
+                  ],
+                  "disabled_reason": "Waiting on Script.",
+                  "id": "characters",
+                  "label": "Characters",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "characters"
+                  ],
+                  "disabled_reason": "Waiting on Characters.",
+                  "id": "scene_intent",
+                  "label": "Scene Intent",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "scene_intent"
+                  ],
+                  "disabled_reason": "Waiting on Scene Intent.",
+                  "id": "scene_look",
+                  "label": "Scene Look",
+                  "status": "missing",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "scene_look"
+                  ],
+                  "disabled_reason": null,
+                  "id": "cut_sketches",
+                  "label": "Cut Sketches",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "reference_images",
+                  "label": "Reference Images",
+                  "status": "approved",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "cut_sketches"
+                  ],
+                  "disabled_reason": null,
+                  "id": "production_notes",
+                  "label": "Production Notes",
+                  "status": "present",
+                  "work_area": "plan"
+                },
+                {
+                  "available": true,
+                  "depends_on": [
+                    "production_notes"
+                  ],
+                  "disabled_reason": null,
+                  "id": "render",
+                  "label": "Render",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "render"
+                  ],
+                  "disabled_reason": "Waiting on Render.",
+                  "id": "take_review",
+                  "label": "Take Review",
+                  "status": "missing",
+                  "work_area": "produce"
+                },
+                {
+                  "available": false,
+                  "depends_on": [
+                    "take_review"
+                  ],
+                  "disabled_reason": "Waiting on Take Review.",
+                  "id": "assemble",
+                  "label": "Assemble",
+                  "status": "missing",
+                  "work_area": "finish"
+                }
+              ],
+              "planned_visual_sources": 1,
+              "production_notes": true,
+              "render_ready_sources": 1,
+              "scene_intent": false,
+              "scene_look": false,
+              "sketch_mix": {
+                "other_dialogue": 0,
+                "performance": 1,
+                "silent": 0
+              },
+              "strategy": "cinematic_balanced",
+              "summary": "Offline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+              "title": "Offline fixture",
+              "unresolved_visual_sources": 0,
+              "warnings": [
+                "scene look board missing",
+                "script scene text missing"
+              ]
+            }
+          ],
+          "script_count": 0,
+          "summary": "0 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 1 scene(s)\n\nOffline fixture:\n- 1 cuts found\n- 1 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 1 source strategies planned; 1 render ready\n- production notes exist\n- scene look board missing\n- scene intent missing\n- cut sketches present\n- sketch mix: 1 performance / 0 other dialogue / 0 silent\n- cinematic-balanced mix accepted",
+          "voice_ready": 0,
+          "warnings": [
+            "Scene 1: scene look board missing",
+            "Scene 1: script scene text missing"
+          ]
+        },
+        "state": {
+          "assets": [
+            {
+              "id": "asset_18",
+              "path": "Preproduction/Scene1/references/interior.png",
+              "role": "interior_reference",
+              "scene_id": 1,
+              "status": "approved"
+            }
+          ],
+          "characters": [],
+          "jobs": [
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-01T23:00:00Z",
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "job_3",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01.mp4",
+              "raw_provider_id": "S01C01",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-01T23:07:36Z",
+                  "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-01T23:07:34Z",
+                  "status": "failed"
+                }
+              ],
+              "error": "HOST PRE-SUBMIT VALIDATION: incompatible image field. No generation submitted.",
+              "id": "spend_original",
+              "kind": "atlas_generate_video",
+              "status": "failed",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "id": "job_4_attempt_1",
+                  "status": "pending"
+                }
+              ],
+              "created_at": "2026-11-02T00:38:43Z",
+              "id": "job_4",
+              "kind": "render",
+              "output_path": "Scenes/Scene1/Cut1/S01C01_v2.mp4",
+              "raw_provider_id": "S01C01",
+              "retry_of": "job_3",
+              "scope": {
+                "id": "shot_1",
+                "kind": "shot"
+              },
+              "status": "pending",
+              "unbounded_exposure": false
+            },
+            {
+              "actual_verified": false,
+              "attempts": [
+                {
+                  "completed_at": "2026-11-02T00:39:12Z",
+                  "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+                  "id": "attempt_1",
+                  "started_at": "2026-11-02T00:39:12Z",
+                  "status": "failed"
+                }
+              ],
+              "created_at": "2026-11-02T00:39:12Z",
+              "error": "saved-audio retry is no longer proven pre-submit; no video submitted",
+              "id": "spend_retry",
+              "kind": "atlas_generate_video",
+              "request_metadata": {
+                "request_hash": "offline-fixture"
+              },
+              "status": "failed",
+              "unbounded_exposure": false
+            }
+          ],
+          "scenes": [
+            {
+              "cuts": [
+                {
+                  "dialogue": [
+                    {
+                      "speaker": "Kris",
+                      "text": "This is one complete fixture line."
+                    }
+                  ],
+                  "id": {
+                    "cut": 1,
+                    "source_scene": 1
+                  },
+                  "production_note_path": "Scene_Prompts/Scene1/Cut1.txt",
+                  "prompt": "Speak the fixture line.",
+                  "render_lane": "audio_driven_i2v",
+                  "scene_type": "character_performance",
+                  "sketch": {
+                    "dialogue": [
+                      {
+                        "heard_as": "on_screen",
+                        "speaker": "Kris",
+                        "text": "This is one complete fixture line."
+                      }
+                    ],
+                    "mouth_policy": "speaking_visible",
+                    "shot_role": "performance",
+                    "speaker": "Kris",
+                    "title": "Fixture",
+                    "visual_prompt": "Speak the fixture line."
+                  },
+                  "speech_mode": "source_video_lipsync",
+                  "stable_id": "shot_1",
+                  "subject": "Kris",
+                  "title": "Fixture",
+                  "visual_source": {
+                    "asset_id": "asset_18",
+                    "strategy": "shared_reference"
+                  }
+                }
+              ],
+              "id": 1,
+              "stages": {
+                "assemble": "missing",
+                "characters": "missing",
+                "cut_sketches": "present",
+                "production_notes": "present",
+                "reference_images": "approved",
+                "render": "missing",
+                "scene_intent": "missing",
+                "scene_look": "missing",
+                "script": "missing",
+                "take_review": "missing"
+              },
+              "title": "Offline fixture"
+            }
+          ],
+          "scripts": [],
+          "settings": {},
+          "state_revision": 0,
+          "version": 2
+        }
+      }
+    }
+  }
+}

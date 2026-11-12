@@ -1,0 +1,5 @@
+# Retired embedded Director approval tests
+
+`director-approval-continuation.retired.ts.archive` preserves the original test file verbatim outside Vitest's `tests/**/*.test.ts` discovery. Its app-entry harness assumes the removed embedded Director chat, planner turns, tabs and progress UI; those expectations are not the direct Studio operation workflow. This is an explicit retirement, not a passing or skipped suite, and is not a claim of equivalent coverage for the removed chat.
+
+`sb22-operation-approval.test.ts` covers the surviving direct-workflow safety boundary: exact one-use host approval, cancellation and replacement, independent paid consent, errors and fresh continuations, plus selection changes and delayed refresh races. The archived project-dialog cases exercised chat-specific transition ownership; they do not establish direct-workflow safety while a native project chooser is open. That interaction needs its own integrated assessment. No other test file or Vitest discovery rule was changed.

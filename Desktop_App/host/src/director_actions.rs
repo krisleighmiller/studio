@@ -13,8 +13,6 @@ pub const PENDING_ACTION_END: &str = "-->";
 pub const ACTION_CONSUMED: &str = "<!--workbench_action_consumed-->";
 
 pub const SPECIALISTS: &[&str] = &[
-    "script",
-    "character_creation",
     "scene_intent",
     "scene_look",
     "cut_sketches",
@@ -23,11 +21,15 @@ pub const SPECIALISTS: &[&str] = &[
     "still_image",
     "scene_generation",
     "text_sync",
+    "dialogue_audio",
     "lip_sync",
     "assemble",
-    "production_helper",
     "text_write",
 ];
+
+// Accept old actions only so the dispatcher can return LP01 retirement guidance.
+// Never advertise these as current capabilities.
+const RETIRED_SPECIALISTS: &[&str] = &["script", "character_creation", "production_helper"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -411,9 +413,13 @@ fn require_existing_files(
             Some(Value::String(raw)) if !raw.trim().is_empty() => {
                 let path = resolve_input_path(raw, project_root)?;
                 if !path.is_file() {
+                    let advice = if matches!(*key, "source_frame" | "source_image") {
+                        " For a new still, omit source_frame/source_image and pass prompt/brief only."
+                    } else if *key == "production_path" {
+                        " Save canonical production notes for each selected cut before preparing assembly."
+                    } else { "" };
                     return Err(ActionError::Validate(format!(
-                        "`{key}` must be an existing file (got `{}`). For a new still, omit source_frame/source_image and pass prompt/brief only.",
-                        path.display()
+                        "`{key}` must be an existing file (got `{}`).{advice}", path.display()
                     )));
                 }
             }
@@ -596,7 +602,7 @@ pub fn validate_action(
             let specialist = action.specialist.as_deref().ok_or_else(|| {
                 ActionError::Validate("run_specialist requires specialist".into())
             })?;
-            if !SPECIALISTS.contains(&specialist) {
+            if !SPECIALISTS.contains(&specialist) && !RETIRED_SPECIALISTS.contains(&specialist) {
                 let hint = if looks_like_capability_slot(specialist) {
                     format!(
                         "`{specialist}` is a Settings capability slot, not a specialist. \
@@ -672,7 +678,15 @@ edit: existing source_frame + edit_brief). The host picks the slot model and out
                         )?;
                     }
                 }
+                "dialogue_audio" => {
+                    require_any(&action.inputs, &["voice_clone", "voice_profile"])?;
+                    require_any(&action.inputs, &["output_path"])?;
+                    require_existing_files(&action.inputs, project_root, &["voice_clone", "voice_profile"])?;
+                }
                 "text_sync" => {
+                    if !action.inputs.contains_key("collect_prediction_id") {
+                        require_any(&action.inputs, &["performance_wav", "reuse_audio"])?;
+                    }
                     let has_handoff = action.inputs.contains_key("handoff_path")
                         || action.inputs.contains_key("handoff");
                     if !has_handoff {
@@ -852,6 +866,7 @@ fn allowed_input_keys(specialist: &str) -> HashSet<&'static str> {
             "character_files",
             "reference_images",
             "reference_assets",
+            "image_capability",
             "preserve_props",
             "aspect_ratio",
             "resolution",
@@ -877,6 +892,7 @@ fn allowed_input_keys(specialist: &str) -> HashSet<&'static str> {
             "resolution",
             "collect_prediction_id",
         ],
+        "dialogue_audio" => &["scene_id", "cut", "shot_id", "dialogue", "voice_asset_id", "voice_clone", "voice_profile", "output_path", "output_video", "collect_prediction_id"],
         "text_sync" => &[
             "handoff_path",
             "handoff",
@@ -1353,7 +1369,8 @@ pub fn planner_system_prompt() -> String {
 
 You are NOT allowed to call provider APIs, invent tool results, or access the filesystem yourself.
 You ONLY emit one or more validated director actions. The host validates, enforces approval/spending, resolves paths, and runs specialists.
-For script / character_creation / scene_intent / scene_look / cut_sketches / scene_plan / production_helper, the host loads the specialist contract and calls the selected chat model — you only route with a clear brief and paths.
+For scene_intent / scene_look / cut_sketches / scene_plan, the host runs the current host-owned planning workflow — you only route with a clear brief and paths.
+The script, character_creation and production_helper operations are retired and unavailable. Do not emit them or alias them to another specialist. Use the Script and Characters local authoring surfaces for text editing.
 
 ## Output format (required)
 
@@ -1389,27 +1406,19 @@ The host selects the correct slot after you choose a specialist and inputs.
 - **Text-sync / talking shot / audio-driven I2V** (handoff `speech.mode: source_video_lipsync` or `audio_driven_i2v`, Van/Wan image+audio) → text_sync
 - Post lip-sync of an existing silent/base clip + WAV via Sync Labs → lip_sync
 - **Assemble / post / final cut / master** → assemble (host ffmpeg; plan approval required)
-- Character sheet text → character_creation (brief + paths/attachments). Host writes the sheet.
-- Script draft/revise → script (brief + source paths). Host writes the draft.
+
 - **Scene intent** / narrative purpose / “draft the scene intent” → scene_intent (brief + optional `scene` / `source_scene`). Host drafts the V2 intent card. Existing prod.md / Scene_Prompts do **not** mean intent is done. Never route this to scene_plan.
 - **Scene look** / look board / wardrobe-mood-interior-exterior-prop references → scene_look. Host drafts reference prompts. Do not use still_image until the user asks to generate a selected slot, and never treat Characters/ model-sheet closeups as scene look.
 - **Cut sketches** / shot role / mouth policy / scene strategy (`cinematic_balanced`, `performance_heavy`, `atmosphere_heavy`) → cut_sketches. Host drafts sketches and validates mix. Do not use scene_plan.
 - Production notes / prod.md / Scene_Prompts / redo cut → scene_plan (brief + script/character paths; optional production_path / sidecar_dir / aspect_ratio). Host writes master + sidecars. No approval — local files only. Only when the user explicitly asks for production notes or the direct notes shortcut.
 - Multi-angle / green-screen character identity pack → model_sheet (character_files and/or reference_images). Required for character continuity in video — including spicy/NSFW — before scene_generation when faces/bodies must stay locked.
-- **Review / sanity-check docs / “is this correct” / brainstorm failing image or video prompts / research digests / idea packet** → production_helper (advisory; no media spend)
+
 
 ### media_probe inputs (read-only; no provider call)
 - Use `inspect` with `op:"media_probe"`, `path` pointing to the exact source clip or audio, and optional `inputs:{{threshold_db:-40,min_silence_seconds:0.12}}`.
 - Reports technical metadata, measured silence/non-silent intervals, and candidate first/last activity in source-relative seconds. Non-silent activity is not speech: music, noise, and breaths can trigger it; quiet speech may be missed. Never claim verified dialogue boundaries or lip sync from these measurements.
 - For pause/trim revisions, inspect the actual sources first. Use measured intervals as evidence, state uncertainty and a conservative retained margin, and propose the focused custom trim for approval. Never infer exact speech onset from estimated script duration. If evidence is ambiguous, say so rather than guessing or sending the user to run ffmpeg.
 
-### production_helper inputs
-- `question` / `brief` / `prompt` / `message` — what to check or brainstorm (required in spirit; host can fall back to the user turn)
-- `paths` / `source_paths` / `documents` / `files` / `path` — existing project docs to read (array or string). Pass the user's named source documents explicitly; these take precedence over attachments / focused editor / selected path. Use that context only when the user did not name sources.
-- Optional `output_path` only if the user named a digest file; otherwise reply in chat only. It is the destination, NOT a source to inspect or include in `paths`. A new destination need not exist yet.
-- For “summarize script.md and prod.md into Research/stop_check.md”, pass `paths: ["script.md", "prod.md"]` and `output_path: "Research/stop_check.md"`; do not read the destination or ask the user to create it first.
-- If source loading fails, report the missing/unreadable source and stop. Do not offer the failure message as a digest to save, and do not claim the digest was completed.
-- Optional `mode`: `review` | `brainstorm` | `digest` (hint only)
 
 ### assemble inputs
 - Inline: `production_path` (prod.md) plus `scenes` array of `{{id, video, audio?}}` **or** `discover:true`. A YAML map is optional; do not ask the user to create one or enable a text writer for assembly or revisions.
@@ -1425,7 +1434,7 @@ The host selects the correct slot after you choose a specialist and inputs.
 ### text_sync inputs
 - Required: `handoff_path` or `handoff` (talking-shot handoff with `speech.cues`)
 - Paths (handoff headers OK if omitted): `character_image` / `source_frame`
-- Voice (one of): `voice_clone` / `clone_wav`, `voice_profile`, or `performance_wav` / `reuse_audio` to skip TTS
+- Required saved audio: `performance_wav` / `reuse_audio`. Generate and choose dialogue audio separately in Scene Look; text_sync never synthesizes speech
 - Optional: `sync_ms` (default 150), `pad_to_9x16`
 - Do **not** pass `model` or `audio_model`. The host uses Settings slots.
 
@@ -1498,7 +1507,7 @@ Character model sheet (continuity pack; host uses Characters/<name>/model_sheet)
 
 Text-sync talking shot (TTS → pad → Van/Wan I2V+audio):
 <director_action>
-{{"action":"run_specialist","specialist":"text_sync","inputs":{{"handoff_path":"Scene_Prompts/Scene1.txt","voice_clone":"Mom/voice/sample.wav","character_image":"mom_vert.png"}}}}
+{{"action":"run_specialist","specialist":"text_sync","inputs":{{"handoff_path":"Scene_Prompts/Scene1.txt","performance_wav":"Scenes/Scene1/Cut1/dialogue_1.wav","character_image":"mom_vert.png"}}}}
 </director_action>
 
 Assemble master from an existing final_prompt map:
@@ -1516,10 +1525,6 @@ Assemble master with discover (no map file; host names the master):
 {{"action":"run_specialist","specialist":"assemble","inputs":{{"production_path":"prod.md","discover":true,"trim":"estimated","caption_mode":"none"}}}}
 </director_action>
 
-Review docs / brainstorm a failing prompt (no approval — chat only):
-<director_action>
-{{"action":"run_specialist","specialist":"production_helper","inputs":{{"question":"Is prod.md ready for assemble? Flag anything Text-Sync or Assemble will choke on.","paths":["prod.md","Final/final_prompt.txt"]}}}}
-</director_action>
 
 Scene intent (not production notes; host drafts the V2 card):
 <director_action>
@@ -1536,20 +1541,12 @@ Cut sketches (host-owned mix check):
 {{"action":"run_specialist","specialist":"cut_sketches","inputs":{{"brief":"Sketch cuts for Scene 1, cinematic balanced.","scene":1,"strategy":"cinematic_balanced"}}}}
 </director_action>
 
-Scene plan / production notes (host loads Scene Plan contract; no approval — local files):
+Scene plan / production notes (host-owned workflow; no approval — local files):
 <director_action>
 {{"action":"run_specialist","specialist":"scene_plan","inputs":{{"brief":"Build prod.md and Scene_Prompts/ from the attached script. Vertical 9:16. Leave Character_Reference and Voice empty for later.","paths":["Scripts/Episode1.md"],"aspect_ratio":"9:16"}}}}
 </director_action>
 
-Script draft (host loads Script Assistant contract; local file write):
-<director_action>
-{{"action":"run_specialist","specialist":"script","inputs":{{"brief":"Draft a shootable short-form script from the attached chapter.","paths":["source_chapter.md"]}}}}
-</director_action>
 
-Character sheet (host loads Character Creation contract; local file write):
-<director_action>
-{{"action":"run_specialist","specialist":"character_creation","inputs":{{"brief":"Extract Mom into a character sheet.","paths":["Scripts/draft.md"]}}}}
-</director_action>
 "#
     )
 }

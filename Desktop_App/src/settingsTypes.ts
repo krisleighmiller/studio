@@ -307,6 +307,16 @@ export type AppSettings = {
   selectedChatModel: ModelRef | null;
 };
 
+/** The per-request picker mirrors Settings without modifying its defaults. */
+export function imageCapabilityRoutes(settings: AppSettings): { id: string; label: string }[] {
+  return CAPABILITY_SLOTS.filter(slot => slot.group === "image").map(slot => {
+    const model = settings.capabilityDefaults[slot.id];
+    const provider = model && settings.apis.find(api => api.id === model.apiId);
+    const detail = model ? `${provider?.name ?? model.apiId} · ${model.modelId}` : "not configured";
+    return { id: slot.id, label: `${slot.label} · ${detail}` };
+  });
+}
+
 /** Atlas marks NSFW-capable media models with a spicy tag / id segment. */
 export function isSpicyModel(model: Pick<CatalogModel, "id" | "displayName" | "tags" | "profile">): boolean {
   const tags = (model.tags ?? []).map((t) => t.trim().toLowerCase());

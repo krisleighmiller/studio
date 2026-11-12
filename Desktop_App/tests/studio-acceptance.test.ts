@@ -30,6 +30,7 @@ import {
   setProfileOpen,
 } from "../src/studio/surfaces/productionSurfaces";
 import type { SurfaceHost } from "../src/studio/surfaces/host";
+import { getSurfaceHost } from "../src/studio/surfaces/session";
 import { applySurfaceActions } from "../src/studio/surfaceActions";
 import { renderSurfaceNav } from "../src/studio/surfaceNav";
 import { paintUnknownRecipeStage, stageHasEditor } from "../src/studio/recipeStage";
@@ -434,14 +435,18 @@ describe("phase 5 shell selectors", () => {
       state: {
         project_name: "Lite_Challenge",
         profile: { recipe: NARRATIVE_RECIPE, deliverables: [] },
-        requirements: [{ id: "req-1", name: "Red lantern", kind: "prop", status: "missing", scene_ids: [1] }],
+        requirements: [
+          { id: "req-1", name: "Red lantern", kind: "prop", status: "missing", scene_ids: [1] },
+          { id: "req-2", name: "Unscouted room", kind: "location", status: "missing", scene_ids: [1] },
+        ],
         scenes: [],
       } as unknown as ProjectState,
       report: { recipe: { id: NARRATIVE_RECIPE, label: "Narrative dialogue", stages: [] }, warnings: [], scenes: [] } as never,
       workArea: "plan",
     });
     expect(summary.recipeLabel).toBe("Narrative dialogue");
-    expect(summary.blockers).toContain("Red lantern");
+    expect(summary.blockers).not.toContain("Red lantern");
+    expect(summary.blockers).toContain("Unscouted room");
     const scenes = buildSceneSummaries({
       state: { scenes: [scene({ id: 1 })], requirements: [], characters: [] } as unknown as ProjectState,
       reports: [],
@@ -525,7 +530,7 @@ describe("phase 6 cut sketches", () => {
       blockerNames: () => [],
       hooks: null,
     } as unknown as SurfaceHost);
-    const intents: Array<{ type: string; strategy?: string; sketch?: { title: string | null } }> = [];
+    const intents: Array<{ type: string; strategy?: string; maxCuts?: number; shotId?: string; sketch?: { title: string | null } }> = [];
     const view = renderSketchStage(
       scene({
         id: 1,
@@ -538,6 +543,9 @@ describe("phase 6 cut sketches", () => {
     );
     const draft = [...view.querySelectorAll("button")].find((button) => button.textContent === "Draft sketches");
     const save = [...view.querySelectorAll("button")].find((button) => button.textContent === "Save sketch");
+    const remove = [...view.querySelectorAll("button")].find((button) => button.textContent === "Remove cut");
+    expect(remove?.disabled).toBe(false);
+    remove?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(draft?.disabled).toBe(true);
     expect(draft?.title).toContain("chat model");
     draft?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -547,6 +555,12 @@ describe("phase 6 cut sketches", () => {
       strategy.value = "performance_heavy";
       strategy.dispatchEvent(new Event("change"));
     }
+    const limit = view.querySelector<HTMLSelectElement>('select[aria-label="Maximum cuts in this scene"]');
+    expect(limit?.value).toBe("12");
+    if (limit) {
+      limit.value = "2";
+      limit.dispatchEvent(new Event("change"));
+    }
     const titleLabel = [...view.querySelectorAll("label")].find((label) => label.querySelector("span")?.textContent === "Title");
     const title = titleLabel?.querySelector("input");
     if (title instanceof HTMLInputElement) {
@@ -554,13 +568,30 @@ describe("phase 6 cut sketches", () => {
       title.dispatchEvent(new Event("input"));
     }
     save?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(intents.map((item) => item.type)).toEqual(["set-strategy", "save-sketch"]);
-    expect(intents[0]?.strategy).toBe("performance_heavy");
-    expect(intents[1]?.sketch?.title).toBe("Rain on the glass");
+    expect(intents.map((item) => item.type)).toEqual(["remove-cut", "set-strategy", "set-max-cuts", "save-sketch"]);
+    expect(intents[0]?.shotId).toBe("shot-1");
+    expect(intents[1]?.strategy).toBe("performance_heavy");
+    expect(intents[2]?.maxCuts).toBe(2);
+    expect(intents[3]?.sketch?.title).toBe("Rain on the glass");
   });
 });
 
 describe("phase 6 reference images", () => {
+  it("saves a scene reference description without invoking the host", () => {
+    const intents: Array<{ type: string; description?: string; category?: string; slotId?: string | null }> = [];
+    const view = renderReferenceImagesStage(scene({ id: 1, cuts: [] }), undefined, (intent) => intents.push(intent));
+    const description = view.querySelector<HTMLTextAreaElement>('textarea[aria-label="New reference description"]');
+    expect(description).not.toBeNull();
+    description!.value = "Station rain";
+    const save = [...view.querySelectorAll("button")].find((button) => button.textContent === "Add description");
+    expect(save).toBeDefined();
+    save!.click();
+    expect(intents).toEqual([{ type: "save-description", slotId: null, description: "Station rain", category: "user_defined" }]);
+    expect(view.innerHTML).not.toContain("invoke");
+  });
+});
+
+describe("phase 6 cut sketch reference image controls", () => {
   it("emits source and prompt intents and leaves the host command to the desk", () => {
     bindSurfaceHost({
       busy: null,
@@ -592,12 +623,13 @@ describe("phase 6 reference images", () => {
       hooks: null,
     } as unknown as SurfaceHost);
     const intents: Array<{ type: string; strategy?: string; prompt?: string }> = [];
-    const view = renderReferenceImagesStage(
+    const view = renderSketchStage(
       scene({
         id: 1,
         cuts: [cut({ cut: 1, title: "Window", start_frame_prompt: "Wet glass" })],
       }),
       undefined,
+      () => undefined,
       (intent) => intents.push(intent),
     );
     const draft = [...view.querySelectorAll("button")].find((button) => button.textContent === "Draft image prompt");
@@ -606,7 +638,7 @@ describe("phase 6 reference images", () => {
     expect(draft?.disabled).toBe(true);
     expect(draft?.title).toContain("chat model");
     draft?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    const prompt = view.querySelector("textarea");
+    const prompt = [...view.querySelectorAll("label")].find((label) => label.textContent?.includes("Start-frame prompt"))?.querySelector("textarea");
     if (prompt instanceof HTMLTextAreaElement) prompt.value = "Station rain";
     savePrompt?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     saveSource?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -615,6 +647,23 @@ describe("phase 6 reference images", () => {
     expect(intents[1]?.strategy).toBe("preproduction_start_frame");
     expect(view.innerHTML).not.toContain("workflow_set_visual_source");
     expect(view.innerHTML).not.toContain("invoke");
+
+    const host = getSurfaceHost();
+    host.chatReady = true;
+    const renderDraft = () => {
+      const next = renderSketchStage(scene({ id: 1, cuts: [cut({ cut: 1 })] }), undefined, () => undefined, (intent) => intents.push(intent));
+      return [...next.querySelectorAll("button")].find((button) => button.textContent === "Draft image prompt")!;
+    };
+    const readyDraft = renderDraft();
+    expect(readyDraft.disabled).toBe(false);
+    readyDraft.click();
+    expect(intents.at(-1)?.type).toBe("draft-prompt");
+    host.busy = "Saving";
+    const busyDraft = renderDraft();
+    expect(busyDraft.disabled).toBe(true);
+    expect(busyDraft.title).toBe("Saving");
+    busyDraft.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(intents.filter((intent) => intent.type === "draft-prompt")).toHaveLength(1);
   });
 });
 
@@ -657,9 +706,9 @@ describe("phase 6 production notes", () => {
           cut({
             cut: 1,
             title: "Window",
-            production_note_path: "Scenes/Scene1/Cut1/prod.md",
+            production_note_path: null,
             sketch: { title: "Window", visual_prompt: "Rain" },
-            prompt: "Wet glass",
+            prompt: null,
           }),
         ],
       }),
@@ -671,6 +720,7 @@ describe("phase 6 production notes", () => {
     const save = [...view.querySelectorAll("button")].find((button) => button.textContent === "Save production prompt");
     const alternate = [...view.querySelectorAll("button")].find((button) => button.textContent === "New alternate angle");
     expect(build?.disabled).toBe(true);
+    expect(save?.disabled).toBe(false);
     expect(build?.title).toContain("chat model");
     build?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     const prompt = view.querySelector("textarea");

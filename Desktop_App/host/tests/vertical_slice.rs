@@ -48,6 +48,70 @@ fn project_args(root: &std::path::Path, mut extra: serde_json::Value) -> serde_j
 }
 
 #[test]
+fn selecting_talking_take_reconciles_measured_audio_without_changing_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let _session = workbench_host::session::open(root.to_str().unwrap()).unwrap();
+    let _close = SessionGuard;
+    let cut_dir = root.join("Scenes/Scene2/Cut1");
+    fs::create_dir_all(&cut_dir).unwrap();
+    let clip = cut_dir.join("S02C01.mp4");
+    let video = Command::new("ffmpeg").args(["-y", "-f", "lavfi", "-i", "color=c=black:s=16x16:r=25", "-t", "10", clip.to_str().unwrap()]).output().unwrap();
+    assert!(video.status.success(), "{}", String::from_utf8_lossy(&video.stderr));
+    for (name, seconds) in [("S02C01.wav", "5.746"), ("S02C01_pad_h0.5_t0.5.wav", "6.896")] {
+        let output = Command::new("ffmpeg").args(["-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", seconds, cut_dir.join(name).to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let mut state = import_project(root, ImportOptions { persist: true }).unwrap().state;
+    let cut = state.scene_mut(2, "Scene 2").cut_mut(1);
+    cut.speech_mode = Some(workbench_host::scene_plan::handoff::SpeechMode::SourceVideoLipsync);
+    cut.sketch = Some(workbench_host::workflow::state::CutSketch { pace: Some(workbench_host::scene_plan::handoff::Pace::Held), ..Default::default() });
+    cut.dialogue.push(workbench_host::script::DialogueLine { speaker: "Kris".into(), text: "Nope. It followed the same life cycle as every other system before it.".into() });
+    state.scene_mut(2, "Scene 2").animatic = None; // Seed after the scripted dialogue exists.
+    workbench_host::workflow::animatic::sync(&mut state);
+    let seed = state.scene(2).unwrap().animatic.as_ref().unwrap().shots[0].duration_seconds;
+    assert_eq!(seed, 5.73);
+    let take_id = state.scene(2).unwrap().cuts[0].takes[0].id.clone();
+    workbench_host::workflow::import::persist_state(root, &state).unwrap();
+    cmd_set_take_status(&project_args(root, json!({ "sceneId": 2, "cut": 1, "takeId": take_id, "status": "selected" }))).unwrap();
+    let saved = load_state(root).unwrap();
+    let shot = &saved.scene(2).unwrap().animatic.as_ref().unwrap().shots[0];
+    assert!((shot.duration_seconds - 7.4).abs() < 0.03, "measured speech + lead + deliberate beat: {}", shot.duration_seconds);
+    assert!(clip.is_file(), "raw paid source must stay put");
+}
+
+#[test]
+fn measured_wav_does_not_override_deliberate_screen_duration() {
+    let dir = tempfile::tempdir().unwrap(); let root = dir.path();
+    let _session = workbench_host::session::open(root.to_str().unwrap()).unwrap(); let _close = SessionGuard;
+    let cut_dir = root.join("Scenes/Scene2/Cut1"); fs::create_dir_all(&cut_dir).unwrap();
+    for (file, input, seconds) in [("S02C01.mp4","color=c=black:s=16x16:r=25","10"),("S02C01.wav","anullsrc=r=44100:cl=mono","5.746"),("S02C01_pad_h0.5_t0.5.wav","anullsrc=r=44100:cl=mono","6.896")] {
+        let output=Command::new("ffmpeg").args(["-y","-v","error","-f","lavfi","-i",input,"-t",seconds,cut_dir.join(file).to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    }
+    let mut state=import_project(root,ImportOptions{persist:true}).unwrap().state;
+    let cut=state.scene_mut(2,"Scene 2").cut_mut(1);
+    cut.speech_mode=Some(workbench_host::scene_plan::handoff::SpeechMode::SourceVideoLipsync);
+    cut.sketch=Some(workbench_host::workflow::state::CutSketch{pace:Some(workbench_host::scene_plan::handoff::Pace::Held),..Default::default()});
+    cut.dialogue.push(workbench_host::script::DialogueLine{speaker:"Test".into(),text:"Nope. It followed the same life cycle as every other system before it.".into()});
+    state.scene_mut(2,"Scene 2").animatic=None;
+    workbench_host::workflow::animatic::sync(&mut state);
+    let shot=state.scene(2).unwrap().animatic.as_ref().unwrap().shots[0].clone();
+    assert_eq!(shot.duration_seconds,5.73);
+    assert_eq!(shot.auto_duration_seed_seconds,Some(5.73));
+    let take=state.scene(2).unwrap().cuts[0].takes[0].id.clone();
+    workbench_host::workflow::import::persist_state(root,&state).unwrap();
+    workbench_host::workflow::cmd_set_animatic_duration(&project_args(root,json!({"sceneId":2,"shotId":shot.id,"durationSeconds":8.25}))).unwrap();
+    let manual=load_state(root).unwrap();
+    assert_eq!(manual.scene(2).unwrap().animatic.as_ref().unwrap().shots[0].auto_duration_seed_seconds,None);
+    cmd_set_take_status(&project_args(root,json!({"sceneId":2,"cut":1,"takeId":take,"status":"selected"}))).unwrap();
+    let saved=load_state(root).unwrap();
+    assert_eq!(saved.scene(2).unwrap().animatic.as_ref().unwrap().shots[0].duration_seconds,8.25);
+    assert!(cut_dir.join("S02C01.wav").is_file());
+    println!("P2 synthetic decodable shot WAV measured, deliberate 8.25s manual screen duration retained; no transcript-completeness claim");
+}
+
+#[test]
 fn imported_takes_reach_finish_without_hand_edited_workflow_state() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

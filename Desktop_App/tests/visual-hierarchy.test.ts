@@ -30,6 +30,7 @@ function lookModel(partial: Partial<SceneLookModel> = {}): SceneLookModel {
   return {
     title: "Scene 1 — The Last Train",
     counts: "3 slots · 1 approved",
+    affectedCuts: [],
     warnings: ["Low light"],
     blockers: ["Guard", "Lantern"],
     narrativePurpose: "Leave the station.",

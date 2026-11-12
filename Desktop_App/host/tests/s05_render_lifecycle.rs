@@ -279,3 +279,104 @@ fn render_wrapper_lexical_alias_resolves() {
     assert_eq!(res.unwrap(), "alias-ok");
     close_session();
 }
+
+#[test]
+fn failed_pre_submit_retry_checks_child_and_audio_before_dispatch() {
+    let _session = SESSION.lock().unwrap_or_else(|error| error.into_inner());
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("p");
+    init_project(&root);
+    fs::write(root.join("Scenes/Scene1/Cut1/S01C01.wav"), b"protected wav bytes").unwrap();
+    open_session(&root);
+    let mut state = ProjectState::new();
+    let cut = state.scene_mut(1,"Scene").cut_mut(1);
+    cut.stable_id="shot_1".into();
+    let error="HOST PRE-SUBMIT VALIDATION: incompatible schema. No generation submitted.";
+    let scope=Some(workflow::state::JobScope{kind:"shot".into(),id:"shot_1".into()});
+    let mut prior=JobRecord::open("job_3","render");
+    prior.scope=scope.clone(); prior.output_path=Some("Scenes/Scene1/Cut1/S01C01.mp4".into());
+    prior.raw_provider_id=Some("S01C01".into()); prior.mark_running("fixture");prior.fail(None,error);
+    let mut child=JobRecord::open("spend_1","atlas_generate_video");
+    child.mark_running("fixture");child.fail(None,error);
+    for job in [&mut prior,&mut child] {
+        job.attempts[0].started_at=Some("2026-11-01T23:07:34Z".into());
+        job.attempts[0].completed_at=Some("2026-11-01T23:07:36Z".into());
+    }
+    let mut retry=JobRecord::open("job_4","render");
+    retry.scope=scope;retry.raw_provider_id=Some("S01C01".into());
+    retry.output_path=Some("Scenes/Scene1/Cut1/S01C01_v2.mp4".into());
+    retry.retry_of=Some("job_3".into());
+    state.jobs.extend([prior.clone(),child.clone(),retry]);
+    import::persist_state(&root,&state).unwrap();
+    let mut called=0;
+    let result=workflow::render_jobs::with_render_job(&root,"Scenes/Scene1/Cut1/S01C01_v2.mp4",||{
+        called+=1;Err("synthetic no-provider failure".into())
+    });
+    assert!(result.is_err());assert_eq!(called,1);
+    let after=ProjectState::from_json(&fs::read_to_string(root.join(STATE_REL)).unwrap()).unwrap();
+    assert_eq!(after.jobs[0],prior);assert_eq!(after.jobs[1],child);
+    assert_eq!(after.jobs[2].status,JobStatus::Failed);
+    assert_eq!(fs::read(root.join("Scenes/Scene1/Cut1/S01C01.wav")).unwrap(),b"protected wav bytes");
+    // An occupied retry WAV must fail before the dispatch closure executes.
+    state.jobs[2].status=JobStatus::Pending;
+    state.state_revision=after.state_revision;
+    import::persist_state(&root,&state).unwrap();
+    fs::write(root.join("Scenes/Scene1/Cut1/S01C01_v2.wav"),b"newer bytes").unwrap();
+    let result=workflow::render_jobs::with_render_job(&root,"Scenes/Scene1/Cut1/S01C01_v2.mp4",||panic!("must not dispatch"));
+    assert!(result.is_err());
+    close_session();
+}
+
+#[test]
+fn saved_audio_retry_ignores_only_its_own_reserved_spend_child() {
+    let _session = SESSION.lock().unwrap_or_else(|error| error.into_inner());
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("p");
+    init_project(&root);
+    fs::write(root.join("Scenes/Scene1/Cut1/S01C01.wav"), b"protected wav bytes").unwrap();
+    open_session(&root);
+    let mut state = ProjectState::new();
+    state.scene_mut(1, "Scene").cut_mut(1).stable_id = "shot_1".into();
+    let error = "HOST PRE-SUBMIT VALIDATION: incompatible schema. No generation submitted.";
+    let scope = Some(workflow::state::JobScope { kind: "shot".into(), id: "shot_1".into() });
+    let mut prior = JobRecord::open("job_3", "render");
+    prior.scope = scope.clone(); prior.output_path = Some("Scenes/Scene1/Cut1/S01C01.mp4".into());
+    prior.raw_provider_id = Some("S01C01".into()); prior.mark_running("fixture"); prior.fail(None, error);
+    let mut failed_child = JobRecord::open("spend_old", "atlas_generate_video");
+    failed_child.mark_running("fixture"); failed_child.fail(None, error);
+    for job in [&mut prior, &mut failed_child] {
+        job.attempts[0].started_at = Some("2026-11-01T23:07:34Z".into());
+        job.attempts[0].completed_at = Some("2026-11-01T23:07:36Z".into());
+    }
+    let mut retry = JobRecord::open("job_4", "render");
+    retry.scope = scope; retry.raw_provider_id = Some("S01C01".into());
+    retry.output_path = Some("Scenes/Scene1/Cut1/S01C01_v2.mp4".into());
+    retry.retry_of = Some("job_3".into());
+    let mut current = JobRecord::open("spend_current", "atlas_generate_video");
+    current.mark_running("reserved by ledger");
+    current.request_metadata = Some(workflow::state::SpendRequestMetadata {
+        request_hash: "a".repeat(64), disclosure: None, duration_seconds: Some(5),
+        width: None, height: None, prediction_id: None,
+    });
+    state.jobs.extend([prior, failed_child, retry, current]);
+    import::persist_state(&root, &state).unwrap();
+    let mut called = 0;
+    let result = workflow::render_jobs::with_render_job_outcome_for_spend(
+        &root, "Scenes/Scene1/Cut1/S01C01_v2.mp4", Some("spend_current"), || {
+            called += 1; Err::<(), String>("synthetic no-provider failure".into())
+        });
+    assert_eq!(result.unwrap_err(), "synthetic no-provider failure");
+    assert_eq!(called, 1);
+    let mut state = ProjectState::from_json(&fs::read_to_string(root.join(STATE_REL)).unwrap()).unwrap();
+    assert_eq!(state.jobs[2].status, JobStatus::Failed);
+    state.jobs[2].status = JobStatus::Pending;
+    let mut other = JobRecord::open("spend_other", "atlas_generate_video");
+    other.mark_running("unrelated in-flight request");
+    state.jobs.push(other);
+    import::persist_state(&root, &state).unwrap();
+    let result: Result<(), String> = workflow::render_jobs::with_render_job_outcome_for_spend(
+        &root, "Scenes/Scene1/Cut1/S01C01_v2.mp4", Some("spend_current"),
+        || panic!("unrelated running child must block dispatch"));
+    assert!(result.unwrap_err().contains("no longer proven pre-submit"));
+    close_session();
+}

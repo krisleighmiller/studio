@@ -277,7 +277,7 @@ fn parse_silence(output: &str, duration: f64) -> Result<Vec<(f64, f64)>, String>
     Ok(intervals)
 }
 
-fn run_bounded(
+pub(crate) fn run_bounded(
     command: &mut Command,
     deadline: Instant,
     limit: usize,

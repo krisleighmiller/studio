@@ -292,6 +292,15 @@ export function renderVoicePanel(): void {
       ${statusMessage ? `<div class="voice-notice">${escapeHtml(statusMessage)}</div>` : ""}
     </div>
   `;
+  const errorNotice = root.querySelector<HTMLElement>(".voice-notice.error");
+  errorNotice?.addEventListener("contextmenu", () => {
+    const selection = window.getSelection();
+    if (!selection || !errorNotice.textContent) return;
+    const range = document.createRange();
+    range.selectNodeContents(errorNotice);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
   wireVoiceDom(root);
   // Autoplay is one-shot: survive this render only, never later refreshes/mode switches.
   libraryAutoplay = false;

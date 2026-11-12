@@ -2,8 +2,18 @@
 //!
 //! The chat model never constructs provider requests. These functions do.
 
+#[cfg(test)]
+#[path = "specialists_look_route_tests.rs"]
+mod look_route_tests;
+
+#[cfg(test)]
+#[path = "specialists_lp01_tests.rs"]
+mod lp01_tests;
+
+#[path = "specialists_audio.rs"]
+mod dialogue_audio;
+
 use crate::atlas;
-use crate::chat;
 use crate::ctx::HostCtx;
 use crate::director::{DirectorContext, ModelRef};
 use crate::director_actions::{
@@ -11,13 +21,9 @@ use crate::director_actions::{
     ValidatedAction, PENDING_ACTION_START,
 };
 use crate::media;
-use crate::prompts;
 use crate::scene_plan::{RenderLane, RenderRequest};
 use crate::settings::{self, ApiEntry};
-use crate::text_writes::{
-    approval_required, approval_summary, authorize_text_write, commit_staged_text_write,
-    commit_text_write, prepare_text_write_approval_card, stage_authorized_text_writes,
-};
+use crate::text_writes::commit_staged_text_write;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -375,6 +381,16 @@ fn upload_local(
     Ok(resolved.to_string_lossy().to_string())
 }
 
+fn upload_image_for_api(api: &ApiEntry, project_root: Option<&str>, path: &str) -> Result<String, String> {
+    if api.kind == "atlas-cloud" {
+        let result = atlas::upload_media(api.api_key.trim(), path, project_root, crate::media_util::MediaRole::Image)?;
+        return extract_upload_url(&result).ok_or_else(|| format!("Atlas upload did not return a URL for `{path}`"));
+    }
+    let resolved = crate::media_util::peek_path(path, project_root)?;
+    crate::media_util::ensure_media_file_as(&resolved, crate::media_util::MediaRole::Image)?;
+    Ok(resolved.to_string_lossy().to_string())
+}
+
 fn parse_handoff_headers_and_yaml(text: &str) -> (HashMap<String, String>, Option<Value>) {
     let mut headers = HashMap::new();
     for line in text.lines().take(40) {
@@ -604,6 +620,7 @@ pub fn run_specialist(
     match specialist {
         "scene_generation" => run_scene_generation(app, context, validated, project_root),
         "still_image" => run_still_image(app, context, validated, project_root),
+        "dialogue_audio" => dialogue_audio::run(app, context, validated, project_root),
         "text_sync" => run_text_sync(app, context, validated, project_root),
         "lip_sync" => run_lip_sync(app, context, validated, project_root),
         "assemble" => {
@@ -622,12 +639,32 @@ pub fn run_specialist(
             }
         }
         "model_sheet" => run_model_sheet(app, context, validated, project_root),
-        "production_helper" => {
-            let llm = llm.ok_or_else(|| {
-                "production_helper needs the Director chat model (pick one in the chat dropdown)."
-                    .to_string()
-            })?;
-            run_production_helper(app, context, validated, project_root, llm)
+        "script" | "character_creation" | "production_helper" => {
+            // Retired prompt-only actions terminate here. Do not consult inputs,
+            // project files, bundled contracts or a model to produce recovery.
+            let (surface, guidance) = match specialist {
+                "script" => (
+                    "Script",
+                    "Open Script to edit a local Draft, keep Notes separately, and Save explicitly. Local authoring is not automatic AI rewriting; the prompt-only script specialist is retired.",
+                ),
+                "character_creation" => (
+                    "Characters",
+                    "Open Characters to create or edit a character profile and Save it, then add reference images or use Create/Update model sheet with the existing approvals. The prompt-only character specialist is retired.",
+                ),
+                _ => (
+                    "Files / Assets",
+                    "Open Files / Assets to read project documents, or the relevant scene surface to edit saved planning/production notes. Automatic production digests are unavailable; the prompt-only production helper is retired.",
+                ),
+            };
+            Ok(SpecialistResult::done(
+                json!({
+                    "status": "unsupported",
+                    "reason": "retired_action",
+                    "specialist": specialist,
+                    "recovery": { "surface": surface, "guidance": guidance },
+                })
+                .to_string(),
+            ))
         }
         "scene_plan" | "scene_intent" | "cut_sketches" | "scene_look" => {
             let llm = llm.ok_or_else(|| {
@@ -638,67 +675,14 @@ pub fn run_specialist(
             run_scene_planning(app, context, validated, project_root, llm, specialist)
         }
         "text_write" => run_text_write(validated, project_root),
-        "script" | "character_creation" => {
-            let llm = llm.ok_or_else(|| {
-                format!(
-                    "`{specialist}` needs the Director chat model (pick one in the chat dropdown)."
-                )
-            })?;
-            run_text_specialist(app, context, validated, project_root, llm, specialist)
-        }
+
         other => Err(format!("Specialist `{other}` has no host runner")),
     }
 }
 
-const HELPER_MAX_FILES: usize = 10;
-const HELPER_MAX_CHARS_PER_FILE: usize = 48_000;
-const HELPER_MAX_TOTAL_CHARS: usize = 120_000;
-
 const TEXT_SPECIALIST_MAX_FILES: usize = 14;
 const TEXT_SPECIALIST_MAX_CHARS_PER_FILE: usize = 60_000;
 const TEXT_SPECIALIST_MAX_TOTAL_CHARS: usize = 160_000;
-
-/// Host wrapper so text specialists write via tagged blocks (no tool_call loop).
-pub(crate) const TEXT_RUNNER_HOST_PREAMBLE: &str = r#"## Workbench host text runner
-
-You are running inside the Video Production Workbench desktop host under the Director.
-You do **not** have MCP, shell, or `<tool_call>` tools. The host reads sources for you and writes files you emit.
-
-### Output protocol (required)
-
-**Blocker question only** (missing brief item the contract says you must ask — nothing else):
-<workbench_ask>
-Your one concise question (or short consolidated brief questions).
-</workbench_ask>
-
-**Ready to save files** — emit one or more file blocks, then a short summary:
-<workbench_file path="project-relative-or-absolute-path">
-full file body exactly as it should be saved
-</workbench_file>
-
-<workbench_summary>
-Short chat summary: paths written, scene/sidecar counts, open blockers. Do not paste full YAML/scripts unless asked.
-</workbench_summary>
-
-Rules:
-- Obey the specialist contract below for content, modes, phases, and formats.
-- Do not ask the user to approve ordinary local file writes — emit the files when ready.
-- Prefer project-relative paths. The host rejects anything outside these locations:
-  - Script: `Scripts/**/*.md` or `Scripts/**/*.txt`
-  - Character sheet: `Characters/**/*.md` (contract filename shape `Characters/<Name>_ref.md`)
-  - Scene plan is not written here. The host derives `prod.md` and `Scene_Prompts/SceneN.txt`.
-- If references/voices are not ready, still write the plan; leave `Character_Reference: none`, `Voice: none`, empty `reference_assets` as the contract allows.
-- Human-in-the-loop desk: stop after writing (or after one ask). Do not claim to generate media.
-"#;
-
-fn text_specialist_prompt(specialist: &str) -> Result<&'static str, String> {
-    match specialist {
-        "script" => Ok(prompts::SCRIPT_ASSISTANT_PROMPT),
-        "character_creation" => Ok(prompts::CHARACTER_CREATION_PROMPT),
-        "scene_plan" => Ok(prompts::SCENE_PLAN_PROMPT),
-        other => Err(format!("No text prompt bundled for `{other}`")),
-    }
-}
 
 fn run_scene_planning(
     app: &HostCtx,
@@ -752,112 +736,6 @@ fn run_scene_planning(
     Ok(SpecialistResult::done(message))
 }
 
-fn text_specialist_label(specialist: &str) -> &'static str {
-    match specialist {
-        "script" => "Script Assistant",
-        "character_creation" => "Character Creation",
-        "scene_plan" => "Scene Plan",
-        _ => "Text specialist",
-    }
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct TextSpecialistEmit {
-    pub(crate) ask: Option<String>,
-    pub(crate) files: Vec<(String, String)>,
-    pub(crate) summary: Option<String>,
-}
-
-pub(crate) fn parse_text_specialist_emit(reply: &str) -> TextSpecialistEmit {
-    let mut out = TextSpecialistEmit::default();
-    if let Some(ask) = extract_tagged_block(reply, "workbench_ask") {
-        let t = ask.trim().to_string();
-        if !t.is_empty() {
-            out.ask = Some(t);
-        }
-    }
-    if let Some(summary) = extract_tagged_block(reply, "workbench_summary") {
-        let t = summary.trim().to_string();
-        if !t.is_empty() {
-            out.summary = Some(t);
-        }
-    }
-    out.files = extract_workbench_files(reply);
-    out
-}
-
-fn extract_tagged_block(text: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = text.find(&open)? + open.len();
-    let rest = &text[start..];
-    let end = rest.find(&close)?;
-    Some(rest[..end].to_string())
-}
-
-fn extract_workbench_files(text: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let mut search = text;
-    let open = "<workbench_file";
-    let close = "</workbench_file>";
-    while let Some(start) = search.find(open) {
-        let after_open = &search[start + open.len()..];
-        let Some(gt) = after_open.find('>') else {
-            break;
-        };
-        let header = &after_open[..gt];
-        let body_start = &after_open[gt + 1..];
-        let Some(end) = body_start.find(close) else {
-            break;
-        };
-        let body = body_start[..end].to_string();
-        let path = parse_workbench_file_path(header);
-        if let Some(path) = path {
-            // Trim a single leading newline commonly left after the tag.
-            let contents = if let Some(stripped) = body.strip_prefix('\n') {
-                stripped.to_string()
-            } else {
-                body
-            };
-            let contents = contents.strip_suffix('\n').unwrap_or(&contents).to_string();
-            if !path.is_empty() {
-                out.push((path, contents));
-            }
-        }
-        search = &body_start[end + close.len()..];
-    }
-    out
-}
-
-fn parse_workbench_file_path(header: &str) -> Option<String> {
-    // path="..." or path='...'
-    for quote in ['"', '\''] {
-        let key = format!("path={quote}");
-        if let Some(i) = header.find(&key) {
-            let rest = &header[i + key.len()..];
-            if let Some(end) = rest.find(quote) {
-                let path = rest[..end].trim();
-                if !path.is_empty() {
-                    return Some(path.to_string());
-                }
-            }
-        }
-    }
-    // path=unquoted
-    if let Some(i) = header.find("path=") {
-        let rest = header[i + "path=".len()..].trim();
-        let path = rest
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c| c == '"' || c == '\'');
-        if !path.is_empty() {
-            return Some(path.to_string());
-        }
-    }
-    None
-}
-
 pub(crate) fn collect_text_specialist_paths(
     context: &DirectorContext,
     inputs: &Map<String, Value>,
@@ -905,6 +783,8 @@ pub(crate) fn build_text_specialist_dossier(
     project_root: Option<&str>,
     context: &DirectorContext,
 ) -> (String, Vec<String>, Vec<String>) {
+    #[cfg(test)]
+    lp01_tests::dependency("file loader");
     let mut dossier = String::new();
     let mut total_chars = 0usize;
     let mut read_labels = Vec::new();
@@ -931,6 +811,8 @@ pub(crate) fn build_text_specialist_dossier(
             ));
             continue;
         }
+        #[cfg(test)]
+        lp01_tests::dependency("file loader");
         let text = match fs::read_to_string(&resolved) {
             Ok(t) => t,
             Err(e) => {
@@ -983,251 +865,6 @@ pub(crate) fn build_text_specialist_dossier(
     (dossier, read_labels, missing)
 }
 
-fn run_text_specialist(
-    app: &HostCtx,
-    context: &DirectorContext,
-    validated: &ValidatedAction,
-    project_root: Option<&str>,
-    llm: &SpecialistLlm<'_>,
-    specialist: &str,
-) -> Result<SpecialistResult, String> {
-    let contract = text_specialist_prompt(specialist)?;
-    let label = text_specialist_label(specialist);
-    let inputs = &validated.action.inputs;
-    let brief = input_str(inputs, &["brief", "prompt", "question", "message"])
-        .unwrap_or(llm.user_question)
-        .trim();
-    if brief.is_empty() {
-        return Err(format!(
-            "`{specialist}` needs a brief/prompt (or a non-empty user message)."
-        ));
-    }
-
-    let paths = collect_text_specialist_paths(context, inputs);
-    app.emit(
-        "director-progress",
-        format!("{label} reading {} file(s)…", paths.len()),
-    );
-    let (dossier, read_labels, missing) =
-        build_text_specialist_dossier(&paths, project_root, context);
-
-    let output_path = input_str(
-        inputs,
-        &["output_path", "save_path", "production_path", "production"],
-    );
-    let sidecar_dir = input_str(
-        inputs,
-        &[
-            "sidecar_dir",
-            "sidecar_folder",
-            "scene_prompts_dir",
-            "prompts_dir",
-        ],
-    );
-    let aspect = input_str(inputs, &["aspect_ratio", "format"]);
-
-    let mut user_block = String::new();
-    user_block.push_str(&format!("## Specialist\n{label} (`{specialist}`)\n\n"));
-    user_block.push_str(&format!("## User request\n{brief}\n\n"));
-    if let Some(root) = project_root {
-        user_block.push_str(&format!("## Project root\n`{root}`\n\n"));
-    }
-    if let Some(out) = output_path {
-        user_block.push_str(&format!("## Requested output path\n`{out}`\n\n"));
-    }
-    if let Some(dir) = sidecar_dir {
-        user_block.push_str(&format!("## Requested sidecar directory\n`{dir}`\n\n"));
-    }
-    if let Some(ar) = aspect {
-        user_block.push_str(&format!("## Format / aspect\n{ar}\n\n"));
-    }
-    if specialist == "scene_plan" {
-        user_block.push_str(
-            "## Scene Plan defaults (use unless user named other paths)\n\
-- Master production file: `prod.md`\n\
-- Sidecars: `Scene_Prompts/SceneN.txt`\n\
-- Leave Character_Reference / Voice empty/`none` when the user said they will add refs/voices later.\n\n",
-        );
-    }
-    if !read_labels.is_empty() {
-        user_block.push_str("## Files provided by host\n");
-        for item in &read_labels {
-            user_block.push_str(&format!("- `{item}`\n"));
-        }
-        user_block.push('\n');
-    }
-    if !missing.is_empty() {
-        user_block.push_str("## Paths that could not be loaded\n");
-        for m in &missing {
-            user_block.push_str(&format!("- {m}\n"));
-        }
-        user_block.push('\n');
-    }
-    user_block.push_str("## Document dossier\n\n");
-    user_block.push_str(&dossier);
-    user_block.push_str(
-        "\n## Reminder\nEmit `<workbench_ask>` **or** `<workbench_file>` block(s) + `<workbench_summary>`. No `<tool_call>`.\n",
-    );
-
-    let system = format!("{TEXT_RUNNER_HOST_PREAMBLE}\n\n---\n\n{contract}");
-    let mut messages = vec![
-        json!({ "role": "system", "content": system }),
-        json!({ "role": "user", "content": user_block }),
-    ];
-
-    app.emit("director-progress", format!("{label} thinking…"));
-    let reply = chat::chat_completion(llm.api, llm.api_key, llm.model, &messages);
-    if app.director_cancelled() {
-        return Ok(SpecialistResult::done(
-            "Stopped before preparing file writes.",
-        ));
-    }
-    let mut reply = reply?;
-    let mut emit = parse_text_specialist_emit(&reply);
-
-    // One format nudge for models that answer in prose (common on smaller local LLMs).
-    if emit.ask.is_none() && emit.files.is_empty() {
-        app.emit(
-            "director-progress",
-            format!("{label} nudging for file tags…"),
-        );
-        messages.push(json!({ "role": "assistant", "content": reply }));
-        messages.push(json!({
-            "role": "user",
-            "content": "Workbench host: your reply had no <workbench_ask> or <workbench_file> tags. \
-Emit the required tags now. If you only need a blocker question, use <workbench_ask>. \
-Otherwise emit every file to write with <workbench_file path=\"…\"> and a <workbench_summary>."
-        }));
-        if app.director_cancelled() {
-            return Ok(SpecialistResult::done(
-                "Stopped before preparing file writes.",
-            ));
-        }
-        let next = chat::chat_completion(llm.api, llm.api_key, llm.model, &messages);
-        if app.director_cancelled() {
-            return Ok(SpecialistResult::done(
-                "Stopped before preparing file writes.",
-            ));
-        }
-        reply = next?;
-        emit = parse_text_specialist_emit(&reply);
-    }
-
-    if emit.files.is_empty() {
-        if let Some(ask) = emit.ask {
-            return Ok(SpecialistResult::done(ask));
-        }
-        let trimmed = reply.trim();
-        if trimmed.is_empty() {
-            return Err(format!("{label} returned an empty reply."));
-        }
-        return Ok(SpecialistResult::done(format!(
-            "{label} did not emit `<workbench_file>` or `<workbench_ask>` tags, so nothing was written.\n\n{trimmed}"
-        )));
-    }
-
-    let mut planned = Vec::new();
-    let mut total_bytes = 0usize;
-    for (index, (raw_path, contents)) in emit.files.iter().enumerate() {
-        let body = if contents.ends_with('\n') {
-            contents.clone()
-        } else {
-            format!("{contents}\n")
-        };
-        let authorized = authorize_text_write(
-            specialist,
-            raw_path,
-            project_root,
-            body.len(),
-            index,
-            total_bytes,
-        )?;
-        total_bytes += body.len();
-        planned.push((authorized, body));
-    }
-
-    let mut written = Vec::new();
-    let mut staged = Vec::new();
-    for (authorized, body) in planned {
-        if app.director_cancelled() {
-            return Ok(SpecialistResult::done(format!(
-                "Stopped before the next file write. Saved new files: {written:?}"
-            )));
-        }
-        let previous = if authorized.replacing {
-            fs::read_to_string(&authorized.path).ok()
-        } else {
-            None
-        };
-        if approval_required(&authorized) {
-            let summary = approval_summary(&authorized, previous.as_deref(), &body);
-            staged.push((authorized, body, summary));
-            continue;
-        }
-        app.emit(
-            "director-progress",
-            format!("{label} writing {}…", authorized.path.display()),
-        );
-        commit_text_write(&authorized, &body, false)
-            .map_err(|error| format!("Could not write {}: {error}", authorized.path.display()))?;
-        written.push(authorized.path.display().to_string());
-    }
-    if !staged.is_empty() {
-        if app.director_cancelled() {
-            return Ok(SpecialistResult::done(format!(
-                "Stopped before publishing file approval. Saved new files: {written:?}"
-            )));
-        }
-        let summaries: Vec<String> = staged
-            .iter()
-            .map(|(_, _, summary)| summary.clone())
-            .collect();
-        let id = stage_authorized_text_writes(
-            specialist,
-            staged
-                .into_iter()
-                .map(|(write, body, _)| (write, body))
-                .collect(),
-        );
-        let card = prepare_text_write_approval_card(&id, &summaries, project_root)?;
-        if app.director_cancelled() {
-            return Ok(SpecialistResult::done(format!(
-                "Stopped before publishing file approval. Saved new files: {written:?}"
-            )));
-        }
-        let card = crate::pending::publish_user_text(&card);
-        let mut message = format!(
-            "{label} prepared {} file change(s) for approval.",
-            summaries.len()
-        );
-        if !written.is_empty() {
-            message.push_str("\n\nSaved new files:\n");
-            for path in &written {
-                message.push_str(&format!("- `{path}`\n"));
-            }
-        }
-        message.push_str("\n\n");
-        message.push_str(&card);
-        return Ok(SpecialistResult::done(message));
-    }
-
-    let mut message = emit
-        .summary
-        .unwrap_or_else(|| format!("{label} wrote {} file(s).", written.len()));
-    if !written.is_empty() {
-        message.push_str("\n\n---\nSaved:\n");
-        for path in &written {
-            message.push_str(&format!("- `{path}`\n"));
-        }
-    }
-    if let Some(ask) = emit.ask {
-        message.push_str("\n");
-        message.push_str(&ask);
-    }
-
-    Ok(SpecialistResult::done(message))
-}
-
 fn run_text_write(
     validated: &ValidatedAction,
     project_root: Option<&str>,
@@ -1242,297 +879,6 @@ fn run_text_write(
             message.push_str(&format!("- `{path}`\n"));
         }
     }
-    Ok(SpecialistResult::done(message))
-}
-
-fn run_production_helper(
-    app: &HostCtx,
-    context: &DirectorContext,
-    validated: &ValidatedAction,
-    project_root: Option<&str>,
-    llm: &SpecialistLlm<'_>,
-) -> Result<SpecialistResult, String> {
-    let inputs = &validated.action.inputs;
-    let question = input_str(inputs, &["question", "brief", "prompt", "message"])
-        .unwrap_or(llm.user_question)
-        .trim();
-    if question.is_empty() {
-        return Err(
-            "production_helper needs a question/brief (or a non-empty user message).".into(),
-        );
-    }
-
-    let mut paths = input_path_list(
-        inputs,
-        &[
-            "paths",
-            "source_paths",
-            "documents",
-            "files",
-            "path",
-            "source_path",
-            "handoff_path",
-            "character_files",
-        ],
-    );
-    let explicit_sources = !paths.is_empty();
-    let output_path = input_str(inputs, &["output_path", "save_path"]);
-    // Compare resolved locations, not spellings (relative, absolute, and aliases).
-    // Peeking does not consume a one-time file grant.
-    let output_location =
-        output_path.and_then(|out| crate::media_util::peek_path(out, project_root).ok());
-    let is_output = |raw: &str| {
-        output_path == Some(raw)
-            || output_location.as_ref().is_some_and(|out| {
-                crate::media_util::peek_path(raw, project_root).is_ok_and(|path| &path == out)
-            })
-    };
-    if !explicit_sources {
-        for path in context
-            .attached_paths
-            .iter()
-            .map(String::as_str)
-            .chain(context.selected_path.as_deref())
-            .chain(context.focused_editor_path.as_deref())
-        {
-            let path = path.trim();
-            if !path.is_empty() && !paths.iter().any(|p| p == path) {
-                paths.push(path.to_string());
-            }
-        }
-    }
-    // A destination is never implicit input, even if the planner repeats it in
-    // a source alias. To review the previous digest, use a distinct output path.
-    paths.retain(|path| !is_output(path));
-
-    if paths.len() > HELPER_MAX_FILES {
-        return Err(format!(
-            "Production Helper received {} source documents; the limit is {HELPER_MAX_FILES}. Select fewer sources; no digest was generated or saved.",
-            paths.len()
-        ));
-    }
-
-    app.emit(
-        "director-progress",
-        format!("Production Helper reading {} file(s)…", paths.len()),
-    );
-
-    let mut dossier = String::new();
-    let mut total_chars = 0usize;
-    let mut read_labels: Vec<String> = Vec::new();
-    let mut missing: Vec<String> = Vec::new();
-
-    for raw in &paths {
-        let resolved = match crate::media_util::resolve_path(raw, project_root) {
-            Ok(p) => p,
-            Err(e) => {
-                missing.push(format!("{raw} ({e})"));
-                continue;
-            }
-        };
-        if !resolved.is_file() {
-            missing.push(format!("{} (not a file)", resolved.display()));
-            continue;
-        }
-        let bytes = fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0);
-        // Skip obvious binaries / huge media.
-        if bytes > 2_000_000 {
-            missing.push(format!(
-                "{} ({} bytes — too large for helper; attach a text doc or excerpt)",
-                resolved.display(),
-                bytes
-            ));
-            continue;
-        }
-        let text = match fs::read_to_string(&resolved) {
-            Ok(t) => t,
-            Err(e) => {
-                missing.push(format!("{} ({e})", resolved.display()));
-                continue;
-            }
-        };
-        let mut body = text;
-        if body.len() > HELPER_MAX_CHARS_PER_FILE {
-            let mut end = HELPER_MAX_CHARS_PER_FILE;
-            while !body.is_char_boundary(end) {
-                end -= 1;
-            }
-            body.truncate(end);
-            body.push_str("\n\n…[truncated for helper context]…\n");
-        }
-        if total_chars + body.len() > HELPER_MAX_TOTAL_CHARS {
-            missing.push(format!(
-                "{} (skipped — helper context budget full)",
-                resolved.display()
-            ));
-            break;
-        }
-        total_chars += body.len();
-        let label = resolved.display().to_string();
-        read_labels.push(label.clone());
-        dossier.push_str(&format!("### File: `{label}`\n\n```\n{body}\n```\n\n"));
-    }
-
-    if let Some(excerpt) = context
-        .focused_editor_excerpt
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .filter(|_| !explicit_sources)
-        .filter(|_| {
-            !context
-                .focused_editor_path
-                .as_deref()
-                .is_some_and(is_output)
-        })
-    {
-        if !dossier.contains(excerpt) {
-            let mut clip = excerpt.to_string();
-            if clip.len() > 8_000 {
-                let mut end = 8_000;
-                while !clip.is_char_boundary(end) {
-                    end -= 1;
-                }
-                clip.truncate(end);
-                clip.push_str("\n…[excerpt truncated]…");
-            }
-            dossier.push_str(&format!(
-                "### Focused editor excerpt\n\n```\n{clip}\n```\n\n"
-            ));
-        }
-    }
-
-    if dossier.trim().is_empty() && missing.is_empty() {
-        dossier.push_str(
-            "(No project files were attached. Answer from the question alone, and ask which paths to open if you need them.)\n",
-        );
-    }
-
-    let mode = input_str(inputs, &["mode"]).unwrap_or("review");
-    // Do not turn a failed or partial read into model prose that can be saved
-    // (or staged for approval) as if it were a grounded document digest.
-    if !missing.is_empty() {
-        return Err(format!(
-            "Production Helper could not load all source documents; no digest was generated or saved:\n- {}",
-            missing.join("\n- ")
-        ));
-    }
-    if read_labels.is_empty()
-        && (explicit_sources || !paths.is_empty() || mode == "digest" || output_path.is_some())
-    {
-        return Err(
-            "Production Helper needs readable source documents distinct from the output destination; no digest was generated or saved."
-                .into(),
-        );
-    }
-
-    let mut user_block = String::new();
-    user_block.push_str(&format!("## Mode hint\n{mode}\n\n"));
-    user_block.push_str(&format!("## User question\n{question}\n\n"));
-    if let Some(root) = project_root {
-        user_block.push_str(&format!("## Project root\n`{root}`\n\n"));
-    }
-    if !read_labels.is_empty() {
-        user_block.push_str("## Files provided by host\n");
-        for label in &read_labels {
-            user_block.push_str(&format!("- `{label}`\n"));
-        }
-        user_block.push('\n');
-    }
-    if let Some(out) = output_path {
-        user_block.push_str(&format!(
-            "## Optional digest output path\nThe host saves a digest only when `{out}` is under `Research/**/*.md`. Structure the reply as digest markdown when mode is digest or the user asked for a digest file.\n\n"
-        ));
-    }
-    user_block.push_str("## Document dossier\n\n");
-    user_block.push_str(&dossier);
-
-    app.emit(
-        "director-progress",
-        "Production Helper thinking…".to_string(),
-    );
-
-    let messages = vec![
-        json!({
-            "role": "system",
-            "content": prompts::PRODUCTION_HELPER_PROMPT,
-        }),
-        json!({
-            "role": "user",
-            "content": user_block,
-        }),
-    ];
-
-    let reply = chat::chat_completion(llm.api, llm.api_key, llm.model, &messages);
-    if app.director_cancelled() {
-        return Ok(SpecialistResult::done(
-            "Stopped before saving or staging the digest.",
-        ));
-    }
-    let reply = reply?.trim().to_string();
-    if reply.is_empty() {
-        return Err("Production Helper returned an empty reply.".into());
-    }
-
-    let mut message = reply.clone();
-    if let Some(out) = output_path {
-        if app.director_cancelled() {
-            return Ok(SpecialistResult::done(
-                "Stopped before saving or staging the digest.",
-            ));
-        }
-        let body = format!("{reply}\n");
-        match authorize_text_write("production_helper", out, project_root, body.len(), 0, 0) {
-            Ok(authorized) => {
-                let previous = if authorized.replacing {
-                    fs::read_to_string(&authorized.path).ok()
-                } else {
-                    None
-                };
-                if approval_required(&authorized) {
-                    let summary = approval_summary(&authorized, previous.as_deref(), &body);
-                    let approval_message = if authorized.replacing {
-                        "\n\nDigest overwrite is waiting for approval.\n\n"
-                    } else {
-                        "\n\nNew digest file is waiting for approval.\n\n"
-                    };
-                    let id =
-                        stage_authorized_text_writes("production_helper", vec![(authorized, body)]);
-                    let card = prepare_text_write_approval_card(&id, &[summary], project_root)?;
-                    if app.director_cancelled() {
-                        return Ok(SpecialistResult::done(
-                            "Stopped before publishing the digest approval.",
-                        ));
-                    }
-                    let card = crate::pending::publish_user_text(&card);
-                    message.push_str(approval_message);
-                    message.push_str(&card);
-                } else {
-                    commit_text_write(&authorized, &body, false).map_err(|error| {
-                        format!(
-                            "Could not write digest to {}: {error}",
-                            authorized.path.display()
-                        )
-                    })?;
-                    message.push_str(&format!(
-                        "\n\n---\nSaved digest to `{}`.",
-                        authorized.path.display()
-                    ));
-                    app.emit(
-                        "director-progress",
-                        format!(
-                            "Production Helper saved digest → {}",
-                            authorized.path.display()
-                        ),
-                    );
-                }
-            }
-            Err(error) => {
-                message.push_str(&format!("\n\nDigest was not saved: {error}"));
-            }
-        }
-    }
-
     Ok(SpecialistResult::done(message))
 }
 
@@ -1691,14 +1037,14 @@ pub(crate) fn approval_model_routes(
         )
         .map(|(model, slot)| vec![(slot.to_string(), model)])
         .unwrap_or_default(),
-        "text_sync" => {
+        "text_sync" | "dialogue_audio" => {
             let mut routes = Vec::new();
             let reuses_audio = input_str(inputs, &["performance_wav", "reuse_audio"]).is_some();
             let clone_audio =
                 input_str(inputs, &["voice_clone", "voice_clone_path", "clone_wav"]).is_some();
             let profile_audio =
                 input_str(inputs, &["voice_profile", "voice_profile_path"]).is_some();
-            if !reuses_audio {
+            if !reuses_audio && specialist == "dialogue_audio" {
                 let audio_slot = if clone_audio {
                     "audio.tts_clone"
                 } else if profile_audio {
@@ -1710,12 +1056,12 @@ pub(crate) fn approval_model_routes(
                     routes.push((slot.to_string(), model));
                 }
             }
-            if let Some((model, slot)) = select_capability(
+            if specialist != "dialogue_audio" { if let Some((model, slot)) = select_capability(
                 context,
                 &["video.lip_sync_text_narration", "video.start_frame"],
             ) {
                 routes.push((slot.to_string(), model));
-            }
+            }}
             routes
         }
         "model_sheet" => {
@@ -2239,6 +1585,18 @@ pub(crate) fn resolve_still_image_model(
     inputs: &Map<String, Value>,
 ) -> Result<(ModelRef, &'static str, &'static str), String> {
     let (source, refs) = still_image_sources(inputs);
+    if let Some(value) = inputs.get("image_capability") {
+        let slot = value.as_str().ok_or("Image capability must be a Settings image route.")?;
+        let slot = match slot {
+            "image.text_to_image" => "image.text_to_image",
+            "image.character_reference" => "image.character_reference",
+            "image.image_to_image" => "image.image_to_image",
+            "image.edit" => "image.edit",
+            _ => return Err(format!("Unknown image capability `{slot}`.")),
+        };
+        let model = capability_model(context, slot).ok_or_else(|| format!("Configure `{slot}` in Settings → Image before generating."))?;
+        return Ok((model, "selected image capability", slot));
+    }
     if source.is_some() {
         let (model, slot) = select_capability(context, &["image.edit", "image.image_to_image"])
             .ok_or_else(|| {
@@ -2295,6 +1653,7 @@ pub fn still_image_approval_notes(
 - output: `{out}`\n",
         model_id = model.model_id
     );
+    let reference_offset = if source.is_some() { 2 } else { 1 };
     if let Some(src) = source {
         let resolved = resolve_under_project(&src, project_root)
             .map(|p| p.display().to_string())
@@ -2305,7 +1664,7 @@ pub fn still_image_approval_notes(
         let resolved = resolve_under_project(r, project_root)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| r.clone());
-        body.push_str(&format!("- Image {}: `{resolved}`\n", i + 2));
+        body.push_str(&format!("- Image {}: `{resolved}`\n", i + reference_offset));
     }
     body.push_str(&format!("\nBrief:\n```\n{brief}\n```\n"));
     body.push_str(
@@ -2499,6 +1858,19 @@ fn run_still_image(
 
     let (model, _lane, _slot) = resolve_still_image_model(context, inputs)?;
 
+    // Check before any reference bytes leave the machine; do not switch models.
+    let reference_count = refs.len() + usize::from(source.is_some());
+    let reference_api = if reference_count > 0 {
+        let api = media::resolve_api_for_model(app, &model.model_id,
+            (!model.api_id.trim().is_empty()).then_some(model.api_id.as_str()))?;
+        if api.kind == "atlas-cloud" {
+            atlas::preflight_image_references(&model.model_id, reference_count)?;
+        } else if inputs.contains_key("image_capability") {
+            return Err(format!("Cannot verify reference-image compatibility for provider `{}` and model `{}`; no images were uploaded.", api.kind, model.model_id));
+        }
+        Some(api)
+    } else { None };
+
     let mut params = if source.is_some() && preserve {
         json!({
             "prompt": format!("{prompt}\n\nPreserve everything else: composition, camera, identity, style, lighting, and unmentioned details."),
@@ -2524,18 +1896,13 @@ fn run_still_image(
 
     let mut uploaded = Vec::new();
     if let Some(ref src) = source {
-        let url = upload_local(app, project_root, src, crate::media_util::MediaRole::Image)?;
+        let url = upload_image_for_api(reference_api.as_ref().expect("source has API"), project_root, src)?;
         uploaded.push(url.clone());
         params["image"] = json!(url);
         params["image_url"] = json!(url);
     }
     for path in &refs {
-        uploaded.push(upload_local(
-            app,
-            project_root,
-            path,
-            crate::media_util::MediaRole::Image,
-        )?);
+        uploaded.push(upload_image_for_api(reference_api.as_ref().expect("references have API"), project_root, path)?);
     }
     if !uploaded.is_empty() {
         params["media_files"] = json!(uploaded.clone());
@@ -2583,6 +1950,10 @@ fn maybe_register_workflow_still(
     if !result.continue_suggested {
         if let Some(note) = crate::workflow::look::on_wardrobe_plate_saved(project_root, save_path)
         {
+            result.message.push_str("\n\n");
+            result.message.push_str(&note);
+        }
+        if let Some(note) = crate::workflow::character_wardrobe::on_saved(project_root, save_path) {
             result.message.push_str("\n\n");
             result.message.push_str(&note);
         }
@@ -2645,40 +2016,38 @@ fn yaml_string_field(body: &str, key: &str) -> Option<String> {
     None
 }
 
-/// First on-camera cue text + delivery from a talking-shot handoff.
-fn extract_first_speech_cue(body: &str) -> Option<(String, String)> {
-    let cues_at = body.find("cues:")?;
-    let after = &body[cues_at..];
-    let mut text: Option<String> = None;
-    let mut delivery = String::new();
-    for line in after.lines().skip(1) {
-        let t = line.trim();
-        if t.starts_with("generation_requirements:")
-            || t.starts_with("prompt:")
-            || t.starts_with("reference_assets:")
-            || t.starts_with("negative_prompt:")
-            || t.starts_with("generation_notes:")
-        {
-            break;
-        }
-        if text.is_none() {
-            if let Some(rest) = t.strip_prefix("text:") {
-                let v = rest.trim().trim_matches('"').to_string();
-                if !v.is_empty() {
-                    text = Some(v);
-                }
-            }
-        }
-        if delivery.is_empty() {
-            if let Some(rest) = t.strip_prefix("delivery:") {
-                delivery = rest.trim().trim_matches('"').to_string();
-            }
-        }
-        if text.is_some() && !delivery.is_empty() {
-            break;
-        }
+/// One performance for every spoken cue in order. Never silently voice only
+/// the first line or collapse multiple speakers into one voice.
+fn speech_performance_from_handoff(document: &str) -> Result<(String, String), String> {
+    let handoff = crate::scene_plan::extract::load_handoff_document(document)?;
+    let cues = &handoff.speech.cues;
+    let first = cues.first().ok_or("text_sync handoff missing speech.cues[].text")?;
+    if first.text.trim().is_empty() || first.speaker.trim().is_empty() {
+        return Err("text_sync first speech cue needs text and speaker".into());
     }
-    text.map(|t| (t, delivery))
+    let speaker = first.speaker.trim();
+    let delivery = first.delivery.as_deref().unwrap_or("").trim();
+    let mut lines = Vec::with_capacity(cues.len());
+    for cue in cues {
+        if cue.text.trim().is_empty() || cue.speaker.trim() != speaker {
+            return Err("text_sync cannot combine empty cues or multiple speakers into one performance".into());
+        }
+        if cue.delivery.as_deref().unwrap_or("").trim() != delivery {
+            return Err("text_sync cannot combine different cue deliveries into one performance".into());
+        }
+        lines.push(cue.text.trim());
+    }
+    Ok((lines.join(" "), delivery.to_string()))
+}
+
+#[cfg(test)]
+#[test]
+fn text_sync_uses_every_handoff_speech_cue() {
+    let document = "```yaml\nsource_scene: 1\ncut: 1\ntitle: Test\nprovider: atlascloud\nstage: base_video\nscene_type: character_performance\ncontinuity:\n  group: scene_1\n  relation_to_previous: new_setup\nediting:\n  estimated_screen_duration_seconds: 10\n  transition_in: cut\n  transition_out: cut\nspeech:\n  mode: source_video_lipsync\n  cues:\n  - speaker: Kris\n    text: I needed a second brain.\n  - speaker: Kris\n    text: Hell, some days I'm not sure I have the first one.\n  - speaker: Kris\n    text: It had to work, right?\nprompt: A talking shot.\n```";
+    let (text, _) = speech_performance_from_handoff(document).unwrap();
+    assert_eq!(text, "I needed a second brain. Hell, some days I'm not sure I have the first one. It had to work, right?");
+    let mixed = document.replace("- speaker: Kris\n    text: It had", "- speaker: Sam\n    text: It had");
+    assert!(speech_performance_from_handoff(&mixed).unwrap_err().contains("multiple speakers"));
 }
 
 fn extract_reference_paths_from_body(body: &str) -> Vec<String> {
@@ -2823,6 +2192,38 @@ fn build_seed_tts_text(cue_text: &str, delivery: &str) -> String {
     }
 }
 
+fn copy_saved_performance_exclusive(source: &Path, destination: &Path) -> Result<(), String> {
+    // Approval can sit pending while another writer creates this path. Never
+    // replace a newer WAV or follow a symlink at execution time.
+    let mut input = fs::File::open(source)
+        .map_err(|e| format!("Could not read saved performance WAV: {e}"))?;
+    let mut target = fs::OpenOptions::new().write(true).create_new(true).open(destination)
+        .map_err(|e| format!("New output audio already exists or cannot be created; no speech was generated: {e}"))?;
+    std::io::copy(&mut input, &mut target)
+        .map_err(|e| format!("Could not copy saved performance WAV; inspect the partial destination before retrying: {e}"))?;
+    target.sync_all().map_err(|e| format!("Could not sync saved performance WAV copy: {e}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod saved_audio_copy_tests {
+    use super::*;
+    #[test]
+    fn saved_audio_copy_never_replaces_an_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("old.wav");
+        let destination = dir.path().join("retry.wav");
+        fs::write(&source, b"paid audio").unwrap();
+        fs::write(&destination, b"someone else's audio").unwrap();
+        assert!(copy_saved_performance_exclusive(&source, &destination).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"someone else's audio");
+        fs::remove_file(&destination).unwrap();
+        copy_saved_performance_exclusive(&source, &destination).unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"paid audio");
+        assert_eq!(fs::read(&source).unwrap(), b"paid audio");
+    }
+}
+
 fn run_text_sync(
     app: &HostCtx,
     context: &DirectorContext,
@@ -2891,9 +2292,7 @@ fn run_text_sync(
     let yaml = yaml.unwrap_or(json!({}));
     let body = extract_yaml_body(&handoff_text);
 
-    let (cue_text, delivery) = extract_first_speech_cue(&body).ok_or_else(|| {
-        "text_sync handoff missing speech.cues[].text (visible speaker cue)".to_string()
-    })?;
+    let (cue_text, _delivery) = speech_performance_from_handoff(&handoff_text)?;
 
     let head_s = yaml_f64_field(&body, "head_handle_seconds").unwrap_or(1.0);
     let tail_s = yaml_f64_field(&body, "tail_handle_seconds").unwrap_or(1.0);
@@ -3014,175 +2413,15 @@ fn run_text_sync(
     crate::workflow_continuation::set_outputs(app, &output_video, &output_audio)?;
     // Voice mode
     let reuse_wav = input_str(inputs, &["performance_wav", "reuse_audio"]);
-    if reuse_wav.is_none() && output_audio.exists() { return Err("Saved performance audio already exists. Use Resume with saved audio; speech will not be generated again.".into()); }
-    let clone_wav = input_str(inputs, &["voice_clone", "voice_clone_path", "clone_wav"])
-        .map(|s| s.to_string())
-        .or_else(|| {
-            headers.get("voice").and_then(|v| {
-                let lower = v.to_ascii_lowercase();
-                if lower.ends_with(".wav") || lower.ends_with(".mp3") {
-                    Some(v.clone())
-                } else {
-                    None
-                }
-            })
-        });
-    let profile_yaml = input_str(inputs, &["voice_profile", "voice_profile_path"])
-        .map(|s| s.to_string())
-        .or_else(|| {
-            headers.get("voice").and_then(|v| {
-                let lower = v.to_ascii_lowercase();
-                if lower.ends_with(".yaml") || lower.ends_with(".yml") {
-                    Some(v.clone())
-                } else {
-                    None
-                }
-            })
-        });
-
-    let audio_mode = if reuse_wav.is_some() {
-        "reuse_wav"
-    } else if clone_wav.is_some() {
-        "voice_clone"
-    } else if profile_yaml.is_some() {
-        "voice_profile"
-    } else {
-        return Err(
-            "text_sync needs voice_clone WAV, voice_profile YAML, or performance_wav to reuse"
-                .into(),
-        );
-    };
-
-    // --- Step 1: performance WAV ---
-    if let Some(existing) = reuse_wav {
-        let src = resolve_under_project(existing, project_root).map_err(|e| e.to_string())?;
-        if !src.is_file() {
-            return Err(format!("performance_wav not found: {}", src.display()));
-        }
-        if src != output_audio {
-            fs::copy(&src, &output_audio)
-                .map_err(|e| format!("Could not copy performance WAV: {e}"))?;
-        }
-        app.emit(
-            "director-progress",
-            format!("Reusing performance WAV → {}", output_audio.display()),
-        );
-    } else if audio_mode == "voice_clone" {
-        let clone_path = resolve_under_project(clone_wav.as_deref().unwrap(), project_root)
-            .map_err(|e| e.to_string())?;
-        if !clone_path.is_file() {
-            return Err(format!(
-                "voice_clone WAV not found: {}",
-                clone_path.display()
-            ));
-        }
-        let audio_model = capability_model(context, "audio.tts_clone").ok_or_else(|| {
-            "Set Settings → Audio → TTS (voice clone) for text_sync (e.g. bytedance/seed-audio-1.0)."
-                .to_string()
-        })?;
-        app.emit(
-            "director-progress",
-            format!("Uploading clone WAV {}…", clone_path.display()),
-        );
-        let clone_url = upload_local(
-            app,
-            project_root,
-            &clone_path.to_string_lossy(),
-            crate::media_util::MediaRole::Audio,
-        )?;
-        let tts_text = build_seed_tts_text(&cue_text, &delivery);
-        let params = json!({
-            "text": tts_text,
-            "prompt": tts_text,
-            "references": [{ "audio_url": clone_url }],
-            "audio_url": clone_url,
-            "reference_audio": clone_url,
-        });
-        app.emit(
-            "director-progress",
-            format!(
-                "Generating performance TTS with `{}` → {}…",
-                audio_model.model_id,
-                output_audio.display()
-            ),
-        );
-        let api_id = if audio_model.api_id.trim().is_empty() {
-            None
-        } else {
-            Some(audio_model.api_id.as_str())
-        };
-        let result = run_media_generate(
-            app,
-            project_root,
-            "audio",
-            &audio_model.model_id,
-            api_id,
-            params,
-            &output_audio.to_string_lossy(),
-        )?;
-        require_media_saved(&result, &output_audio.to_string_lossy())?;
-    } else {
-        let profile_path = resolve_under_project(profile_yaml.as_deref().unwrap(), project_root)
-            .map_err(|e| e.to_string())?;
-        if !profile_path.is_file() {
-            return Err(format!(
-                "voice_profile YAML not found: {}",
-                profile_path.display()
-            ));
-        }
-        let (profile_model, voice_id, language, settings) =
-            load_voice_profile_fields(&profile_path)?;
-        let audio_model = if !profile_model.trim().is_empty() {
-            ModelRef {
-                api_id: String::new(),
-                model_id: profile_model,
-            }
-        } else {
-            capability_model(context, "audio.tts_profile").ok_or_else(|| {
-                "Voice profile has no model_id; set Settings → Audio → TTS (profile) or fix the YAML."
-                    .to_string()
-            })?
-        };
-        let mut params = json!({ "text": cue_text });
-        if !voice_id.is_empty() {
-            params["voice"] = json!(voice_id);
-            params["voice_id"] = json!(voice_id);
-        }
-        if !language.is_empty() {
-            params["language"] = json!(language);
-        }
-        for (k, v) in settings {
-            if !params.as_object().unwrap().contains_key(&k) {
-                params[k] = v;
-            }
-        }
-        if !delivery.is_empty() {
-            params["prompt"] = json!(format!("{delivery}. Speak exactly: {cue_text}"));
-        }
-        app.emit(
-            "director-progress",
-            format!(
-                "Generating profile TTS with `{}` → {}…",
-                audio_model.model_id,
-                output_audio.display()
-            ),
-        );
-        let api_id = if audio_model.api_id.trim().is_empty() {
-            None
-        } else {
-            Some(audio_model.api_id.as_str())
-        };
-        let result = run_media_generate(
-            app,
-            project_root,
-            "audio",
-            &audio_model.model_id,
-            api_id,
-            params,
-            &output_audio.to_string_lossy(),
-        )?;
-        require_media_saved(&result, &output_audio.to_string_lossy())?;
+    if let Some(root) = project_root {
+        crate::workflow::performance::validate_request(Path::new(root), &output_video, reuse_wav)?;
     }
+    if reuse_wav.is_none() && output_audio.exists() { return Err("Saved performance audio already exists. Use Resume with saved audio; speech will not be generated again.".into()); }
+    let audio_mode = "reuse_wav";
+    let existing = reuse_wav.ok_or("Video generation requires saved dialogue audio. Generate and select a WAV in Scene Look first; video never synthesizes speech.")?;
+    let src = resolve_under_project(existing, project_root).map_err(|e| e.to_string())?;
+    if !src.is_file() { return Err("Selected performance WAV is missing".into()); }
+    if src != output_audio { copy_saved_performance_exclusive(&src, &output_audio)?; }
 
     if !output_audio.is_file() || fs::metadata(&output_audio).map(|m| m.len()).unwrap_or(0) == 0 {
         return Err(format!(
@@ -3505,17 +2744,19 @@ const DEFAULT_MODEL_SHEET_SHOTS: &[(&str, &str)] = &[
     ),
 ];
 
-#[derive(Debug, Clone)]
-struct ManifestShot {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ManifestShot {
     id: String,
     status: String,
     path: String,
     prediction_id: String,
     framing: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attempts: Vec<Value>,
 }
 
-#[derive(Debug, Clone)]
-struct ModelSheetManifest {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelSheetManifest {
     character: String,
     style: String,
     model_id: String,
@@ -3530,6 +2771,10 @@ struct ModelSheetManifest {
     identity_locked: bool,
     text_only_gate: bool,
     shots: Vec<ManifestShot>,
+    #[serde(default)]
+    preparation_inputs: Value,
+    #[serde(default)]
+    history: Vec<Value>,
 }
 
 fn slugify(raw: &str) -> String {
@@ -3556,26 +2801,10 @@ fn load_identity_text(
     inputs: &Map<String, Value>,
     project_root: Option<&str>,
 ) -> Result<String, String> {
-    if let Some(text) = input_str(inputs, &["identity_text", "brief", "prompt"]) {
-        let mut block = text.to_string();
-        // Append character sheet canon when present.
-        for path in input_path_list(inputs, &["character_files"]) {
-            if let Ok(resolved) = resolve_under_project(&path, project_root) {
-                if let Ok(sheet) = fs::read_to_string(&resolved) {
-                    block.push_str("\n\nCharacter sheet canon:\n");
-                    block.push_str(sheet.chars().take(4000).collect::<String>().as_str());
-                }
-            }
-        }
-        return Ok(block);
-    }
-    for path in input_path_list(inputs, &["character_files"]) {
-        let resolved = resolve_under_project(&path, project_root).map_err(|e| e.to_string())?;
-        let sheet = fs::read_to_string(&resolved)
-            .map_err(|e| format!("Could not read character sheet {}: {e}", resolved.display()))?;
-        return Ok(sheet.chars().take(6000).collect());
-    }
-    Err("model_sheet needs identity_text/brief or character_files".into())
+    // character_files bind ownership/fingerprints, not a mandatory biography prompt.
+    // Reference-only requests intentionally carry no fabricated identity text.
+    let _ = project_root;
+    Ok(input_str(inputs, &["identity_text", "brief", "prompt"]).unwrap_or("").to_string())
 }
 
 fn manifest_path(output_dir: &Path) -> PathBuf {
@@ -3584,164 +2813,203 @@ fn manifest_path(output_dir: &Path) -> PathBuf {
 
 fn write_manifest(manifest: &ModelSheetManifest) -> Result<(), String> {
     let path = manifest_path(Path::new(&manifest.output_directory));
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("manifest dirs: {e}"))?;
+    let mut value = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
+    let object = value.as_object_mut().unwrap();
+    let mut identity = Map::new();
+    for key in ["character_sheet", "reference_images", "approval_shot", "approval_shot_path"] {
+        identity.insert(key.into(), object.remove(key).unwrap());
     }
-    let mut refs = String::new();
-    for r in &manifest.reference_images {
-        refs.push_str(&format!("    - \"{}\"\n", r.replace('"', "\\\"")));
-    }
-    if refs.is_empty() {
-        refs.push_str("    []\n");
-    }
-    let mut shots = String::new();
-    for shot in &manifest.shots {
-        shots.push_str(&format!(
-            "  - id: {}\n    status: {}\n    path: \"{}\"\n    prediction_id: \"{}\"\n    framing: \"{}\"\n",
-            shot.id,
-            shot.status,
-            shot.path.replace('"', "\\\""),
-            shot.prediction_id.replace('"', "\\\""),
-            shot.framing.replace('"', "\\\"")
-        ));
-    }
-    let yaml = format!(
-        "pack_version: 1\n\
-character: \"{}\"\n\
-style: \"{}\"\n\
-model_id: \"{}\"\n\
-mode: {}\n\
-aspect_ratio: \"{}\"\n\
-resolution: {}\n\
-output_directory: \"{}\"\n\
-identity_locked: {}\n\
-text_only_gate: {}\n\
-identity_source:\n\
-  character_sheet: \"{}\"\n\
-  reference_images:\n{}\
-  approval_shot: \"{}\"\n\
-  approval_shot_path: \"{}\"\n\
-shots:\n{}",
-        manifest.character.replace('"', "\\\""),
-        manifest.style.replace('"', "\\\""),
-        manifest.model_id.replace('"', "\\\""),
-        manifest.mode,
-        manifest.aspect_ratio,
-        manifest.resolution,
-        manifest.output_directory.replace('"', "\\\""),
-        manifest.identity_locked,
-        manifest.text_only_gate,
-        manifest.character_sheet.replace('"', "\\\""),
-        refs,
-        manifest.approval_shot,
-        manifest.approval_shot_path.replace('"', "\\\""),
-        shots
-    );
-    fs::write(&path, yaml).map_err(|e| format!("Could not write manifest: {e}"))
+    object.insert("identity_source".into(), Value::Object(identity));
+    object.insert("pack_version".into(), json!(1));
+    let yaml = serde_yaml_ng::to_string(&value).map_err(|e| format!("manifest YAML: {e}"))?;
+    crate::scene_plan::commit::write_atomic(&path, yaml.as_bytes())
 }
 
-fn read_manifest(output_dir: &Path) -> Option<ModelSheetManifest> {
-    let path = manifest_path(output_dir);
-    let text = fs::read_to_string(path).ok()?;
-    let mut character = String::new();
-    let mut style = String::new();
-    let mut model_id = String::new();
-    let mut mode = String::new();
-    let mut aspect_ratio = "3:4".into();
-    let mut resolution = "2k".into();
-    let mut output_directory = output_dir.to_string_lossy().to_string();
-    let mut character_sheet = String::new();
-    let mut reference_images = Vec::new();
-    let mut approval_shot = String::new();
-    let mut approval_shot_path = String::new();
-    let mut identity_locked = false;
-    let mut text_only_gate = false;
-    let mut shots = Vec::new();
-    let mut in_refs = false;
-    let mut current: Option<ManifestShot> = None;
+fn read_manifest(output_dir: &Path) -> Result<Option<ModelSheetManifest>, String> {
+    let text = match fs::read_to_string(manifest_path(output_dir)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Could not read manifest: {e}")),
+    };
+    let mut value: Value = serde_yaml_ng::from_str(&text)
+        .map_err(|e| format!("Invalid manifest YAML: {e}"))?;
+    let object = value.as_object_mut().ok_or("Invalid manifest: expected mapping")?;
+    let identity = object.remove("identity_source").ok_or("Invalid manifest: missing identity_source")?;
+    let identity = identity.as_object().ok_or("Invalid manifest: expected identity mapping")?;
+    for key in ["character_sheet", "reference_images", "approval_shot", "approval_shot_path"] {
+        object.insert(key.into(), identity.get(key).cloned().unwrap_or_else(|| {
+            if key == "reference_images" { json!([]) } else { json!("") }
+        }));
+    }
+    let manifest: ModelSheetManifest = serde_json::from_value(value)
+        .map_err(|e| format!("Invalid manifest: {e}"))?;
+    if manifest.shots.is_empty() {
+        return Err("Invalid manifest: empty shot pack".into());
+    }
+    Ok(Some(manifest))
+}
 
-    for line in text.lines() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("character:") {
-            character = rest.trim().trim_matches('"').to_string();
-            in_refs = false;
-        } else if let Some(rest) = t.strip_prefix("style:") {
-            style = rest.trim().trim_matches('"').to_string();
-        } else if let Some(rest) = t.strip_prefix("model_id:") {
-            model_id = rest.trim().trim_matches('"').to_string();
-        } else if let Some(rest) = t.strip_prefix("mode:") {
-            mode = rest.trim().to_string();
-        } else if let Some(rest) = t.strip_prefix("aspect_ratio:") {
-            aspect_ratio = rest.trim().trim_matches('"').to_string();
-        } else if let Some(rest) = t.strip_prefix("resolution:") {
-            resolution = rest.trim().to_string();
-        } else if let Some(rest) = t.strip_prefix("output_directory:") {
-            output_directory = rest.trim().trim_matches('"').to_string();
-        } else if let Some(rest) = t.strip_prefix("identity_locked:") {
-            identity_locked = rest.trim() == "true";
-        } else if let Some(rest) = t.strip_prefix("text_only_gate:") {
-            text_only_gate = rest.trim() == "true";
-        } else if let Some(rest) = t.strip_prefix("character_sheet:") {
-            character_sheet = rest.trim().trim_matches('"').to_string();
-            in_refs = false;
-        } else if t.starts_with("reference_images:") {
-            in_refs = true;
-        } else if in_refs {
-            if let Some(rest) = t.strip_prefix("- ") {
-                reference_images.push(rest.trim().trim_matches('"').to_string());
-            } else if !t.is_empty() && !t.starts_with('[') {
-                in_refs = false;
-            }
-        }
-        if let Some(rest) = t.strip_prefix("approval_shot:") {
-            approval_shot = rest.trim().trim_matches('"').to_string();
-        } else if let Some(rest) = t.strip_prefix("approval_shot_path:") {
-            approval_shot_path = rest.trim().trim_matches('"').to_string();
-        } else if let Some(rest) = t.strip_prefix("- id:") {
-            if let Some(prev) = current.take() {
-                shots.push(prev);
-            }
-            current = Some(ManifestShot {
-                id: rest.trim().to_string(),
-                status: "pending".into(),
-                path: String::new(),
-                prediction_id: String::new(),
-                framing: shot_framing(rest.trim()),
-            });
-        } else if let Some(shot) = current.as_mut() {
-            if let Some(rest) = t.strip_prefix("status:") {
-                shot.status = rest.trim().to_string();
-            } else if let Some(rest) = t.strip_prefix("path:") {
-                shot.path = rest.trim().trim_matches('"').to_string();
-            } else if let Some(rest) = t.strip_prefix("prediction_id:") {
-                shot.prediction_id = rest.trim().trim_matches('"').to_string();
-            } else if let Some(rest) = t.strip_prefix("framing:") {
-                shot.framing = rest.trim().trim_matches('"').to_string();
-            }
-        }
+/// Receipt used to roll back a model-sheet deletion if state persistence fails.
+pub(crate) struct DeletedModelSheetPhoto {
+    original_manifest: ModelSheetManifest,
+    updated_manifest: ModelSheetManifest,
+    photo: PathBuf,
+    trashed: PathBuf,
+}
+
+/// Move one saved model-sheet plate to project trash and reopen its manifest slot.
+pub(crate) fn delete_model_sheet_photo(
+    root: &Path,
+    manifest_relative: &str,
+    photo_relative: &str,
+) -> Result<DeletedModelSheetPhoto, String> {
+    delete_model_sheet_photo_with_manifest_writer(
+        root,
+        manifest_relative,
+        photo_relative,
+        write_manifest,
+    )
+}
+
+fn delete_model_sheet_photo_with_manifest_writer(
+    root: &Path,
+    manifest_relative: &str,
+    photo_relative: &str,
+    mut write: impl FnMut(&ModelSheetManifest) -> Result<(), String>,
+) -> Result<DeletedModelSheetPhoto, String> {
+    let root_text = root.to_string_lossy();
+    let manifest_file = resolve_under_project(manifest_relative, Some(root_text.as_ref()))
+        .map_err(|error| error.to_string())?;
+    if manifest_file.file_name().and_then(|name| name.to_str()) != Some("model_sheet_manifest.yaml") {
+        return Err("character model-sheet manifest path is invalid".into());
     }
-    if let Some(prev) = current {
-        shots.push(prev);
+    let output_dir = manifest_file.parent().ok_or("model-sheet manifest has no parent directory")?;
+    let photo = resolve_under_project(photo_relative, Some(root_text.as_ref()))
+        .map_err(|error| error.to_string())?;
+    if photo.parent() != Some(output_dir) {
+        return Err("model-sheet photo must be directly inside its pack directory".into());
     }
-    if shots.is_empty() {
-        return None;
+    let mut manifest = read_manifest(output_dir)?.ok_or("model-sheet manifest is missing")?;
+    let index = manifest.shots.iter().position(|shot| {
+        resolve_under_project(&shot.path, Some(root_text.as_ref()))
+            .is_ok_and(|path| path == photo)
+    }).ok_or("model-sheet photo is absent from the manifest")?;
+    if manifest.shots[index].status != "saved" {
+        return Err("only a saved model-sheet photo can be deleted".into());
     }
-    Some(ModelSheetManifest {
-        character,
-        style,
-        model_id,
-        mode,
-        aspect_ratio,
-        resolution,
-        output_directory,
-        character_sheet,
-        reference_images,
-        approval_shot,
-        approval_shot_path,
-        identity_locked,
-        text_only_gate,
-        shots,
+    let original_manifest = manifest.clone();
+    manifest.shots[index].status = "pending".into();
+    manifest.shots[index].prediction_id.clear();
+    if manifest.approval_shot_path == manifest.shots[index].path {
+        let deleted_path = manifest.shots[index].path.clone();
+        manifest.reference_images.retain(|path| path != &deleted_path);
+        manifest.approval_shot.clear();
+        manifest.approval_shot_path.clear();
+        manifest.identity_locked = false;
+        manifest.mode = "text_to_image".into();
+    }
+    let trashed = crate::project_path::move_to_trash(root, &photo)?;
+    if let Err(error) = write(&manifest) {
+        let restore = fs::rename(&trashed, &photo);
+        let _ = write(&original_manifest);
+        return match restore {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(format!("{error}; could not restore trashed photo: {restore_error}")),
+        };
+    }
+    Ok(DeletedModelSheetPhoto {
+        original_manifest,
+        updated_manifest: manifest,
+        photo,
+        trashed,
     })
+}
+
+#[cfg(test)]
+#[test]
+fn model_sheet_delete_manifest_failure_rollback() {
+    let root = tempfile::tempdir().unwrap();
+    let output_dir = root.path().join("Characters/Alice/model_sheet");
+    fs::create_dir_all(&output_dir).unwrap();
+    let photo_relative = "Characters/Alice/model_sheet/alice_pose.png";
+    let photo = root.path().join(photo_relative);
+    let photo_bytes = b"disposable-model-sheet-photo";
+    fs::write(&photo, photo_bytes).unwrap();
+    let manifest = ModelSheetManifest {
+        character: "Alice".into(),
+        style: "fixture".into(),
+        model_id: "offline-fixture".into(),
+        mode: "text_to_image".into(),
+        aspect_ratio: "1:1".into(),
+        resolution: "16x16".into(),
+        output_directory: output_dir.to_string_lossy().into_owned(),
+        character_sheet: root
+            .path()
+            .join("Characters/Alice/character.yaml")
+            .to_string_lossy()
+            .into_owned(),
+        reference_images: vec![],
+        approval_shot: String::new(),
+        approval_shot_path: String::new(),
+        identity_locked: false,
+        text_only_gate: true,
+        shots: vec![ManifestShot {
+            id: "standing_front".into(),
+            status: "saved".into(),
+            path: photo_relative.into(),
+            prediction_id: "selected-prediction".into(),
+            framing: "Full body front view".into(),
+            attempts: vec![],
+        }],
+        preparation_inputs: json!({}),
+        history: vec![],
+    };
+    write_manifest(&manifest).unwrap();
+    let manifest_file = manifest_path(&output_dir);
+    let original_manifest_bytes = fs::read(&manifest_file).unwrap();
+
+    let mut writes = 0;
+    let error = match delete_model_sheet_photo_with_manifest_writer(
+        root.path(),
+        "Characters/Alice/model_sheet/model_sheet_manifest.yaml",
+        photo_relative,
+        |value| {
+            writes += 1;
+            write_manifest(value)?;
+            if writes == 1 {
+                Err("injected manifest write failure after replacement".into())
+            } else {
+                Ok(())
+            }
+        },
+    ) {
+        Ok(_) => panic!("injected manifest write failure unexpectedly succeeded"),
+        Err(error) => error,
+    };
+
+    assert!(error.contains("injected manifest write failure"), "{error}");
+    assert_eq!(writes, 2, "rollback must rewrite the original manifest");
+    assert_eq!(fs::read(&photo).unwrap(), photo_bytes);
+    assert_eq!(fs::read(&manifest_file).unwrap(), original_manifest_bytes);
+}
+
+pub(crate) fn restore_deleted_model_sheet_photo(receipt: DeletedModelSheetPhoto) -> Result<(), String> {
+    fs::rename(&receipt.trashed, &receipt.photo)
+        .map_err(|error| format!("could not restore trashed model-sheet photo: {error}"))?;
+    if let Err(error) = write_manifest(&receipt.original_manifest) {
+        let _ = fs::rename(&receipt.photo, &receipt.trashed);
+        return Err(format!("could not restore model-sheet manifest: {error}"));
+    }
+    Ok(())
+}
+
+pub(crate) fn finalize_deleted_model_sheet_photo(root: &Path, receipt: &DeletedModelSheetPhoto) {
+    let root_text = root.to_string_lossy();
+    let _ = update_character_sheet_refs(
+        &receipt.updated_manifest.character_sheet,
+        &receipt.updated_manifest,
+        Some(root_text.as_ref()),
+    );
 }
 
 fn unlock_remaining_shots(manifest: &mut ModelSheetManifest) {
@@ -3863,24 +3131,86 @@ fn pending_model_sheet_action(validated: &ValidatedAction, identity_gate: &str) 
     action
 }
 
-fn run_model_sheet(
-    app: &HostCtx,
-    context: &DirectorContext,
-    validated: &ValidatedAction,
+/// Prepare local pack state only; no provider, planner, or approval operation.
+pub fn prepare_model_sheet_manifest(
+    inputs: &Map<String, Value>,
+    existing_manifest: Option<ModelSheetManifest>,
     project_root: Option<&str>,
-) -> Result<SpecialistResult, String> {
-    let inputs = &validated.action.inputs;
+) -> Result<ModelSheetManifest, String> {
     let out_raw = input_str(inputs, &["output_path", "save_path"])
         .ok_or_else(|| "model_sheet needs output_path".to_string())?;
     let output_dir = resolve_under_project(out_raw, project_root).map_err(|e| e.to_string())?;
-    fs::create_dir_all(&output_dir).map_err(|e| format!("Could not create pack dir: {e}"))?;
-
-    let identity_gate = input_str(inputs, &["identity_gate"]).unwrap_or("");
-    let mut manifest = if let Some(existing) = read_manifest(&output_dir) {
-        existing
-    } else {
-        // Rebuild init without the broken character_sheet logic — inline clean init
-        let refs = input_path_list(inputs, &["reference_images", "reference_assets"]);
+    resolve_under_project(&manifest_path(&output_dir).to_string_lossy(), project_root)
+        .map_err(|e| e.to_string())?;
+    // Validate before any mutation, including before accepting an existing pack.
+    for key in ["identity_text", "brief", "prompt", "character_slug", "style", "wardrobe", "aspect_ratio", "resolution"] {
+        if let Some(value) = inputs.get(key) {
+            if !value.is_string() || (value.as_str().unwrap().trim().is_empty() && !["identity_text", "brief", "prompt"].contains(&key)) {
+                return Err(format!("model_sheet {key} must be nonempty text"));
+            }
+        }
+    }
+    for key in ["reference_images", "reference_assets", "character_files", "shot_ids"] {
+        if let Some(value) = inputs.get(key) {
+            let items = value.as_array().ok_or_else(|| format!("model_sheet {key} must be an array"))?;
+            if items.iter().any(|v| v.as_str().is_none_or(|s| s.trim().is_empty())) {
+                return Err(format!("model_sheet {key} must contain nonempty paths/IDs"));
+            }
+        }
+    }
+    let mut checked_refs = Vec::new();
+    for raw in input_path_list(inputs, &["reference_images", "reference_assets"]) {
+        let path = resolve_under_project(&raw, project_root).map_err(|e| e.to_string())?;
+        if !path.is_file() { return Err(format!("Missing reference image: {raw}")); }
+        fs::File::open(&path).map_err(|e| format!("Cannot read reference {raw}: {e}"))?;
+        checked_refs.push(path.to_string_lossy().to_string());
+    }
+    let mut character_canon = Vec::new();
+    for raw in input_path_list(inputs, &["character_files"]) {
+        let path = resolve_under_project(&raw, project_root).map_err(|e| e.to_string())?;
+        let text = fs::read_to_string(&path).map_err(|e| format!("Cannot read character sheet {raw}: {e}"))?;
+        // Exclude only the runner's own generated-reference bookkeeping. Creative
+        // profile/brief edits still invalidate old outputs, even at the same path.
+        let canon = text.lines().filter(|line| {
+            let lower = line.trim().to_ascii_lowercase();
+            !lower.is_empty() && lower != "## reference assets"
+                && !lower.starts_with("character image reference:")
+                && !lower.starts_with("additional image references:")
+                && !lower.starts_with("asset notes:")
+        }).collect::<Vec<_>>().join("\n");
+        character_canon.push(json!({"path": path, "text": canon}));
+    }
+    let identity = load_identity_text(inputs, project_root)?;
+    if identity.trim().is_empty() && checked_refs.is_empty() {
+        return Err("Add a visual description/appearance or select a reference image, save and retry".into());
+    }
+    let mut snapshot = inputs.clone();
+    // Continuation consent and generated approval refs are runtime state, not creative input.
+    snapshot.remove("identity_gate");
+    snapshot.remove("output_path");
+    snapshot.remove("save_path");
+    snapshot.remove("reference_assets");
+    snapshot.insert("reference_images".into(), json!(checked_refs));
+    snapshot.insert("character_canon".into(), json!(character_canon));
+    let snapshot = Value::Object(snapshot);
+    let persisted = read_manifest(&output_dir)?;
+    if let Some(supplied) = &existing_manifest {
+        let actual = persisted.as_ref().ok_or("Supplied manifest is not persisted at the requested output")?;
+        if serde_json::to_value(supplied).unwrap() != serde_json::to_value(actual).unwrap() {
+            return Err("Existing manifest changed; reload before preparing".into());
+        }
+    }
+    let existing = persisted;
+    if let Some(old) = &existing {
+        if old.output_directory != output_dir.to_string_lossy() {
+            return Err("Manifest output_directory does not match requested pack".into());
+        }
+        if old.preparation_inputs == snapshot {
+            return Ok(old.clone());
+        }
+    }
+    let mut manifest = {
+        let refs = checked_refs;
         let character_files = input_path_list(inputs, &["character_files"]);
         let sheet_raw = character_files.first().cloned().unwrap_or_default();
         let sheet_path = if sheet_raw.is_empty() {
@@ -3906,7 +3236,7 @@ fn run_model_sheet(
             .unwrap_or_else(|| "character".into());
         let text_only_gate = refs.is_empty();
         let mut shots = Vec::new();
-        for (i, (id, framing)) in DEFAULT_MODEL_SHEET_SHOTS.iter().enumerate() {
+        for (i, (id, _)) in DEFAULT_MODEL_SHEET_SHOTS.iter().enumerate() {
             let status = if text_only_gate && i > 0 {
                 "held"
             } else {
@@ -3920,7 +3250,8 @@ fn run_model_sheet(
                     .to_string_lossy()
                     .to_string(),
                 prediction_id: String::new(),
-                framing: (*framing).into(),
+                framing: shot_framing(id),
+                attempts: Vec::new(),
             });
         }
         // Optional shot_ids filter
@@ -3956,44 +3287,109 @@ fn run_model_sheet(
             resolution: input_str(inputs, &["resolution"]).unwrap_or("2k").into(),
             output_directory: output_dir.to_string_lossy().to_string(),
             character_sheet: sheet_path,
-            reference_images: refs
-                .iter()
-                .filter_map(|p| {
-                    resolve_under_project(p, project_root)
-                        .ok()
-                        .map(|x| x.to_string_lossy().to_string())
-                })
-                .collect(),
+            reference_images: refs,
             approval_shot: String::new(),
             approval_shot_path: String::new(),
             identity_locked: !text_only_gate,
             text_only_gate,
             shots,
+            preparation_inputs: snapshot,
+            history: Vec::new(),
         };
-        write_manifest(&m)?;
         m
     };
-
-    // Identity gate: user approved the first plate — unlock the rest.
-    if identity_gate == "rest" || identity_gate == "generate_rest" {
-        if manifest.text_only_gate && !manifest.identity_locked {
-            let first_saved = manifest.shots.iter().find(|s| s.status == "saved").cloned();
-            if let Some(saved) = first_saved {
-                manifest.approval_shot = saved.id.clone();
-                manifest.approval_shot_path = saved.path.clone();
-                if !manifest.reference_images.contains(&saved.path) {
-                    manifest.reference_images.insert(0, saved.path.clone());
-                }
-                unlock_remaining_shots(&mut manifest);
-                write_manifest(&manifest)?;
-            } else {
-                return Err(
-                    "Cannot unlock remaining model-sheet shots: no saved identity plate yet."
-                        .into(),
-                );
-            }
+    if manifest.shots.is_empty() {
+        return Err("model_sheet shot_ids selects no known shots".into());
+    }
+    if let Some(mut old) = existing {
+        manifest.history = std::mem::take(&mut old.history);
+        manifest.history.push(serde_json::to_value(old).map_err(|e| e.to_string())?);
+    }
+    // A new input revision must never overwrite a retained saved plate.
+    let revision = manifest.history.len();
+    for shot in &mut manifest.shots {
+        if revision > 0 {
+            shot.path = output_dir.join(format!("{}_r{revision}_{}.png", manifest.character, shot.id))
+                .to_string_lossy().into_owned();
+        }
+        resolve_under_project(&shot.path, project_root).map_err(|e| e.to_string())?;
+        if Path::new(&shot.path).exists() {
+            return Err(format!("Model-sheet destination already exists: {}", shot.path));
         }
     }
+    fs::create_dir_all(&output_dir).map_err(|e| format!("Could not create pack dir: {e}"))?;
+    resolve_under_project(&manifest_path(&output_dir).to_string_lossy(), project_root)
+        .map_err(|e| e.to_string())?;
+    write_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn model_sheet_manifest_for_run(inputs: &Map<String, Value>, project_root: Option<&str>) -> Result<ModelSheetManifest, String> {
+    let mut manifest = prepare_model_sheet_manifest(inputs, None, project_root)?;
+    if manifest.shots.iter().any(|s| s.status == "uncertain") {
+        return Err("Model-sheet provider outcome is uncertain; inspect the existing operation before retrying".into());
+    }
+    let identity_gate = input_str(inputs, &["identity_gate"]).unwrap_or("");
+    if matches!(identity_gate, "rest" | "generate_rest") && manifest.text_only_gate && !manifest.identity_locked {
+        let saved = manifest.shots.iter().find(|s| s.status == "saved").cloned().ok_or("Cannot unlock remaining model-sheet shots: no saved identity plate yet.")?;
+        manifest.approval_shot = saved.id.clone();
+        manifest.approval_shot_path = saved.path.clone();
+        if !manifest.reference_images.contains(&saved.path) { manifest.reference_images.insert(0, saved.path); }
+        unlock_remaining_shots(&mut manifest);
+        write_manifest(&manifest)?;
+    }
+    Ok(manifest)
+}
+
+pub(crate) fn model_sheet_pending_output(inputs: &Map<String, Value>, root: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let manifest = model_sheet_manifest_for_run(inputs, root)?;
+    Ok(next_pending_shot(&manifest).map(|i| PathBuf::from(&manifest.shots[i].path)))
+}
+
+/// Settle only the exact approved plate; never invoke generation here.
+pub(crate) fn settle_model_sheet_plate(action: &DirectorAction, root: &Path, output: &Path, prediction: Option<&str>, saved: bool, error: Option<&str>) -> Result<(String, Option<DirectorAction>), String> {
+    let dir = input_str(&action.inputs, &["output_path"]).ok_or("Missing pack directory")?;
+    let dir = resolve_under_project(dir, root.to_str()).map_err(|e| e.to_string())?;
+    let mut manifest = read_manifest(&dir)?.ok_or("Missing model-sheet manifest")?;
+    let idx = manifest.shots.iter().position(|s| Path::new(&s.path) == output).ok_or("Approved plate is absent from manifest")?;
+    if manifest.shots[idx].status == "saved" { return Err("Model-sheet plate already settled".into()); }
+    if saved && (!output.is_file() || fs::metadata(output).map_err(|e|e.to_string())?.len() == 0) { return Err("Model-sheet delivery is missing".into()); }
+    let terminal_failure = error.is_some_and(|e| e.starts_with("provider-failed:"));
+    manifest.shots[idx].status = if saved { "saved" } else if terminal_failure { "pending" } else if prediction.is_some() { "submitted" } else { "uncertain" }.into();
+    manifest.shots[idx].prediction_id = prediction.unwrap_or("").into();
+    if terminal_failure {
+        let shot = &mut manifest.shots[idx];
+        shot.attempts.push(json!({"status":"failed", "path":shot.path, "prediction_id":prediction, "error":error}));
+        let stem = output.file_stem().and_then(|s|s.to_str()).ok_or("Invalid model-sheet output")?;
+        shot.path = output.with_file_name(format!("{stem}_retry{}.png", shot.attempts.len())).to_string_lossy().into_owned();
+        shot.prediction_id.clear();
+    }
+    let waiting_identity = manifest.text_only_gate && !manifest.identity_locked;
+    if saved && waiting_identity {
+        manifest.approval_shot = manifest.shots[idx].id.clone();
+        manifest.approval_shot_path = manifest.shots[idx].path.clone();
+    }
+    write_manifest(&manifest)?;
+    if saved { update_character_sheet_refs(&manifest.character_sheet, &manifest, root.to_str())?; }
+    let gate = if saved && waiting_identity { "rest" } else { "continue" };
+    let mut next = action.clone(); next.inputs.insert("identity_gate".into(), json!(gate));
+    let more = manifest.shots[idx].status != "uncertain" && (waiting_identity || next_pending_shot(&manifest).is_some());
+    let message = if let Some(error) = error { format!("Model-sheet plate failed; review and retry explicitly: {error}") }
+        else if saved && waiting_identity { format!("Model sheet identity plate saved to `{}`. Review it before approving the remaining shots.", output.display()) }
+        else if saved { format!("Model sheet shot saved to `{}`.", output.display()) }
+        else { "Model sheet prediction submitted; continuation collects the same prediction without generation.".into() };
+    Ok((message, more.then_some(next)))
+}
+
+fn run_model_sheet(
+    app: &HostCtx,
+    context: &DirectorContext,
+    validated: &ValidatedAction,
+    project_root: Option<&str>,
+) -> Result<SpecialistResult, String> {
+    let inputs = &validated.action.inputs;
+    let mut manifest = model_sheet_manifest_for_run(inputs, project_root)?;
+    let output_dir = PathBuf::from(&manifest.output_directory);
 
     let identity = load_identity_text(inputs, project_root)?;
     let wardrobe = input_str(inputs, &["wardrobe"])
@@ -4060,6 +3456,19 @@ fn run_model_sheet(
         })?
     };
 
+    // Schema capability check before any reference bytes leave the machine.
+    // Reuse the media router's API resolution; do not guess from a model ID or
+    // switch the selected model. Other adapters retain their existing routes.
+    if !manifest.reference_images.is_empty() {
+        let api = media::resolve_api_for_model(
+            app,
+            &model.model_id,
+            (!model.api_id.trim().is_empty()).then_some(model.api_id.as_str()),
+        )?;
+        if api.kind == "atlas-cloud" {
+            atlas::preflight_image_references(&model.model_id, manifest.reference_images.len())?;
+        }
+    }
     let mut uploaded = Vec::new();
     for path in &manifest.reference_images {
         app.emit(
@@ -4074,7 +3483,11 @@ fn run_model_sheet(
         )?);
     }
 
-    let prompt = build_shot_prompt(&identity, &manifest.style, wardrobe, &shot.framing);
+    // Image-use instruction only, never a fabricated character identity.
+    let visual_instruction = if identity.trim().is_empty() {
+        "Use the selected reference images as the visual source. Preserve the depicted character appearance across views."
+    } else { &identity };
+    let prompt = build_shot_prompt(visual_instruction, &manifest.style, wardrobe, &shot.framing);
     let mut params = json!({
         "prompt": prompt,
         "aspect_ratio": manifest.aspect_ratio,
@@ -4218,7 +3631,7 @@ Say **continue** (or **Approved**) for the next unfinished shot.\n\n{result}\n\n
 pub fn specialist_spends(specialist: &str) -> bool {
     matches!(
         specialist,
-        "scene_generation" | "still_image" | "text_sync" | "lip_sync" | "model_sheet"
+        "scene_generation" | "still_image" | "text_sync" | "dialogue_audio" | "lip_sync" | "model_sheet"
     )
 }
 
@@ -4251,8 +3664,9 @@ pub fn text_sync_approval_notes(
         .as_deref()
         .map(parse_handoff_headers_and_yaml)
         .unwrap_or_default();
-    let (cue_text, delivery) = extract_first_speech_cue(&body)
-        .unwrap_or_else(|| ("(missing cue text)".into(), String::new()));
+    let (cue_text, delivery) = handoff_text.as_deref()
+        .and_then(|document| speech_performance_from_handoff(document).ok())
+        .unwrap_or_else(|| ("(missing or incompatible cue text)".into(), String::new()));
     let head_s = yaml_f64_field(&body, "head_handle_seconds").unwrap_or(1.0);
     let tail_s = yaml_f64_field(&body, "tail_handle_seconds").unwrap_or(1.0);
     let sync_ms = input_str(inputs, &["sync_ms"])
@@ -4292,7 +3706,7 @@ pub fn text_sync_approval_notes(
         format!("- delivery: {delivery}\n")
     };
     format!(
-        "### Text-sync plan (TTS → pad → I2V+audio)\n\
+        "### Video-only plan (saved WAV → pad → I2V+audio)\n\
 - handoff: `{handoff_path}`\n\
 - cue text: {cue_text}\n\
 {delivery_line}\
@@ -4301,7 +3715,7 @@ pub fn text_sync_approval_notes(
 - handles: head={head_s:.1}s + sync_ms={sync_ms}; tail={tail_s:.1}s\n\
 - output audio: `{out_audio}`\n\
 - output video: `{out_video}`\n\n\
-Paid calls: TTS (unless reusing WAV) + talking video. Use the Approve button to run."
+Paid calls: talking video only. No speech synthesis. Use the Approve button to run."
     )
 }
 
@@ -4496,43 +3910,4 @@ Prompt:\n```\n{prompt}\n```"
 Prompt excerpt:\n```\n{prompt}\n```\n\n\
 Use the Approve button only if this model + refs + output path look right."
     )
-}
-
-#[cfg(test)]
-mod text_runner_tests {
-    use super::*;
-
-    #[test]
-    fn parses_workbench_file_and_summary() {
-        let reply = r#"
-<workbench_file path="prod.md">
-# Production Notes
-hello
-</workbench_file>
-<workbench_file path='Scene_Prompts/Scene1.txt'>
-Character_Reference: none
-</workbench_file>
-<workbench_summary>
-Wrote master + 1 sidecar.
-</workbench_summary>
-"#;
-        let emit = parse_text_specialist_emit(reply);
-        assert!(emit.ask.is_none());
-        assert_eq!(emit.files.len(), 2);
-        assert_eq!(emit.files[0].0, "prod.md");
-        assert!(emit.files[0].1.contains("# Production Notes"));
-        assert_eq!(emit.files[1].0, "Scene_Prompts/Scene1.txt");
-        assert_eq!(emit.summary.as_deref(), Some("Wrote master + 1 sidecar."));
-    }
-
-    #[test]
-    fn parses_workbench_ask() {
-        let reply = "<workbench_ask>
-Which aspect ratio?
-</workbench_ask>
-";
-        let emit = parse_text_specialist_emit(reply);
-        assert_eq!(emit.ask.as_deref(), Some("Which aspect ratio?"));
-        assert!(emit.files.is_empty());
-    }
 }

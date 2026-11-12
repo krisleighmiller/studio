@@ -864,6 +864,7 @@ mod tests {
             voice_ready: true,
             profile_path: None,
             model_sheet_manifest_path: None,
+            reference_asset_ids: Vec::new(),
             profile: Default::default(),
             asset_ids: Vec::new(),
             notes: Vec::new(),

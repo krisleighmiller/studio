@@ -248,12 +248,6 @@ button {
   text-transform: uppercase;
 }
 
-.studio-scene-line {
-  margin: 0 0 10px;
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
 .studio-scene-header {
   margin: 0 0 var(--space-2);
 }
@@ -451,6 +445,12 @@ button {
   background: var(--bg-elevated);
 }
 
+.center-panel-heading {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .chat-panel {
   width: var(--chat-width);
   flex: 0 0 auto;
@@ -589,6 +589,11 @@ button {
   border-radius: 5px;
   color: var(--text-muted);
   background: transparent;
+}
+
+#open-file-btn {
+  width: auto;
+  padding: 0 6px;
 }
 
 .icon-button svg {
@@ -1434,6 +1439,14 @@ button {
   background: rgba(255, 253, 249, 0.7);
 }
 
+.ghost-button.is-working {
+  cursor: progress;
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .empty-state {
   margin: 0;
   padding: 18px 14px;
@@ -2161,9 +2174,39 @@ button {
   display: none;
 }
 
-.chat-panel.inspector-director .director-section,
 .chat-panel.inspector-finish .studio-finish-mount {
   display: flex;
+}
+
+/* Retired embedded workflow stays inert even under legacy inspector classes. */
+#director-section[data-retired="true"] {
+  display: none !important;
+}
+
+.saved-conversations {
+  padding: var(--space-3);
+  overflow: auto;
+}
+
+.saved-conversations[hidden] {
+  display: none;
+}
+
+/* Project state tab: the edit receipt moved from the workspace into the inspector. */
+.chat-panel.inspector-state .studio-finish-mount {
+  display: none;
+}
+
+.studio-state-mount {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-3);
+  background: var(--bg-panel);
+}
+
+.studio-state-mount[hidden] {
+  display: none;
 }
 
 .studio-finish-mount {
@@ -2618,12 +2661,6 @@ button {
   font-weight: 600;
 }
 
-.workflow-look-identity {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
 .workflow-start-frames {
   display: grid;
   gap: 12px;
@@ -2666,6 +2703,10 @@ button {
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--bg-muted);
+}
+
+.workflow-source-controls [hidden] {
+  display: none;
 }
 
 .workflow-start-frame-versions {
@@ -3158,18 +3199,18 @@ button {
   color: var(--text-muted);
 }
 
-.workflow-character-model-sheet-gallery {
+:is(.workflow-character-model-sheet-gallery, .workflow-character-reference-gallery) {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.workflow-character-model-sheet-gallery figure {
+:is(.workflow-character-model-sheet-gallery, .workflow-character-reference-gallery) figure {
   width: 112px;
   margin: 0;
 }
 
-.workflow-character-model-sheet-gallery img {
+:is(.workflow-character-model-sheet-gallery, .workflow-character-reference-gallery) img {
   display: block;
   width: 112px;
   height: 112px;
@@ -3180,7 +3221,7 @@ button {
   cursor: pointer;
 }
 
-.workflow-character-model-sheet-gallery figcaption {
+:is(.workflow-character-model-sheet-gallery, .workflow-character-reference-gallery) figcaption {
   margin-top: 4px;
   overflow-wrap: anywhere;
   color: var(--text-muted);
@@ -3277,25 +3318,30 @@ button {
   font-size: 12px;
 }
 
-.studio-job {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  width: 100%;
+.studio-job-row {
   margin: 0 0 6px;
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg-elevated);
   color: var(--text);
+}
+
+.studio-job {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
   text-align: left;
   cursor: pointer;
 }
 
-.studio-job:disabled {
-  cursor: default;
-  opacity: 0.7;
-}
+.studio-job:disabled { cursor: default; }
+.studio-job-row .studio-job-copy { padding-left: 16px; user-select: text; cursor: text; }
 
 .studio-job-dot {
   flex: 0 0 auto;
@@ -3686,3 +3732,22 @@ button {
     grid-column: auto;
   }
 }
+.image-crop-review { max-width: min(95vw, 960px); max-height: 90vh; overflow: auto; padding: 1.5rem; color: var(--text, #eee); background: var(--surface, #222); border: 1px solid #777; border-radius: 10px; }
+.image-crop-review::backdrop { background: rgb(0 0 0 / .75); }
+.image-crop-previews { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.image-crop-previews img, .image-crop-previews canvas { display: block; max-width: 100%; max-height: 45vh; width: auto; height: auto; object-fit: contain; }
+.image-crop-fields { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
+.image-crop-fields label { display: grid; gap: .25rem; }
+.image-crop-fields input { width: 5rem; }
+.image-crop-review button { margin: .5rem .5rem 0 0; }
+.workflow-edit-receipt {
+  margin: .75rem 0;
+  padding: .75rem 1rem;
+  border: 1px solid var(--border, #777);
+  border-left: 4px solid var(--warning, #b98142);
+  border-radius: .4rem;
+  overflow-wrap: anywhere;
+}
+.workflow-edit-receipt h2 { font-size: 1rem; margin: 0 0 .35rem; }
+.workflow-edit-receipt p { margin: .35rem 0; }
+.workflow-edit-receipt ul { margin: .35rem 0; padding-left: 1.4rem; }

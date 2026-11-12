@@ -5,7 +5,7 @@
 use crate::fs_ops;
 use crate::scene_plan::handoff::CutId;
 use crate::workflow::state::{
-    AssetRecord, AssetRole, AssetStatus, ProjectState, TakeStatus, VisualSourceSpec,
+    AssetRecord, AssetRole, AssetStatus, DependencyState, ProjectState, TakeStatus, VisualSourceSpec,
     VisualSourceStrategy,
 };
 use std::fs;
@@ -31,6 +31,12 @@ pub fn resolve_render_source(
                 cut_id.source_scene, cut_id.cut
             )
         })?;
+    if cut.dependency_state == Some(DependencyState::NeedsReview)
+        && cut.visual_source.as_ref().and_then(|source| source.asset_id.as_deref())
+            .is_some_and(|id| state.asset(id).is_some_and(|asset| asset.status == AssetStatus::Superseded))
+    {
+        return Err(format!("Cut {} references a superseded image. Review and rebind its visual source before preparing video.", cut_id.cut));
+    }
     let Some(source) = &cut.visual_source else {
         return Ok(match &cut.approved_start_frame {
             Some(path) => RenderSourceResolution::Bound(path.clone()),
@@ -117,14 +123,15 @@ pub fn set_strategy(
             let predecessor = predecessor.ok_or_else(|| {
                 "previous-selected-take strategy needs a predecessor cut".to_string()
             })?;
-            if predecessor.source_scene != scene_id {
-                return Err("the predecessor must be in the same scene for this slice".into());
+            let same_scene = predecessor.source_scene == scene_id;
+            if !same_scene && (cut_number != 1 || predecessor.source_scene.checked_add(1) != Some(scene_id)) {
+                return Err("cross-scene predecessor must be the preceding scene's final cut for Cut 1".into());
             }
-            if predecessor.cut >= cut_number {
+            if same_scene && predecessor.cut >= cut_number {
                 return Err("the predecessor must be an earlier cut".into());
             }
             let exists = state
-                .scene(scene_id)
+                .scene(predecessor.source_scene)
                 .is_some_and(|scene| scene.cuts.iter().any(|cut| cut.id == predecessor));
             if !exists {
                 return Err(format!(
@@ -132,13 +139,17 @@ pub fn set_strategy(
                     predecessor.source_scene, predecessor.cut
                 ));
             }
+            if !same_scene && state.scene(predecessor.source_scene)
+                .and_then(|scene| scene.cuts.iter().map(|cut| cut.id.cut).max()) != Some(predecessor.cut) {
+                return Err("cross-scene predecessor must be the preceding scene's final cut".into());
+            }
             source.predecessor = Some(predecessor);
             source.predecessor_shot_id = state
-                .scene(scene_id)
+                .scene(predecessor.source_scene)
                 .and_then(|scene| scene.cuts.iter().find(|cut| cut.id == predecessor))
                 .map(|cut| cut.stable_id.clone())
                 .filter(|id| !id.is_empty());
-            if let Some(existing) = existing.filter(|existing| {
+            if let Some(existing) = existing.clone().filter(|existing| {
                 existing.strategy == strategy && existing.predecessor == Some(predecessor)
             }) {
                 source.asset_id = existing.asset_id;
@@ -168,7 +179,7 @@ pub fn set_strategy(
         }
         VisualSourceStrategy::NoStartFrame => {}
         VisualSourceStrategy::DeferredManual => {
-            if let Some(existing) = existing.filter(|existing| existing.strategy == strategy) {
+            if let Some(existing) = existing.clone().filter(|existing| existing.strategy == strategy) {
                 source.asset_id = existing.asset_id;
                 source.source_take_id = existing.source_take_id;
                 source.frame_time_seconds = existing.frame_time_seconds;
@@ -176,12 +187,21 @@ pub fn set_strategy(
         }
     }
 
+    let old_superseded_id = existing.as_ref().and_then(|old| old.asset_id.as_deref())
+        .filter(|id| state.asset(id).is_some_and(|asset| asset.status == AssetStatus::Superseded));
     let cut = state
         .scenes
         .iter_mut()
         .find(|scene| scene.id == scene_id)
         .and_then(|scene| scene.cuts.iter_mut().find(|cut| cut.id == cut_id))
         .ok_or_else(|| format!("cut {scene_id}.{cut_number} not found"))?;
+    // A new approved source resolves this image revision; simply reselecting
+    // the superseded one cannot dismiss the review flag.
+    let revised_binding = old_superseded_id.is_some()
+        && source.asset_id.as_deref() != old_superseded_id;
+    if revised_binding && cut.dependency_state == Some(DependencyState::NeedsReview) {
+        cut.dependency_state = None;
+    }
     cut.visual_source = Some(source);
     Ok(())
 }
@@ -209,7 +229,7 @@ pub fn bind_selected_exit_frame(
         .filter(|shot_id| !shot_id.is_empty())
     {
         state
-            .scene(scene_id)
+            .scene(predecessor.ok_or_else(|| "the predecessor cut is missing".to_string())?.source_scene)
             .and_then(|scene| scene.cuts.iter().find(|cut| cut.stable_id == shot_id))
             .ok_or_else(|| format!("predecessor shot `{shot_id}` not found"))?
     } else {
@@ -226,6 +246,12 @@ pub fn bind_selected_exit_frame(
             })?
     };
     let predecessor = previous.id;
+    if predecessor.source_scene != scene_id && (cut_number != 1
+        || predecessor.source_scene.checked_add(1) != Some(scene_id)
+        || state.scene(predecessor.source_scene)
+            .and_then(|scene| scene.cuts.iter().map(|cut| cut.id.cut).max()) != Some(predecessor.cut)) {
+        return Err("cross-scene predecessor is no longer the preceding scene's final cut".into());
+    }
     let resolved_shot_id = previous.stable_id.clone();
     let selected = previous.selected_take.as_deref().ok_or_else(|| {
         format!(
@@ -696,6 +722,76 @@ mod tests {
         assert!(!state.scenes[0].cuts[1].visual_source_ready());
         assert_eq!(state.assets.len(), 1);
         assert_eq!(continuity_dependents(&state, 1, 1), Vec::<String>::new());
+    }
+
+    #[test]
+    fn cross_scene_source_is_only_preceding_scene_final_cut_for_cut_one() {
+        let mut state = ProjectState::new();
+        state.scene_mut(1, "First").cut_mut(1).stable_id = "first".into();
+        state.scene_mut(1, "First").cut_mut(2).stable_id = "final".into();
+        state.scene_mut(2, "Second").cut_mut(1).stable_id = "next".into();
+        state.scene_mut(2, "Second").cut_mut(2).stable_id = "later".into();
+        let strategy = VisualSourceStrategy::PreviousSelectedTakeExitFrame;
+        assert!(set_strategy(&mut state, 2, 1, strategy, Some(CutId::new(1, 1)), None).is_err());
+        assert!(set_strategy(&mut state, 2, 2, strategy, Some(CutId::new(1, 2)), None).is_err());
+        assert!(set_strategy(&mut state, 2, 1, strategy, Some(CutId::new(3, 1)), None).is_err());
+        set_strategy(&mut state, 2, 1, strategy, Some(CutId::new(1, 2)), None).unwrap();
+        let source = state.scene(2).unwrap().cuts[0].visual_source.as_ref().unwrap();
+        assert_eq!(source.predecessor_shot_id.as_deref(), Some("final"));
+        assert!(!state.scene(2).unwrap().cuts[0].visual_source_ready());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(bind_selected_exit_frame(dir.path(), &mut state, 2, 1, Some(0.4))
+            .unwrap_err().contains("select a take"));
+    }
+
+    #[test]
+    fn cross_scene_selection_change_invalidates_bound_source() {
+        let mut state = ProjectState::new();
+        let first = state.scene_mut(1, "First").cut_mut(1);
+        first.stable_id = "final".into();
+        first.takes.push(TakeRecord { id: "a".into(), path: "a.mp4".into(), status: TakeStatus::Selected, notes: None });
+        first.takes.push(TakeRecord { id: "b".into(), path: "b.mp4".into(), status: TakeStatus::Alternate, notes: None });
+        first.selected_take = Some("a".into());
+        state.scene_mut(2, "Second").cut_mut(1).stable_id = "next".into();
+        set_strategy(&mut state, 2, 1, VisualSourceStrategy::PreviousSelectedTakeExitFrame,
+            Some(CutId::new(1, 1)), None).unwrap();
+        let source = state.scene_mut(2, "Second").cut_mut(1).visual_source.as_mut().unwrap();
+        source.asset_id = Some("frame".into());
+        source.source_take_id = Some("a".into());
+        assert_eq!(continuity_dependents(&state, 1, 1), vec!["Scene 2 Cut 1"]);
+        assert_eq!(set_take_status(&mut state, 1, 1, "b", TakeStatus::Selected).unwrap(), 1);
+        assert!(state.scene(2).unwrap().cuts[0].visual_source.as_ref().unwrap().asset_id.is_none());
+    }
+
+    #[test]
+    fn binds_previous_scene_final_selected_take_into_successor_scene() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("Scenes/Scene1/Cut2/take.mp4");
+        fs::create_dir_all(video.parent().unwrap()).unwrap();
+        let output = std::process::Command::new("ffmpeg")
+            .args(["-y", "-f", "lavfi", "-i", "color=c=black:s=16x16:r=25",
+                "-t", "1", video.to_str().unwrap()]).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let mut state = ProjectState::new();
+        state.scene_mut(1, "First").cut_mut(1).stable_id = "first".into();
+        let final_cut = state.scene_mut(1, "First").cut_mut(2);
+        final_cut.stable_id = "final".into();
+        final_cut.takes.push(TakeRecord {
+            id: "take_a".into(), path: "Scenes/Scene1/Cut2/take.mp4".into(),
+            status: TakeStatus::Selected, notes: None,
+        });
+        final_cut.selected_take = Some("take_a".into());
+        state.scene_mut(2, "Second").cut_mut(1).stable_id = "next".into();
+        set_strategy(&mut state, 2, 1, VisualSourceStrategy::PreviousSelectedTakeExitFrame,
+            Some(CutId::new(1, 2)), None).unwrap();
+        let path = bind_selected_exit_frame(dir.path(), &mut state, 2, 1, Some(0.4)).unwrap();
+        assert!(dir.path().join(&path).is_file());
+        assert!(path.starts_with("Preproduction/Scene2/continuity_frames/"));
+        let source = state.scene(2).unwrap().cuts[0].visual_source.as_ref().unwrap();
+        assert_eq!(source.predecessor, Some(CutId::new(1, 2)));
+        assert_eq!(source.source_take_id.as_deref(), Some("take_a"));
+        assert_eq!(source.frame_time_seconds, Some(0.4));
+        assert!(state.scene(2).unwrap().cuts[0].visual_source_ready());
     }
 
     #[test]

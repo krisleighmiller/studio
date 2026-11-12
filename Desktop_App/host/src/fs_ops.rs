@@ -3,6 +3,7 @@
 use serde::Serialize;
 use serde_json::json;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[derive(Debug, Serialize)]
@@ -165,6 +166,263 @@ pub fn write_text_file(path: String, contents: String) -> Result<(), String> {
         }
     }
     fs::write(&path, contents).map_err(|error| format!("Could not write file: {error}"))
+}
+
+fn validate_script(filename: &str, text: &str) -> Result<(), String> {
+    if filename.is_empty()
+        || filename != filename.trim()
+        || filename.contains(['/', '\\', '\0', '\n', '\r', ':'])
+        || Path::new(filename).file_name().and_then(|name| name.to_str()) != Some(filename)
+    {
+        return Err("Use a filename only, without directories or traversal.".into());
+    }
+    let extension = Path::new(filename).extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    if !matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown" | "txt") {
+        return Err("Choose a .md, .markdown, or .txt script filename.".into());
+    }
+    if text.trim().is_empty() {
+        return Err("Script text must not be empty.".into());
+    }
+    if crate::script::extract_scenes(text).is_empty() {
+        return Err("Script must contain parseable Scene N headings.".into());
+    }
+    Ok(())
+}
+
+/// Save validated local script text without replacing any existing file.
+pub fn save_project_script(root: &Path, filename: &str, text: &str) -> Result<String, String> {
+    use crate::project_path::{relative_to_root, resolve, PathIntent};
+    use std::io::Write;
+
+    validate_script(filename, text)?;
+    let root_string = root.to_str().ok_or("Invalid project root")?;
+    let scripts = resolve("Scripts", Some(root_string), PathIntent::Write)
+        .map_err(|error| error.to_string())?.into_path_buf();
+    fs::create_dir_all(&scripts).map_err(|error| format!("Could not create Scripts: {error}"))?;
+    // Recheck after creation; never accept a Scripts redirect, even inside the project.
+    let scripts = resolve("Scripts", Some(root_string), PathIntent::Write)
+        .map_err(|error| error.to_string())?.into_path_buf();
+    let relative = format!("Scripts/{filename}");
+    let target = resolve(&relative, Some(root_string), PathIntent::Write)
+        .map_err(|error| error.to_string())?.into_path_buf();
+    if target.parent() != Some(scripts.as_path()) || relative_to_root(root, &target)? != Path::new(&relative) {
+        return Err("Script destination must be directly inside Scripts/.".into());
+    }
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&target)
+        .map_err(|error| format!("Could not save script (existing files are never replaced): {error}"))?;
+    if let Err(error) = file.write_all(text.as_bytes()).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(&target);
+        return Err(format!("Could not write script: {error}"));
+    }
+    Ok(relative)
+}
+
+/// Save the exact UTF-8 notes text to the fixed project-root Notes.md file.
+pub fn save_project_notes(root: &Path, text: &str) -> Result<String, String> {
+    use crate::project_path::{relative_to_root, resolve, PathIntent};
+
+    let root_string = root.to_str().ok_or("Invalid project root")?;
+    let relative = Path::new("Notes.md");
+    let target = resolve("Notes.md", Some(root_string), PathIntent::Write)
+        .map_err(|error| error.to_string())?
+        .into_path_buf();
+    if relative_to_root(root, &target)? != relative {
+        return Err("Notes destination must be the project-root Notes.md file.".into());
+    }
+    // Recheck the fixed target immediately before writing. A Notes.md symlink
+    // must be refused rather than followed, even when it points back inside.
+    let rechecked = resolve("Notes.md", Some(root_string), PathIntent::Write)
+        .map_err(|error| error.to_string())?
+        .into_path_buf();
+    if rechecked != target || relative_to_root(root, &rechecked)? != relative {
+        return Err("Notes destination changed before it could be saved.".into());
+    }
+    let temp_relative = Path::new("Notes.md.tmp");
+    let temp = resolve("Notes.md.tmp", Some(root_string), PathIntent::Write)
+        .map_err(|error| error.to_string())?
+        .into_path_buf();
+    if temp.parent() != target.parent() || relative_to_root(root, &temp)? != temp_relative {
+        return Err("Notes temporary file must stay beside project-root Notes.md.".into());
+    }
+    write_notes_then_replace(&target, &temp, text, |from, to| {
+        // Recheck at the replacement boundary so a redirected destination is
+        // refused after the temporary file is safely on disk as well.
+        let final_target = resolve("Notes.md", Some(root_string), PathIntent::Write)
+            .map_err(|error| error.to_string())?
+            .into_path_buf();
+        if final_target != target || relative_to_root(root, &final_target)? != relative {
+            return Err("Notes destination changed before it could be replaced.".into());
+        }
+        fs::rename(from, to).map_err(|error| format!("Could not replace Notes.md: {error}"))
+    })?;
+    Ok("Notes.md".into())
+}
+
+fn write_notes_then_replace<F>(
+    target: &Path,
+    temp: &Path,
+    text: &str,
+    replace: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path, &Path) -> Result<(), String>,
+{
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(temp)
+            .map_err(|error| format!("Could not write Notes.md temporary file: {error}"))?;
+        file.write_all(text.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("Could not sync Notes.md temporary file: {error}"))?;
+        drop(file);
+        replace(temp, target)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
+/// Ingest a local script through the shared saver; never import workflow state.
+pub fn ingest_script_file(root: &Path, source_path: &str, source_kind: &str) -> Result<String, String> {
+    use crate::project_path::{resolve, PathIntent};
+
+    let root_string = root.to_str().ok_or("Invalid project root")?;
+    let source = match source_kind {
+        "existing-project-file" => resolve(source_path, Some(root_string), PathIntent::Read)
+            .map_err(|error| error.to_string())?.into_path_buf(),
+        "external-import" => crate::session::authorize(source_path, PathIntent::Read)?,
+        _ => return Err("Choose external-import or existing-project-file.".into()),
+    };
+    let filename = source.file_name().and_then(|name| name.to_str()).ok_or("Invalid script filename")?;
+    let text = read_text_file(source.to_string_lossy().into_owned())?;
+    validate_script(filename, &text)?;
+    let scripts = resolve("Scripts", Some(root_string), PathIntent::Write)
+        .map_err(|error| error.to_string())?.into_path_buf();
+    if crate::project_path::relative_to_root(root, &scripts)? != Path::new("Scripts") {
+        return Err("Script destination must be inside Scripts/.".into());
+    }
+    if source.starts_with(&scripts) {
+        return Ok(crate::project_path::relative_to_root(root, &source)?.to_string_lossy().into_owned());
+    }
+    let relative = format!("Scripts/{filename}");
+    let target = resolve(&relative, Some(root_string), PathIntent::Write)
+        .map_err(|error| error.to_string())?.into_path_buf();
+    if target.parent() != Some(scripts.as_path()) {
+        return Err("Script destination must be directly inside Scripts/.".into());
+    }
+    if fs::read(&target).map(|bytes| bytes == text.as_bytes()).unwrap_or(false) {
+        return Ok(relative);
+    }
+    save_project_script(root, filename, &text)
+}
+
+/// Acquire bytes only: reference selection and identity readiness belong to callers.
+/// The returned project-relative asset path is stable across identical acquisitions.
+pub fn ingest_character_reference_image(
+    root: &Path,
+    character_dir: &str,
+    source_path: &str,
+) -> Result<(String, bool), String> {
+    use crate::project_path::{relative_to_root, resolve, PathIntent};
+    use std::io::{Read, Write};
+    use std::path::Component;
+    use std::process::Stdio;
+
+    let root = root.canonicalize().map_err(|e| format!("Project root: {e}"))?;
+    let root_string = root.to_str().ok_or("Invalid project root")?;
+    let requested = Path::new(character_dir);
+    let relative = if requested.is_absolute() {
+        requested.strip_prefix(&root).map_err(|_| "Character directory is outside the project")?
+    } else {
+        requested
+    };
+    let parts: Vec<_> = relative.components().collect();
+    if parts.len() != 2 || parts[0] != Component::Normal("Characters".as_ref())
+        || !matches!(parts[1], Component::Normal(_)) || character_dir.contains('\\') {
+        return Err("Choose a character directory directly inside Characters/.".into());
+    }
+    let character = resolve(character_dir, Some(root_string), PathIntent::Write)
+        .map_err(|e| e.to_string())?.into_path_buf();
+    if relative_to_root(&root, &character)? != relative || !character.is_dir() {
+        return Err("Character directory must exist and cannot redirect to another directory.".into());
+    }
+    let bucket_relative = relative.join("refs");
+    let bucket_raw = bucket_relative.to_str().ok_or("Invalid character directory")?;
+    let bucket = resolve(bucket_raw, Some(root_string), PathIntent::Write)
+        .map_err(|e| e.to_string())?.into_path_buf();
+    if relative_to_root(&root, &bucket)? != bucket_relative {
+        return Err("Reference destination must be the character's refs directory.".into());
+    }
+
+    let source = crate::session::authorize(source_path, PathIntent::Read)?;
+    if !source.is_file() {
+        return Err("Reference image must be a readable file.".into());
+    }
+    let filename = source.file_name().and_then(|n| n.to_str()).ok_or("Invalid image filename")?;
+    let extension = source.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let format = match extension.as_str() {
+        "png" => "png_pipe",
+        "jpg" | "jpeg" => "jpeg_pipe",
+        _ => return Err("Choose a PNG or JPEG reference image.".into()),
+    };
+    const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    fs::File::open(&source).map_err(|e| format!("Could not read image: {e}"))?
+        .take(MAX_IMAGE_BYTES + 1).read_to_end(&mut bytes)
+        .map_err(|e| format!("Could not read image: {e}"))?;
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err("Reference image exceeds 32 MiB.".into());
+    }
+    let signature_ok = if extension == "png" {
+        bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.ends_with(b"\0\0\0\0IEND\xaeB`\x82")
+    } else {
+        bytes.starts_with(&[0xff, 0xd8, 0xff]) && bytes.ends_with(&[0xff, 0xd9])
+    };
+    if !signature_ok {
+        return Err("Invalid or truncated PNG/JPEG image.".into());
+    }
+    // Decode the exact snapshot we copy, not a second read of a mutable source.
+    // A forced image demuxer and pipe-only protocol cannot open remote/local links.
+    let mut decoder = Command::new("ffmpeg")
+        .args(["-v", "error", "-nostdin", "-xerror", "-err_detect", "explode",
+            "-protocol_whitelist", "pipe", "-f", format, "-i", "pipe:0",
+            "-map", "0:v:0", "-f", "null", "-"])
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|e| format!("Could not validate image with ffmpeg: {e}"))?;
+    let sent = decoder.stdin.take().ok_or("Missing image decoder input")?.write_all(&bytes);
+    let decoded = decoder.wait().map_err(|e| format!("Could not validate image: {e}"))?;
+    if sent.is_err() || !decoded.success() {
+        return Err("Corrupt or undecodable reference image.".into());
+    }
+
+    fs::create_dir_all(&bucket).map_err(|e| format!("Could not create references: {e}"))?;
+    let bucket = resolve(bucket_raw, Some(root_string), PathIntent::Write)
+        .map_err(|e| e.to_string())?.into_path_buf();
+    let asset_relative = bucket_relative.join(filename);
+    let asset_raw = asset_relative.to_str().ok_or("Invalid image filename")?;
+    let target = resolve(asset_raw, Some(root_string), PathIntent::Write)
+        .map_err(|e| e.to_string())?.into_path_buf();
+    if relative_to_root(&root, &bucket)? != bucket_relative
+        || target.parent() != Some(bucket.as_path())
+        || relative_to_root(&root, &target)? != asset_relative {
+        return Err("Reference destination escaped the character's refs directory.".into());
+    }
+    if fs::read(&target).map(|existing| existing == bytes).unwrap_or(false) {
+        return Ok((asset_raw.to_owned(), false));
+    }
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&target)
+        .map_err(|e| format!("Could not acquire reference (existing files are never replaced): {e}"))?;
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(&target);
+        return Err(format!("Could not copy reference image: {error}"));
+    }
+    Ok((asset_raw.to_owned(), true))
 }
 
 pub fn create_file(path: String) -> Result<(), String> {
@@ -614,48 +872,36 @@ pub fn pad_audio_handles(
     head_ms: u64,
     tail_seconds: f64,
 ) -> Result<(), String> {
-    let input = path_from_str(input_path)?;
-    let output = path_from_str(output_path)?;
-    if !input.is_file() {
-        return Err(format!("Not an audio file: {}", input.display()));
+    use std::{io::Write, time::{Duration, Instant}};
+    use crate::project_path::{self, PathIntent};
+    let root = crate::session::command_root(None)?;
+    if !tail_seconds.is_finite() || !(0.0..=120.0).contains(&tail_seconds) || head_ms > 120_000 {
+        return Err("Audio handles must be finite and at most 120 seconds".into());
     }
-    if let Some(parent) = output.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("Could not create parent dirs: {error}"))?;
-        }
+    let input = project_path::resolve(input_path, root.to_str(), PathIntent::Read).map_err(|e|e.to_string())?.into_path_buf();
+    let output = project_path::resolve(output_path, root.to_str(), PathIntent::Write).map_err(|e|e.to_string())?.into_path_buf();
+    let rel = project_path::relative_to_root(&root, &input)?.to_string_lossy().replace('\\', "/");
+    let parts: Vec<_> = rel.split('/').collect();
+    if parts.len()!=4 || parts[0]!="Scenes" || !parts[1].starts_with("Scene") || !parts[2].starts_with("Cut")
+        || input.parent()!=output.parent() || !input.is_file()
+        || !input.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+        || !output.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+        || fs::symlink_metadata(output_path).is_ok() || output.exists() {
+        return Err("Padded WAV requires an unoccupied destination in the exact performance shot bucket".into());
     }
-    let input_s = input
-        .to_str()
-        .ok_or_else(|| "Input path is not valid UTF-8".to_string())?;
-    let output_s = output
-        .to_str()
-        .ok_or_else(|| "Output path is not valid UTF-8".to_string())?;
-
-    let filter = if tail_seconds > 0.0 {
-        format!("adelay={head_ms}|{head_ms},apad=pad_dur={tail_seconds}")
-    } else {
-        format!("adelay={head_ms}|{head_ms}")
-    };
-
-    let status = Command::new("ffmpeg")
-        .args(["-y", "-i", input_s, "-af", &filter, output_s])
-        .output()
-        .map_err(|error| format!("Could not run ffmpeg (is it on PATH?): {error}"))?;
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        return Err(format!(
-            "ffmpeg audio pad failed for {}: {stderr}",
-            input.display()
-        ));
-    }
-    if !output.is_file() {
-        return Err(format!(
-            "ffmpeg reported success but padded audio missing: {}",
-            output.display()
-        ));
-    }
-    Ok(())
+    let filter = format!("adelay={head_ms}|{head_ms},apad=pad_dur={tail_seconds}");
+    let mut command = Command::new("ffmpeg");
+    command.args(["-nostdin","-v","error","-xerror","-err_detect","explode","-protocol_whitelist","file","-format_whitelist","wav","-f","wav","-i"])
+        .arg(&input).args(["-map","0:a:0","-vn","-map_metadata","-1","-af",&filter,"-c:a","pcm_s16le","-f","wav","pipe:1"]);
+    let (mut wav, _) = crate::media_inspect::run_bounded(&mut command, Instant::now()+Duration::from_secs(60),128*1024*1024)?;
+    crate::workflow::audio_edit::finalize_pcm_wav(&mut wav)?;
+    // Revalidate before exclusive creation. FFmpeg never opens the destination,
+    // so an occupied file or symlink cannot be overwritten through `-y`.
+    let rechecked = project_path::resolve(output_path, root.to_str(), PathIntent::Write).map_err(|e|e.to_string())?.into_path_buf();
+    if rechecked != output {return Err("Padded WAV destination changed".into());}
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&output)
+        .map_err(|e|format!("Cannot reserve padded WAV without overwriting: {e}"))?;
+    file.write_all(&wav).and_then(|_|file.sync_all()).map_err(|e|format!("Cannot save padded WAV: {e}"))
 }
 
 /// Pad/letterbox a still into a 1080×1920 (9:16) talking still. Does not overwrite `input_path`.
@@ -696,6 +942,34 @@ pub fn ensure_talking_still_9x16(input_path: &str, output_path: &str) -> Result<
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod notes_tests {
+    use super::*;
+
+    #[test]
+    fn notes_file_atomic_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let target = root.join("Notes.md");
+        let temp = root.join("Notes.md.tmp");
+        let original = b"prior notes remain intact\n";
+        fs::write(&target, original).unwrap();
+
+        let result = write_notes_then_replace(
+            &target,
+            &temp,
+            "replacement must not be reported as saved\n",
+            |_, _| Err("forced final replacement failure".into()),
+        );
+
+        let error = result.expect_err("failed replacement must not report success");
+        assert_eq!(error, "forced final replacement failure");
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert!(!temp.exists(), "failed replacement must clean its temporary file");
+    }
 }
 
 #[cfg(test)]

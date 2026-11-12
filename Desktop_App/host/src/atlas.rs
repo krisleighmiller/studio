@@ -749,38 +749,131 @@ fn remap_params_to_schema(
     out
 }
 
+const IMAGE_INPUT_KEYS: &[&str] = &[
+    "image_urls",
+    "images",
+    "media_files",
+    "image",
+    "image_url",
+    "reference_image",
+    "reference_images",
+    "start_image",
+    "start_image_url",
+    "starting_visual_input",
+];
+
+fn image_reference_urls(model: &str, params: &Map<String, Value>) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for key in IMAGE_INPUT_KEYS {
+        let Some(value) = params.get(*key) else {
+            continue;
+        };
+        if value.is_null() || value.as_str() == Some("") {
+            continue;
+        }
+        let items = match value {
+            Value::Array(items) => items.clone(),
+            other => vec![other.clone()],
+        };
+        let mut local = Vec::new();
+        for item in items {
+            let raw = item.as_str().map(str::to_string).or_else(|| item.as_object().map(|_| item.to_string()));
+            let url = raw.as_deref().and_then(coerce_media_url)
+                .ok_or_else(|| reference_error(model, "selected image inputs include an unusable URL"))?;
+            local.push(url.clone());
+            // Deduplicate shotgun aliases, not repeated entries inside one list.
+            let required = local.iter().filter(|u| **u == url).count();
+            if out.iter().filter(|u| **u == url).count() < required { out.push(url); }
+        }
+    }
+    Ok(out)
+}
+
+fn has_image_input(params: &Map<String, Value>) -> bool {
+    IMAGE_INPUT_KEYS.iter().any(|key| params.get(*key).is_some_and(|v| {
+        !v.is_null() && v.as_str() != Some("") && v.as_array().is_none_or(|a| !a.is_empty())
+    }))
+}
+
+fn reference_error(model: &str, reason: &str) -> String {
+    format!("HOST PRE-SUBMIT VALIDATION: reference images cannot be delivered to `{model}`: {reason}. No generation submitted. Choose an image-input model in Settings → Image → Character reference (or Focused edit); the selected model was not changed. For text-only generation, explicitly remove references and use Text to image.")
+}
+
+fn load_input_schema(model: &str) -> Result<Value, String> {
+    let entry = find_model_entry(model)?;
+    let url = entry.get("schema").and_then(Value::as_str)
+        .ok_or_else(|| "model has no input schema".to_string())?;
+    serde_json::from_str(&fetch_text(url)?).map_err(|_| "invalid input schema".to_string())
+}
+
+/// A single schema field must carry the whole ordered reference set. Never split
+/// extra references across unrelated singular roles (e.g. start/end frames).
+fn reference_field<'a>(props: &'a Map<String, Value>, count: usize) -> Option<(&'a str, bool)> {
+    for key in IMAGE_INPUT_KEYS {
+        let Some(prop) = props.get(*key) else { continue };
+        match prop.get("type").and_then(Value::as_str) {
+            Some("array") if prop.pointer("/items/type").and_then(Value::as_str) == Some("string")
+                && prop.get("minItems").and_then(Value::as_u64).is_none_or(|n| count as u64 >= n)
+                && prop.get("maxItems").and_then(Value::as_u64).is_none_or(|n| count as u64 <= n) => return Some((key, true)),
+            Some("string") if count == 1 => return Some((key, false)),
+            _ => {},
+        }
+    }
+    None
+}
+
+pub fn preflight_image_references(model: &str, count: usize) -> Result<(), String> {
+    if count == 0 { return Ok(()) }
+    let schema = load_input_schema(model)
+        .map_err(|_| reference_error(model, "input schema unavailable or unknown"))?;
+    check_reference_capacity(model, &schema, count)
+}
+
+fn check_reference_capacity(model: &str, schema: &Value, count: usize) -> Result<(), String> {
+    let props = input_schema_props(schema)
+        .ok_or_else(|| reference_error(model, "input schema unavailable or unknown"))?;
+    reference_field(props, count)
+        .ok_or_else(|| reference_error(model, "schema has no supported image field with capacity for all selected references"))?;
+    Ok(())
+}
+
 fn normalize_generate_params(model: &str, params: &Value) -> Result<Value, String> {
-    let obj = params
-        .as_object()
-        .ok_or_else(|| "params must be a JSON object".to_string())?;
-    let entry = match find_model_entry(model) {
-        Ok(entry) => entry,
-        Err(error) => {
-            eprintln!("workbench-host: skip param remap for {model}: {error}");
-            return Ok(params.clone());
-        }
-    };
-    let Some(schema_url) = entry.get("schema").and_then(|v| v.as_str()) else {
-        return Ok(params.clone());
-    };
-    let raw = match fetch_text(schema_url) {
-        Ok(raw) => raw,
-        Err(error) => {
-            eprintln!("workbench-host: skip param remap (schema fetch failed): {error}");
-            return Ok(params.clone());
-        }
-    };
-    let schema: Value = match serde_json::from_str(&raw) {
+    let obj = params.as_object().ok_or_else(|| "params must be a JSON object".to_string())?;
+    let requested = has_image_input(obj);
+    let schema = match load_input_schema(model) {
         Ok(schema) => schema,
-        Err(error) => {
-            eprintln!("workbench-host: skip param remap (parse failed): {error}");
-            return Ok(params.clone());
-        }
+        Err(_) if requested => return Err(reference_error(model, "input schema unavailable or unknown")),
+        Err(_) => return Ok(params.clone()),
     };
     let Some(props) = input_schema_props(&schema) else {
-        return Ok(params.clone());
+        return if requested { Err(reference_error(model, "input schema unavailable or unknown")) } else { Ok(params.clone()) };
     };
-    Ok(Value::Object(remap_params_to_schema(obj, props)))
+    let mut out = remap_params_to_schema(obj, props);
+    if requested {
+        let urls = image_reference_urls(model, obj)?;
+        if urls.is_empty() { return Err(reference_error(model, "selected image inputs are not usable URLs")) }
+        check_reference_capacity(model, &schema, urls.len())?;
+        let (key, array) = reference_field(props, urls.len()).unwrap();
+        out.insert(key.to_string(), if array { json!(urls) } else { json!(urls[0]) });
+    }
+    Ok(Value::Object(out))
+}
+
+/// Last guard on the actual POST body, after all alias/schema normalization.
+fn verify_reference_delivery(model: &str, original: &Value, body: &Value) -> Result<(), String> {
+    let original = original.as_object().ok_or("params must be a JSON object")?;
+    if !has_image_input(original) { return Ok(()) }
+    let expected = image_reference_urls(model, original)?;
+    let body = body.as_object().ok_or("params must be a JSON object")?;
+    let delivered = IMAGE_INPUT_KEYS.iter().any(|key| {
+        match body.get(*key) {
+            Some(Value::Array(items)) => !expected.is_empty() && *items == expected.iter().map(|s| json!(s)).collect::<Vec<_>>(),
+            Some(Value::String(s)) => expected.len() == 1 && *s == expected[0],
+            _ => false,
+        }
+    });
+    if !delivered { return Err(reference_error(model, "final request would lose or reorder references")) }
+    Ok(())
 }
 
 /// Returns Ok(None) when schema could not be loaded (caller may still submit).
@@ -865,9 +958,10 @@ fn generate_media(
         return Err("model is required".into());
     }
     // Remap aliases → schema fields and drop unsupported keys before validate/submit.
+    let original_params = params;
     let params = normalize_generate_params(model, params)?;
-    // Hard-fail only on definite param mistakes. If catalog/schema is unreachable,
-    // still submit — Atlas validates server-side.
+    // Text-only requests retain server-side fallback when schema discovery is
+    // unavailable. Reference requests already require a known compatible schema.
     let _ = validate_generate_params(model, &params)?;
 
     let mut body = match params {
@@ -878,6 +972,7 @@ fn generate_media(
         obj.insert("model".into(), Value::String(model.to_string()));
     }
 
+    verify_reference_delivery(model, original_params, &body)?;
     let parsed = auth_post_json(
         api_key,
         &format!("{}/model/{endpoint}", api_base()?),
@@ -1169,6 +1264,7 @@ pub fn collect_media(
         "jpg" | "jpeg" | "png" | "webp" | "mp4" | "webm" | "mov" | "wav" | "mp3" | "m4a" | "ogg"
     );
     if swappable
+        && !matches!(dest_ext.as_str(), "png" | "jpg" | "jpeg" | "webp")
         && !dest_ext.is_empty()
         && dest_ext != url_ext
         && !(dest_ext == "jpg" && url_ext == "jpeg")
@@ -1334,8 +1430,7 @@ pub fn download_atlas_media(
                 .to_string());
             }
         }
-        // Empty leftover from a failed prior attempt — replace it.
-        let _ = fs::remove_file(&path);
+        return Err(format!("Destination already exists: {}", path.display()));
     }
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -1355,22 +1450,30 @@ pub fn download_atlas_media(
         let text = response.text().unwrap_or_default();
         return Err(format!("Download failed ({status}): {text}"));
     }
-    let tmp = path.with_extension(format!(
-        "{}.partial",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("bin")
-    ));
+    let tmp = tempfile::NamedTempFile::new_in(path.parent().ok_or("Invalid destination")?)
+        .map_err(|error| format!("Could not create temporary download: {error}"))?;
     let written = crate::http_util::write_response_limited(
         response,
-        &tmp,
+        tmp.path(),
         crate::http_util::max_download_bytes(),
     )?;
     if written == 0 {
-        let _ = fs::remove_file(&tmp);
         return Err("Download returned empty body".into());
     }
-    fs::rename(&tmp, &path).map_err(|error| {
-        let _ = fs::remove_file(&tmp);
-        format!("Could not finalize {}: {error}", path.display())
+    let path = if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+        use std::io::Read;
+        let mut header = [0u8; 12];
+        let mut file = fs::File::open(tmp.path()).map_err(|e| e.to_string())?;
+        let n = file.read(&mut header).map_err(|e| e.to_string())?;
+        let detected = crate::media_util::detected_image_extension(&header[..n])
+            .filter(|e| matches!(*e, "png" | "jpg" | "webp"))
+            .ok_or("Downloaded image has unsupported or unrecognized contents")?;
+        if detected == "jpg" && ext == "jpeg" { path } else { path.with_extension(detected) }
+    } else {
+        path
+    };
+    tmp.persist_noclobber(&path).map_err(|error| {
+        format!("Could not finalize {} without overwriting: {}", path.display(), error.error)
     })?;
     let meta = fs::metadata(&path).map_err(|error| format!("Saved but could not stat: {error}"))?;
     if meta.len() == 0 {
@@ -1669,9 +1772,44 @@ pub fn run_atlas_tool(
     }
 }
 
+#[cfg(all(test, feature = "mock-provider"))]
+static MOCK_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(all(test, feature = "mock-provider"))]
+#[path = "atlas_reference_delivery_tests.rs"]
+mod reference_delivery_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "mock-provider")]
+    #[test]
+    fn downloaded_jpeg_uses_its_real_extension() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = dir.path().join("fixture.jpg");
+        assert!(std::process::Command::new("ffmpeg").args(["-v", "error", "-f", "lavfi", "-i", "color=red:s=32x48", "-frames:v", "1", "-threads", "1"]).arg(&fixture).status().unwrap().success());
+        let jpeg = fs::read(&fixture).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = jpeg.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: image/png\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let result = download_atlas_media(&format!("http://{addr}/output.png?token=abc"), "wardrobe.png", Some(dir.path().to_str().unwrap()), None).unwrap();
+        server.join().unwrap();
+        let value: Value = serde_json::from_str(&result).unwrap();
+        let path = Path::new(value["path"].as_str().unwrap());
+        assert_eq!(path.extension().unwrap(), "jpg");
+        assert_eq!(fs::read(path).unwrap(), jpeg);
+        assert!(!dir.path().join("wardrobe.png").exists());
+        crate::media_util::ensure_media_file_as(path, crate::media_util::MediaRole::Image).unwrap();
+    }
 
     #[cfg(not(feature = "mock-provider"))]
     #[test]
@@ -1688,6 +1826,7 @@ mod tests {
     #[cfg(feature = "mock-provider")]
     #[test]
     fn mock_build_base_url_validation() {
+        let _lock = MOCK_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // One test: env-var mutation must not race parallel test threads.
         std::env::remove_var("WORKBENCH_ATLAS_BASE_URL");
         assert!(api_base().is_err(), "missing mock base must fail closed");
@@ -1750,6 +1889,18 @@ mod tests {
         assert!(!download_url_allowed("http://user:pw@127.0.0.1:8792/out.png"));
         assert!(!download_url_allowed("http://127.0.0.256/out.png"));
         assert!(!download_url_allowed("ftp://127.0.0.1/out.png"));
+    }
+
+    #[test]
+    fn final_reference_wire_guard_refuses_loss_reorder_and_partial_delivery() {
+        let original = json!({"images":["https://fixture.invalid/z?sig=secret-synthetic", "https://fixture.invalid/a"]});
+        for body in [json!({"prompt":"text only"}), json!({"images":["https://fixture.invalid/a","https://fixture.invalid/z?sig=secret-synthetic"]}), json!({"image":"https://fixture.invalid/z?sig=secret-synthetic"})] {
+            let error = verify_reference_delivery("fixture/model", &original, &body).unwrap_err();
+            assert!(!error.contains("secret-synthetic"));
+            assert!(!error.contains("fixture.invalid"));
+        }
+        assert!(verify_reference_delivery("fixture/model", &original, &original).is_ok());
+        assert!(verify_reference_delivery("fixture/model", &json!({"prompt":"only text"}), &json!({"prompt":"only text"})).is_ok());
     }
 
     #[test]

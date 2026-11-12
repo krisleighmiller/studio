@@ -221,7 +221,7 @@ export function buildNotesModel(input: {
     status: cuts === 0 ? "empty" : notes === cuts ? "ready" : "missing",
     tone: cuts === 0 ? "empty" : notes ? "ready" : "missing",
     banner:
-      "Build complete moving-image prompts from the script, scene intent, ordered cut sketches, dialogue, approved scene references, and each cut’s approved visual source. Use this after planning or reference images change.",
+      "Build a production prompt from the script, sketch and dialogue. Approved references are included when available, but separate prop images are not required to write the prompt.",
     emptyTitle: cuts === 0 ? "No cuts to write notes for." : null,
     emptyDetail: cuts === 0 ? "Draft cut sketches before building production notes." : null,
     busy: input.busy,

@@ -1,0 +1,50 @@
+use std::fs;
+use serde_json::json;
+use workbench_host::workflow::{import::{import_project, persist_state, ImportOptions}, state::{CutSketch, SketchDialogue}};
+
+#[test]
+fn shortened_scene_three_keeps_cut_work_and_requires_explicit_review() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let app = workbench_host::ctx::HostCtx::new(root.join("settings"));
+    let recorder = workbench_host::voice::RecorderState::new();
+    workbench_host::dispatch(&app, &recorder, "open_project", &json!({"path":root})).unwrap();
+    fs::create_dir(root.join("Scripts")).unwrap();
+    let source = root.join("Scripts/B.md");
+    fs::write(&source, "Scene 3 — Kitchen\n- **Dialogue:**\n  - **MARA:** A longer original line.").unwrap();
+    let mut state = import_project(root, ImportOptions { persist: true }).unwrap().state;
+    workbench_host::workflow::identity::add_alternate_shot(&mut state, 3).unwrap();
+    let cut = &mut state.scene_mut(3, "").cuts[0];
+    cut.dialogue = vec![workbench_host::script::DialogueLine { speaker: "MARA".into(), text: "Production cue unchanged".into() }];
+    cut.sketch = Some(CutSketch { dialogue: vec![SketchDialogue {speaker: "MARA".into(), text: "Authored sketch remains".into(), heard_as: None}], ..Default::default() });
+    let id = cut.stable_id.clone();
+    persist_state(root, &state).unwrap();
+    fs::write(&source, "Scene 3 — Kitchen\n- **Dialogue:**\n  - **MARA:** Short.").unwrap();
+    let updated = import_project(root, ImportOptions { persist: true }).unwrap().state;
+    let scene = updated.scene(3).unwrap();
+    assert_eq!(scene.source_path.as_deref(), Some("Scripts/B.md"));
+    assert_eq!(scene.dialogue[0].text, "Short.");
+    let review = scene.script_dialogue_review.as_ref().unwrap();
+    assert_eq!(review.previous[0].text, "A longer original line.");
+    assert_eq!(review.current[0].text, "Short.");
+    let cut = &scene.cuts[0];
+    assert_eq!(cut.stable_id, id);
+    assert_eq!(cut.dialogue[0].text, "Production cue unchanged");
+    assert_eq!(cut.sketch.as_ref().unwrap().dialogue[0].text, "Authored sketch remains");
+    assert_eq!(cut.script_dialogue_review.as_ref(), Some(review));
+    let reopened = import_project(root, ImportOptions { persist: true }).unwrap().state;
+    assert_eq!(reopened.scene(3).unwrap().cuts[0].script_dialogue_review.as_ref(), Some(review));
+    assert!(workbench_host::dispatch(&app, &recorder, "workflow_resolve_script_dialogue", &json!({"projectRoot":root,"sceneId":2,"shotId":id,"choice":"keep"})).is_err());
+    assert!(workbench_host::dispatch(&app, &recorder, "workflow_resolve_script_dialogue", &json!({"projectRoot":root,"sceneId":3,"shotId":"wrong","choice":"keep"})).is_err());
+    workbench_host::dispatch(&app, &recorder, "workflow_resolve_script_dialogue", &json!({"projectRoot":root,"sceneId":3,"shotId":id,"choice":"keep"})).unwrap();
+    assert!(workbench_host::dispatch(&app, &recorder, "workflow_resolve_script_dialogue", &json!({"projectRoot":root,"sceneId":3,"shotId":id,"choice":"keep"})).is_err());
+    let kept = import_project(root, ImportOptions { persist: true }).unwrap().state;
+    assert!(kept.scene(3).unwrap().script_dialogue_review.is_none());
+    assert!(kept.scene(3).unwrap().cuts[0].script_dialogue_review.is_none());
+    assert_eq!(kept.scene(3).unwrap().cuts[0].script_dialogue_kept.as_ref(), Some(&kept.scene(3).unwrap().dialogue));
+    assert_eq!(kept.scene(3).unwrap().cuts[0].dialogue[0].text, "Production cue unchanged");
+    fs::write(&source, "Scene 3 — Kitchen\n- **Dialogue:**\n  - **MARA:** Shorter.").unwrap();
+    let again = import_project(root, ImportOptions { persist: true }).unwrap().state;
+    assert!(again.scene(3).unwrap().cuts[0].script_dialogue_kept.is_none());
+    assert_eq!(again.scene(3).unwrap().cuts[0].script_dialogue_review.as_ref().unwrap().current[0].text, "Shorter.");
+}

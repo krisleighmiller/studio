@@ -149,6 +149,7 @@ function lookModel(partial: Partial<SceneLookModel> = {}): SceneLookModel {
   return {
     title: "Scene 1 — The Last Train",
     counts: "2 slots · 1 approved",
+    affectedCuts: [],
     warnings: [],
     blockers: [],
     narrativePurpose: "Kath leaves on the 11:40, unnoticed.",
@@ -450,15 +451,15 @@ describe("jobs output link (FA-4)", () => {
     // Drawer state is module-level; make opening this test order-independent.
     if (!jobsDrawerOpen()) toggleJobsDrawer();
 
-    const row = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Review export ready"),
+    const row = Array.from(container.querySelectorAll<HTMLElement>(".studio-job-row")).find((item) =>
+      item.textContent?.includes("Review export ready"),
     );
     expect(row).toBeTruthy();
     // Truthful lifecycle metadata reaches the row: real start, real progress,
     // and an elapsed time computed from actual timestamps — not "unknown".
     expect(row?.textContent).toContain("Progress Review export ready");
     expect(row?.textContent).not.toContain("time unknown");
-    row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    row?.querySelector<HTMLButtonElement>("button.studio-job")?.click();
     expect(opened).toEqual(["/projects/Lite/Final/Scene1_master.mp4"]);
     container.remove();
     hostMock.invoke.mockReset();
@@ -515,13 +516,13 @@ describe("jobs output link (FA-4)", () => {
     // Drawer state is module-level; make opening this test order-independent.
     if (!jobsDrawerOpen()) toggleJobsDrawer();
 
-    const row = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Review export ready"),
+    const row = Array.from(container.querySelectorAll<HTMLElement>(".studio-job-row")).find((item) =>
+      item.textContent?.includes("Review export ready"),
     );
     expect(row).toBeTruthy();
     expect(row?.textContent).toContain("time unknown");
     // The truthful metadata does not cost the open affordance.
-    row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    row?.querySelector<HTMLButtonElement>("button.studio-job")?.click();
     expect(opened).toEqual(["/projects/Lite/Final/Scene2_master.mp4"]);
     container.remove();
     hostMock.invoke.mockReset();

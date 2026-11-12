@@ -14,6 +14,7 @@ export function createStudioController(deps: {
   onResult: (result: WorkflowImportResult) => void;
   onError: (message: string) => void;
   beforeRun?: () => void;
+  beforeInvoke?: () => Promise<void>;
 }) {
   return {
     async run(command: StudioCommand): Promise<boolean> {
@@ -25,6 +26,7 @@ export function createStudioController(deps: {
       }
       deps.onBusy(command.label);
       try {
+        await deps.beforeInvoke?.();
         const result = await invoke<WorkflowImportResult>(command.cmd, {
           projectRoot: root,
           ...command.args,

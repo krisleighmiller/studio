@@ -1,0 +1,26 @@
+import { readFileSync } from 'node:fs';
+import { afterEach, expect, it, vi } from 'vitest';
+import * as desk from '../src/workflowDesk';
+import { resetSurfaceSession } from '../src/studio/surfaces/session';
+import { buildAudioStatus } from '../src/studio/selectors/audio';
+const native = JSON.parse(readFileSync('tests/fixtures/sb16-native-reopen.json','utf8'));
+const host = vi.hoisted(() => ({ invoke: vi.fn(), ask: vi.fn(), openDialog: vi.fn(), toMediaUrlAsync: vi.fn() }));
+vi.mock('../src/host', () => host);
+afterEach(() => { desk.clearWorkflowDesk(); resetSurfaceSession(); document.body.replaceChildren(); vi.resetAllMocks(); });
+it.each(['missing', 'approved'])('Cut Sketches distinguishes authored dialogue from %s dialogue audio', async status => {
+ const data = structuredClone(native.approved);
+ const cut = data.state.scenes[0].cuts[0];
+ cut.dialogue = [{speaker:'A', text:'Authored line'}];
+ cut.sketch.dialogue = [{speaker:'A', text:'Sketch line', heard_as:'on_camera'}];
+ data.state.assets = status === 'approved' ? [{id:'dialogue-audio', path:'audio.wav', role:'dialogue', status:'approved', scene_id:1}] : [];
+ host.invoke.mockImplementation(async (cmd:string) => { if (cmd === 'workflow_import') return data; throw Error(`Unexpected ${cmd}`); });
+ const root=document.createElement('main'); document.body.append(root); const noop=vi.fn();
+ desk.bindWorkflowDesk({root,projectRoot:()=>'/fixture',onOpenPath:noop,onAddToChat:noop,onOpenVoice:noop,onComposeChat:noop,onSelectionChange:noop,chatModel:()=>null,onStatus:noop,onPendingPlan:noop});
+ await desk.loadWorkflowDesk('/fixture');
+ const nav=[...root.querySelectorAll<HTMLButtonElement>('.studio-surface-nav button')].find(b=>b.textContent?.includes('Cut Sketches'))!; nav.click();
+ expect(root.querySelector('.studio-scene-audio')?.textContent).toContain(`Dialogue audio ${status}`);
+ const audio = buildAudioStatus(data.state,1)!;
+ expect(audio.blocksFinish).toBe(status === 'missing');
+ expect(cut.dialogue[0].text).toBe('Authored line');
+ expect(cut.sketch.dialogue[0].text).toBe('Sketch line');
+});

@@ -10,7 +10,7 @@
       {"id": "scene_look", "label": "Scene Look", "work_area": "plan", "depends_on": ["scene_intent"], "required_roles": []},
       {"id": "cut_sketches", "label": "Cut Sketches", "work_area": "plan", "depends_on": ["scene_look"], "required_roles": ["mouth_policy"]},
       {"id": "reference_images", "label": "Reference Images", "work_area": "plan", "depends_on": ["cut_sketches"], "required_roles": []},
-      {"id": "production_notes", "label": "Production Notes", "work_area": "plan", "depends_on": ["reference_images"], "required_roles": []},
+      {"id": "production_notes", "label": "Production Notes", "work_area": "plan", "depends_on": ["cut_sketches"], "required_roles": []},
       {"id": "render", "label": "Render", "work_area": "produce", "depends_on": ["production_notes"], "required_roles": []},
       {"id": "take_review", "label": "Take Review", "work_area": "produce", "depends_on": ["render"], "required_roles": []},
       {"id": "assemble", "label": "Assemble", "work_area": "finish", "depends_on": ["take_review"], "required_roles": []}
@@ -26,7 +26,7 @@
       {"id": "scene_look", "label": "Visual treatment", "work_area": "plan", "depends_on": ["scene_intent"], "required_roles": []},
       {"id": "cut_sketches", "label": "Boards", "work_area": "plan", "depends_on": ["scene_look"], "required_roles": []},
       {"id": "reference_images", "label": "Shot sources", "work_area": "plan", "depends_on": ["cut_sketches"], "required_roles": []},
-      {"id": "production_notes", "label": "Shot specs", "work_area": "plan", "depends_on": ["reference_images"], "required_roles": []},
+      {"id": "production_notes", "label": "Shot specs", "work_area": "plan", "depends_on": ["cut_sketches"], "required_roles": []},
       {"id": "render", "label": "Takes", "work_area": "produce", "depends_on": ["production_notes"], "required_roles": []},
       {"id": "take_review", "label": "Selects", "work_area": "produce", "depends_on": ["render"], "required_roles": []},
       {"id": "assemble", "label": "Edit", "work_area": "finish", "depends_on": ["take_review"], "required_roles": []}

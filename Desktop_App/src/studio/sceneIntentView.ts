@@ -20,10 +20,14 @@ const FIELDS: { key: keyof SceneIntent; label: string; list: boolean }[] = [
 
 let draft: SceneIntent | null = null;
 let draftScene: number | null = null;
+let draftEdited = false;
+
+export function hasEditedIntentDraft(sceneId: number): boolean { return draftScene === sceneId && draftEdited; }
 
 export function clearIntentDraft(): void {
   draft = null;
   draftScene = null;
+  draftEdited = false;
 }
 
 function emptyIntent(): SceneIntent {
@@ -42,6 +46,7 @@ function emptyIntent(): SceneIntent {
 function workingCopy(scene: SceneRecord): SceneIntent {
   if (draftScene !== scene.id || !draft) {
     draftScene = scene.id;
+    draftEdited = false;
     draft = { ...emptyIntent(), ...scene.intent };
   }
   return draft;
@@ -73,6 +78,7 @@ export function renderSceneIntentView(
     input.value = Array.isArray(value) ? value.join(", ") : (value ?? "");
     input.addEventListener("input", () => {
       if (!draft) return;
+      draftEdited = true;
       if (field.list) {
         draft[field.key] = input.value
           .split(/[,;\n]/)

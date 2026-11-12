@@ -77,6 +77,13 @@
             <div class="explorer-actions">
               <button
                 type="button"
+                id="open-file-btn"
+                class="icon-button"
+                title="Open File (Ctrl+Shift+O)"
+                aria-label="Open file"
+              >Open</button>
+              <button
+                type="button"
                 id="new-file-btn"
                 class="icon-button"
                 title="New File"
@@ -129,6 +136,7 @@
         ></div>
 
         <section id="editor-panel" class="panel editor-panel" aria-label="Editor">
+          <h2 id="center-panel-heading" class="panel-header center-panel-heading">Home</h2>
           <div id="editor-tabs" class="tab-bar" role="tablist" aria-label="Editor tabs"></div>
 
           <div id="find-bar" class="find-bar hidden" role="search" aria-label="Find and replace">
@@ -272,17 +280,27 @@
           data-splitter="chat"
           role="separator"
           aria-orientation="vertical"
-          aria-label="Resize chat"
+          aria-label="Resize Finish and history"
           tabindex="0"
         ></div>
 
-        <aside id="chat-panel" class="panel chat-panel director-panel" aria-label="Director and Finish">
+        <aside id="chat-panel" class="panel chat-panel director-panel" aria-label="Finish and saved conversations">
           <div class="inspector-tabs" role="tablist" aria-label="Inspector">
-            <button type="button" id="inspector-tab-director" class="inspector-tab active" role="tab" aria-selected="true" aria-controls="director-section">Director</button>
-            <button type="button" id="inspector-tab-finish" class="inspector-tab" role="tab" aria-selected="false" aria-controls="studio-finish-mount">Finish</button>
+            <button type="button" id="inspector-tab-finish" class="inspector-tab active" role="tab" aria-selected="true" aria-controls="studio-finish-mount">Finish</button>
+            <button type="button" id="inspector-tab-director" class="inspector-tab" role="tab" aria-selected="false" aria-controls="saved-conversations">Saved conversations</button>
+            <button type="button" id="inspector-tab-state" class="inspector-tab" role="tab" aria-selected="false" aria-controls="studio-state-mount">Project state</button>
+            <button type="button" id="toggle-chat-btn" class="icon-button" aria-label="Hide Finish and history" title="Hide Finish and history (Ctrl+Alt+H)">×</button>
           </div>
           <section id="studio-finish-mount" class="studio-finish-mount" role="tabpanel" aria-label="Finish"></section>
-          <section class="director-section" id="director-section" role="tabpanel" aria-label="Director">
+          <section id="saved-conversations" class="saved-conversations" role="tabpanel" aria-label="Saved conversations" hidden>
+            <h2>Saved conversations</h2>
+            <p>Previously exported chats remain ordinary Markdown or text files. Open one here or from Files; its text opens in the editor, not as an executable approval.</p>
+            <button type="button" id="open-saved-conversation">Open saved conversation…</button>
+            <p>Studio prompts and operation approvals now use dialogs on their initiating surface. Production notes remain available through Open note.</p>
+          </section>
+          <section id="studio-state-mount" class="studio-state-mount" role="tabpanel" aria-label="Project state" hidden></section>
+          <!-- Retained inert renderer plumbing; no conversation data is migrated or deleted. -->
+          <section class="director-section" id="director-section" data-retired="true" hidden inert aria-label="Retired embedded Director">
           <header class="panel-header chat-header">
             <span class="director-title">Director</span>
             <div id="chat-tabs" class="tab-bar" role="tablist" aria-label="Director tabs"></div>
@@ -315,7 +333,7 @@
               </button>
               <button
                 type="button"
-                id="toggle-chat-btn"
+                id="retired-toggle-chat-btn"
                 class="icon-button"
                 title="Hide Director (Ctrl+Alt+H)"
                 aria-label="Hide Director"
@@ -384,10 +402,10 @@
           type="button"
           id="chat-rail"
           class="chat-rail hidden"
-          title="Show Director (Ctrl+Alt+H)"
-          aria-label="Show Director"
+          title="Show Finish and history (Ctrl+Alt+H)"
+          aria-label="Show Finish and history"
         >
-          Director
+          Finish
         </button>
           </div>
         </div>

@@ -12,6 +12,16 @@ This document consolidates and orders:
 
 The source docs remain useful detail references. This document owns the execution order.
 
+> **Active usability recovery slice (2026-10-24):** Before expanding the remaining
+> roadmap, follow [Studio — Usable Filmmaking Recovery Plan](Studio_Usable_Filmmaking_Recovery_Plan.md).
+> Its execution order is: trace one Black_Hole dialogue scene → repair demonstrated
+> Director/tool handoff gaps → prove production and revision through the app →
+> extend across the film. Reuse existing machinery; do not add another agent
+> framework or reopen deferred governance as a prerequisite without a demonstrated
+> blocker. The broader release and security gates below still apply. The recovery
+> plan records the actual working-branch baseline and does not authorize a branch
+> switch, commit, merge, push or paid generation.
+
 ---
 
 # 1. Executive Order

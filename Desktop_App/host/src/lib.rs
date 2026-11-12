@@ -21,7 +21,6 @@ pub mod openai_images;
 pub mod output_paths;
 pub mod pending;
 pub mod project_path;
-pub mod prompts;
 pub mod replicate;
 pub mod runway;
 pub mod scene_plan;
@@ -36,6 +35,7 @@ pub mod sync_labs;
 pub mod text_writes;
 pub mod voice;
 pub mod voice_spend;
+mod script_draft;
 pub mod workflow;
 pub(crate) mod workflow_continuation;
 
@@ -64,10 +64,12 @@ pub fn dispatch(
         "open_project" => {
             let path = arg_string(args, "path")?;
             pending::cancel_all();
+            script_draft::clear();
             to_value(session::open(&path).map(|root| json!({ "root": root })))
         }
         "close_project" => {
             pending::cancel_all();
+            script_draft::clear();
             session::close();
             Ok(json!({ "closed": true }))
         }
@@ -96,6 +98,36 @@ pub fn dispatch(
             )?;
             let contents = arg_string(args, "contents")?;
             to_value(fs_ops::write_text_file(path, contents))
+        }
+        "prepare_script_draft" => script_draft::prepare(app, args),
+        "finish_script_draft" => script_draft::finish(app, args),
+        "save_project_script" => {
+            let root = session::command_root(Some(&arg_string(args, "projectRoot")?))?;
+            to_value(fs_ops::save_project_script(
+                &root, &arg_string(args, "filename")?, &arg_string(args, "text")?,
+            ))
+        }
+        "save_project_notes" => {
+            let root = session::command_root(Some(&arg_string(args, "projectRoot")?))?;
+            to_value(fs_ops::save_project_notes(&root, &arg_string(args, "text")?))
+        }
+        "ingest_script_file" => {
+            let root = session::command_root(Some(&arg_string(args, "projectRoot")?))?;
+            to_value(fs_ops::ingest_script_file(
+                &root, &arg_string(args, "sourcePath")?, &arg_string(args, "sourceKind")?,
+            ))
+        }
+        "ingest_character_reference_image" => {
+            let root = session::command_root(Some(&arg_string(args, "projectRoot")?))?;
+            let (path, created) = fs_ops::ingest_character_reference_image(
+                &root, &arg_string(args, "characterDir")?, &arg_string(args, "sourcePath")?,
+            )?;
+            // Opt-in ownership receipt; preserve CR01's public string response.
+            if args.get("receipt").and_then(Value::as_bool) == Some(true) {
+                Ok(json!({ "path": path, "created": created }))
+            } else {
+                Ok(json!(path))
+            }
         }
         "create_file" => {
             let path = scoped_mutation_path(
@@ -147,7 +179,14 @@ pub fn dispatch(
             to_value(fs_ops::delete_scoped(path))
         }
         "classify_file" => {
-            let path = scoped_path(&arg_string(args, "path")?, project_path::PathIntent::Read)?;
+            // Classification only examines file metadata/name, not contents.
+            // Keep the exact dialog grant for the subsequent content read.
+            let path = session::peek_authorize(
+                &arg_string(args, "path")?,
+                project_path::PathIntent::Read,
+            )?
+            .to_string_lossy()
+            .into_owned();
             to_value(fs_ops::classify_file(path))
         }
         "can_open_in_editor" => {
@@ -175,6 +214,10 @@ pub fn dispatch(
             to_value(settings::fetch_atlas_catalog(api_key))
         }
         "fetch_api_catalog" => to_value(settings::fetch_catalog_for_renderer(app, args)),
+        "start_character_model_sheet" => {
+            let root = session::command_root(args.get("projectRoot").and_then(Value::as_str))?;
+            director::start_character_model_sheet(app, root.to_str().ok_or("Invalid project root")?, args.get("request").cloned().ok_or("Missing model-sheet request")?)
+        }
         "director_turn" => {
             let request: director::DirectorTurnRequest = serde_json::from_value(
                 args.get("request")
@@ -245,6 +288,7 @@ pub fn dispatch(
                                 save_path,
                                 &error,
                             );
+                            let _ = workflow::character_wardrobe::on_failed(Some(&root), save_path, &error);
                         }
                     }
                     return Err(error);
@@ -258,6 +302,7 @@ pub fn dispatch(
             let mut out = text;
             if let Some(save_path) = save_path {
                 for note in [
+                    workflow::character_wardrobe::on_saved(Some(&root), &save_path),
                     workflow::look::on_wardrobe_plate_saved(Some(&root), &save_path),
                     workflow::look::on_still_saved(Some(&root), &save_path),
                     workflow::start_frames::on_still_saved(Some(&root), &save_path),
@@ -404,10 +449,16 @@ pub fn dispatch(
         "workflow_unsettled_spend" => Err("Project accounting has been retired.".into()),
         "workflow_reconcile_spend" => Err("Project accounting has been retired.".into()),
         "workflow_save_character" => workflow::cmd_save_character(args),
+        "workflow_attach_character_wardrobe" => workflow::cmd_attach_character_wardrobe(args),
+        "workflow_generate_character_wardrobe" => workflow::cmd_generate_character_wardrobe(app, args),
+        "workflow_save_character_reference_selection" => workflow::cmd_save_character_reference_selection(args),
+        "workflow_delete_character_reference" => workflow::cmd_delete_character_reference(args),
+        "workflow_delete_model_sheet_photo" => workflow::cmd_delete_model_sheet_photo(args),
         "workflow_draft_intent" => workflow::cmd_draft_intent(app, args),
         "workflow_save_intent" => workflow::cmd_save_intent(args),
         "workflow_approve_intent" => workflow::cmd_approve_intent(args),
         "workflow_set_strategy" => workflow::cmd_set_strategy(args),
+        "workflow_set_max_cuts" => workflow::cmd_set_max_cuts(args),
         "workflow_save_profile" => workflow::cmd_save_profile(args),
         "workflow_set_budget" => Err("Project accounting has been retired.".into()),
         "workflow_set_requirement_status" => workflow::cmd_set_requirement_status(args),
@@ -416,36 +467,48 @@ pub fn dispatch(
         "workflow_draft_sketches" => workflow::cmd_draft_sketches(app, args),
         "workflow_update_sketch" => workflow::cmd_update_sketch(args),
         "workflow_save_sketch" => workflow::cmd_save_sketch(args),
+        "workflow_resolve_script_dialogue" => workflow::cmd_resolve_script_dialogue(args),
         "workflow_set_animatic_duration" => workflow::cmd_set_animatic_duration(args),
         "workflow_reorder_animatic" => workflow::cmd_reorder_animatic(args),
         "workflow_reorder_cuts" => workflow::cmd_reorder_cuts(args),
         "workflow_approve_animatic" => workflow::cmd_approve_animatic(args),
+        "workflow_approve_rendered_sequence" => workflow::cmd_approve_rendered_sequence(args),
         "workflow_attach_scratch_audio" => workflow::cmd_attach_scratch_audio(args),
         "workflow_clear_scratch_audio" => workflow::cmd_clear_scratch_audio(args),
         "workflow_set_shot_trim" => workflow::cmd_set_shot_trim(args),
         "workflow_set_shot_transition" => workflow::cmd_set_shot_transition(args),
         "workflow_clear_package_review" => workflow::cmd_clear_package_review(args),
         "workflow_draft_look" => workflow::cmd_draft_look(app, args),
+        "workflow_save_reference_description" => workflow::cmd_save_reference_description(args),
         "workflow_update_look_slot" => workflow::cmd_update_look_slot(args),
         "workflow_attach_look" => workflow::cmd_attach_look(args),
+        "workflow_crop_look" => workflow::cmd_crop_look(args),
         "workflow_approve_look" => workflow::cmd_approve_look(args),
         "workflow_reject_look" => workflow::cmd_reject_look(args),
         "workflow_delete_look" => workflow::cmd_delete_look(args),
+        "workflow_delete_look_slot" => workflow::cmd_delete_look_slot(args),
         "workflow_generate_look" => workflow::cmd_generate_look(app, args),
         "workflow_generate_wardrobe_plate" => workflow::cmd_generate_wardrobe_plate(app, args),
         "workflow_delete_wardrobe_plate" => workflow::cmd_delete_wardrobe_plate(args),
         "workflow_draft_start_frame_prompt" => workflow::cmd_draft_start_frame_prompt(app, args),
         "workflow_save_start_frame_prompt" => workflow::cmd_save_start_frame_prompt(args),
         "workflow_save_production_prompt" => workflow::cmd_save_production_prompt(args),
+        "workflow_preview_production_handoff" => workflow::cmd_preview_production_handoff(args),
         "workflow_refresh_production_handoff" => workflow::cmd_refresh_production_handoff(args),
         "workflow_sync_production_notes" => workflow::cmd_sync_production_notes(app, args),
         "workflow_prepare_render" => workflow::cmd_prepare_render(app, args),
+        "workflow_prepare_dialogue_audio" => workflow::cmd_prepare_dialogue_audio(&app, args),
+        "workflow_select_performance" => workflow::performance::select(args),
+        "workflow_version_audio" => workflow::performance::version(args),
+        "workflow_import_performance" => workflow::performance_import::acquire(args),
         "workflow_set_visual_source" => workflow::cmd_set_visual_source(args),
         "workflow_bind_continuity_frame" => workflow::cmd_bind_continuity_frame(args),
         "workflow_set_take_status" => workflow::cmd_set_take_status(args),
         "workflow_delete_take" => workflow::cmd_delete_take(args),
         "workflow_prepare_assemble" => workflow::cmd_prepare_assemble_with_host(app, args),
         "workflow_add_alternate_shot" => workflow::cmd_add_alternate_shot(args),
+        "workflow_remove_cut" => workflow::cmd_remove_cut(args),
+        "workflow_reopen_sketch" => workflow::cmd_reopen_sketch(args),
         "workflow_mark_cut_version" => workflow::cmd_mark_cut_version(args),
         "workflow_set_cut_version_stage" => workflow::cmd_set_cut_version_stage(args),
         "workflow_lock_picture" => workflow::cmd_lock_picture(args),
@@ -459,6 +522,11 @@ pub fn dispatch(
         "workflow_reject_start_frame" => workflow::cmd_reject_start_frame(args),
         "workflow_delete_start_frame" => workflow::cmd_delete_start_frame(args),
         "director_cancel" => {
+            if let Some(id) = args.get("id") {
+                let id = id.as_str().filter(|id| !id.is_empty()).ok_or("Cancellation needs an exact operation ID")?;
+                let cancelled = pending::cancel_operation(id);
+                return Ok(json!({ "cancelled": cancelled }));
+            }
             app.cancel_director();
             pending::cancel_workflow();
             Ok(json!({ "cancelled": true }))

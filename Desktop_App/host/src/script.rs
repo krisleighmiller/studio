@@ -201,10 +201,18 @@ pub fn extract_beats(section: &str) -> Vec<ScriptBeat> {
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(caps) = bullet_re().captures(line) {
-            let label = caps[1].trim().trim_end_matches(':').trim().to_string();
+        // Studio scripts also use unadorned `Dialogue:` / `Name: line`
+        // sections. Only interpret unknown plain labels inside dialogue.
+        let markdown = bullet_re().captures(line);
+        let plain = trimmed.split_once(':').filter(|(label, _)| {
+            !label.is_empty() && label.chars().all(|c| c.is_alphabetic() || matches!(c, ' ' | '\'' | '’' | '-' | ','))
+        });
+        let labelled = markdown.as_ref().map(|caps| (caps[1].trim().trim_end_matches(':').trim(), caps.get(2).map(|m| m.as_str().trim()).unwrap_or("")))
+            .or_else(|| plain.filter(|(label, _)| in_dialogue || label.eq_ignore_ascii_case("dialogue") || beat_kind(&label.to_ascii_lowercase()).is_some()));
+        if let Some((label, text)) = labelled {
+            let label = label.trim().to_string();
             let label_l = label.to_ascii_lowercase();
-            let text = caps.get(2).map(|m| m.as_str().trim()).unwrap_or("");
+            let text = text.trim();
             if label_l == "dialogue" {
                 in_dialogue = true;
                 continue;

@@ -1,6 +1,7 @@
 import type { CharacterProfile } from "../../workflowTypes";
 import { clearIntentDraft } from "../sceneIntentView";
 import type { SurfaceHost } from "./host";
+import type { CharacterReferenceImage } from "./surfaceIntents";
 
 /**
  * Phase 6 surface session: the single owner of mutable surface state.
@@ -14,7 +15,7 @@ import type { SurfaceHost } from "./host";
 let host: SurfaceHost;
 
 export const startFrameEditBriefs = new Map<string, string>();
-export const characterDrafts = new Map<string, { name: string; profile: CharacterProfile }>();
+export const characterDrafts = new Map<string, { name: string; profile: CharacterProfile; references?: CharacterReferenceImage[]; savedCharacterId?: string; referenceReselectionPaths?: string[] }>();
 let newCharacterOpen = false;
 let profileOpen = false;
 
@@ -25,6 +26,16 @@ export type RoughPlaybackState = {
   audio: HTMLAudioElement | null;
 };
 let roughPlayback: RoughPlaybackState | null = null;
+let performanceAudio: HTMLAudioElement | null = null;
+
+export function auditionPerformance(audio: HTMLAudioElement): void {
+  if (performanceAudio !== audio) performanceAudio?.pause();
+  performanceAudio = audio;
+}
+export function stopPerformanceAudio(): void {
+  performanceAudio?.pause();
+  performanceAudio = null;
+}
 
 export function bindSurfaceHost(next: SurfaceHost): void {
   host = next;
@@ -41,6 +52,7 @@ export function resetSurfaceSession(): void {
   newCharacterOpen = false;
   profileOpen = false;
   stopRoughCut();
+  stopPerformanceAudio();
 }
 
 export function setProfileOpen(open: boolean): void {

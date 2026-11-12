@@ -657,7 +657,7 @@ fn context_system_message(context: &DirectorContext) -> String {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("(none)")
         ),
-        "- Wired specialists (emit run_specialist; host executes): script, character_creation, scene_intent, scene_look, cut_sketches, scene_plan (chat-model text runners → local files), model_sheet, still_image, scene_generation, text_sync, lip_sync, assemble, production_helper. Route by intent. Text planning uses the selected chat model (commercial or local); generation spend uses Settings / Adult slots when requested.".to_string(),
+        format!("- Wired specialists (emit run_specialist; host executes): {}. Route by intent. Text planning uses the selected chat model (commercial or local); generation spend uses Settings / Adult slots when requested.", crate::director_actions::SPECIALISTS.join(", ")),
         format!(
             "- Workflow stage: {}",
             context
@@ -774,6 +774,9 @@ fn answer_pending_plan_question(
             &pending.inputs,
             project_root,
         ),
+        "dialogue_audio" => {
+            format!("### Dialogue audio only\nChosen voice: {}\nCurrent cut dialogue: {}\nOutput: {}\nOne speech request, zero video requests. Provider disclosure and spend approval remain required. Saved as Draft for audition; never automatically selects or starts video.", pending.inputs.get("voice_asset_id").unwrap_or(&Value::Null), pending.inputs.get("dialogue").unwrap_or(&Value::Null), pending.inputs.get("output_path").unwrap_or(&Value::Null))
+        }
         "text_sync" => {
             crate::specialists::text_sync_approval_notes(context, &pending.inputs, project_root)
         }
@@ -1349,6 +1352,59 @@ fn approved_action_error_reply(error: &str) -> (String, &'static str) {
     )
 }
 
+/// Direct deterministic entry to the existing model-sheet approval/runner path.
+/// This command never plans, calls chat, or treats request text as consent.
+pub fn start_character_model_sheet(app: &HostCtx, root: &str, request: Value) -> Result<Value, String> {
+    let publication_generation = crate::pending::generation();
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Request { character_id: String, action: String, specialist: String, inputs: Inputs }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Inputs { character_files: [String; 1], output_path: String, character_slug: String, #[serde(default)] identity_text: String, reference_images: Vec<String> }
+    let request: Request = serde_json::from_value(request).map_err(|e| format!("Invalid model-sheet request: {e}"))?;
+    if request.action != "run_specialist" || request.specialist != "model_sheet" {
+        return Err("Invalid model-sheet operation".into());
+    }
+    let state = crate::workflow::import::load_state(std::path::Path::new(root))?;
+    let character = state.characters.iter().find(|c| c.id == request.character_id).ok_or("Save the requested character first")?;
+    let inputs = &request.inputs;
+    if inputs.identity_text.trim().is_empty() && inputs.reference_images.is_empty() {
+        return Err("Add a visual description/appearance or select a reference image, save and retry".into());
+    }
+    if character.profile_path.as_deref() != Some(inputs.character_files[0].as_str())
+        || inputs.output_path != format!("{}/model_sheet", character.dir)
+        || inputs.character_slug != character.name {
+        return Err("Model-sheet paths/name must match the saved character".into());
+    }
+    let refs: Result<Vec<_>, String> = character.reference_asset_ids.iter().map(|id| {
+        let matches: Vec<_> = state.assets.iter().filter(|a| &a.id == id && a.character_id.as_deref() == Some(character.id.as_str())).collect();
+        if matches.len() != 1 { return Err("Saved character reference is missing or ambiguous".into()); }
+        let asset = matches[0];
+        use crate::workflow::state::AssetRole;
+        if !matches!(asset.role, AssetRole::IdentityReference | AssetRole::BodyReference | AssetRole::ExpressionReference)
+            || !asset.path.starts_with(&format!("{}/", character.dir)) {
+            return Err("Model-sheet reference does not belong to the saved character image selection".into());
+        }
+        Ok(asset.path.clone())
+    }).collect();
+    if refs? != inputs.reference_images { return Err("Model-sheet references must match the saved selection in order".into()); }
+    let action = crate::director_actions::DirectorAction {
+        action: crate::director_actions::ActionKind::RunSpecialist, specialist: Some("model_sheet".into()),
+        inputs: serde_json::to_value(inputs).map_err(|e| e.to_string())?.as_object().unwrap().clone(),
+        message: None, op: None, path: None,
+    };
+    let validated = crate::director_actions::validate_action(action.clone(), Some(root)).map_err(|e| e.to_string())?;
+    let mut context = DirectorContext::default();
+    hydrate_context_from_app(app, &mut context)?;
+    context.project_root = Some(root.into());
+    let (provider, model, cost) = approval_route_details(&action, &context, Some(root));
+    let raw = crate::director_actions::prepare_approval_request_with_context(&action, &validated, &context, &provider, &model, &cost);
+    if app.director_cancelled() { return Err("Model-sheet operation cancelled".into()); }
+    let card = crate::pending::publish_guarded(&raw, publication_generation, None, || !app.director_cancelled() && crate::session::root().as_deref() == Some(std::path::Path::new(root)))?;
+    Ok(json!({"status":"pendingApproval", "pendingAction":card, "characterId":request.character_id}))
+}
+
 pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse, String> {
     use crate::director_actions::{validate_action, ActionKind};
     use crate::specialists::{self, SpecialistLlm};
@@ -1361,7 +1417,7 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
             String::new(),
         ));
     }
-    let pending = crate::pending::take(id.trim())?;
+    let pending = crate::pending::take_for_execution(id.trim(), &app)?;
     let workflow_continuation = pending.workflow_continuation;
     let workflow_key = pending.workflow_key.clone();
     let publication_generation = pending.publication_generation;
@@ -1611,6 +1667,18 @@ mod yield_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lp02_context_advertises_supported_specialists_only() {
+        let context = super::context_system_message(&super::DirectorContext::default());
+        println!("ACTUAL_CONTEXT_BEGIN\n{context}\nACTUAL_CONTEXT_END");
+        let wired = context.lines().find(|line| line.starts_with("- Wired specialists")).unwrap();
+        for retired in ["script", "character_creation", "production_helper"] {
+            assert!(!wired.contains(retired), "retired context advertisement: {retired}");
+        }
+        for supported in ["scene_plan", "model_sheet"] {
+            assert!(wired.contains(supported), "missing context capability: {supported}");
+        }
+    }
     use super::*;
     use crate::director_actions::{parse_actions, validate_action, ActionKind};
 

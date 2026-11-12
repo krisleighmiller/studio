@@ -1,0 +1,33 @@
+import { readFileSync } from 'node:fs';
+import { afterEach, expect, it, vi } from 'vitest';
+import * as desk from '../src/workflowDesk';
+import { imageCapabilityRoutes, defaultSettings } from '../src/settingsTypes';
+import { resetSurfaceSession } from '../src/studio/surfaces/session';
+import type { WorkflowImportResult } from '../src/workflowTypes';
+const host = vi.hoisted(() => ({invoke:vi.fn(), openDialog:vi.fn(), ask:vi.fn(), toMediaUrlAsync:vi.fn(async ()=>'data:image/png;base64,AA==')}));
+vi.mock('../src/host',()=>host);
+afterEach(()=>{desk.clearWorkflowDesk(); resetSurfaceSession(); document.body.replaceChildren(); vi.clearAllMocks();});
+it('carries settings choice and ordered opted-in images from Reference Images to native command',async()=>{
+  const f=JSON.parse(readFileSync('tests/fixtures/sb10-native-resume.json','utf8')).initial as WorkflowImportResult;
+  f.state.scenes[0].look_board={slots:[{id:'room',role:'interior_reference',title:'Room',prompt:'Warm room',asset_ids:[]}]};
+  f.state.assets=[{id:'a',role:'interior_reference',scene_id:1,path:'a.png',status:'draft'},{id:'b',role:'interior_reference',scene_id:1,path:'b.png',status:'draft'}];
+  host.invoke.mockImplementation(async (cmd:string)=>{if(['workflow_import','workflow_generate_look'].includes(cmd))return structuredClone(f); throw Error(`Unexpected ${cmd}`)});
+  const settings=defaultSettings(); settings.apis=[{id:'api',name:'Provider',kind:'atlas-cloud',baseUrl:'',apiKey:'',secretKey:'',enabled:true,catalog:[],catalogFetchedAt:null,pinnedLlmModelIds:[]}];
+  settings.capabilityDefaults['image.image_to_image']={apiId:'api',modelId:'chosen-model'};
+  const before=JSON.stringify(settings), root=document.createElement('main'), noop=vi.fn(); document.body.append(root);
+  desk.bindWorkflowDesk({root,projectRoot:()=>'/fixture/reference',onOpenPath:noop,onAddToChat:noop,onOpenVoice:noop,onComposeChat:noop,onSelectionChange:noop,chatModel:()=>null,imageRoutes:()=>imageCapabilityRoutes(settings),onStatus:noop,onPendingPlan:noop});
+  await desk.loadWorkflowDesk('/fixture/reference');
+  [...root.querySelectorAll('button')].find(b=>b.textContent?.includes('Reference Images'))!.click();
+  const section=[...root.querySelectorAll<HTMLElement>('.workflow-reference-descriptions > section')].find(s=>s.querySelector('h3')?.textContent==='Room')!;
+  const route=section.querySelector<HTMLSelectElement>('select[aria-label="Image generation model"]')!;
+  expect(route.textContent).toContain('Provider · chosen-model');
+  expect(route.value).toBe('image.text_to_image');
+  route.value='image.image_to_image';
+  const refs=section.querySelector<HTMLSelectElement>('select[aria-label="Reference image"]')!;
+  for(const id of ['b','a']) {refs.value=id; section.querySelector<HTMLButtonElement>('button[aria-label="Add reference image"]')!.click();}
+  [...section.querySelectorAll('button')].find(b=>b.textContent==='Generate still')!.click();
+  document.querySelector<HTMLDialogElement>('dialog[data-generation-prompt]')!.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+  await vi.waitFor(()=>expect(host.invoke).toHaveBeenCalledWith('workflow_generate_look',expect.objectContaining({sceneId:1,slotId:'room',imageCapability:'image.image_to_image',referenceAssetIds:['b','a'],attachCharacterImage:false})));
+  expect(JSON.stringify(settings)).toBe(before);
+  expect(host.invoke.mock.calls.map(c=>c[0])).toEqual(['workflow_import','workflow_generate_look']);
+});

@@ -1,0 +1,672 @@
+{
+  "persistedPath": "/source/Studio/Desktop_App/evidence/sc05-2ggchv_n/project/Preproduction/workflow_state.json",
+  "report": {
+    "character_count": 0,
+    "identity_ready": 0,
+    "project_name": "project",
+    "recipe": {
+      "id": "narrative_dialogue",
+      "label": "Narrative dialogue",
+      "stages": [
+        {
+          "depends_on": [],
+          "id": "script",
+          "label": "Script",
+          "required_roles": [],
+          "work_area": "plan"
+        },
+        {
+          "depends_on": [
+            "script"
+          ],
+          "id": "characters",
+          "label": "Characters",
+          "required_roles": [
+            "cast",
+            "voice"
+          ],
+          "work_area": "plan"
+        },
+        {
+          "depends_on": [
+            "characters"
+          ],
+          "id": "scene_intent",
+          "label": "Scene Intent",
+          "required_roles": [],
+          "work_area": "plan"
+        },
+        {
+          "depends_on": [
+            "scene_intent"
+          ],
+          "id": "scene_look",
+          "label": "Scene Look",
+          "required_roles": [],
+          "work_area": "plan"
+        },
+        {
+          "depends_on": [
+            "scene_look"
+          ],
+          "id": "cut_sketches",
+          "label": "Cut Sketches",
+          "required_roles": [
+            "mouth_policy"
+          ],
+          "work_area": "plan"
+        },
+        {
+          "depends_on": [
+            "cut_sketches"
+          ],
+          "id": "reference_images",
+          "label": "Reference Images",
+          "required_roles": [],
+          "work_area": "plan"
+        },
+        {
+          "depends_on": [
+            "reference_images"
+          ],
+          "id": "production_notes",
+          "label": "Production Notes",
+          "required_roles": [],
+          "work_area": "plan"
+        },
+        {
+          "depends_on": [
+            "production_notes"
+          ],
+          "id": "render",
+          "label": "Render",
+          "required_roles": [],
+          "work_area": "produce"
+        },
+        {
+          "depends_on": [
+            "render"
+          ],
+          "id": "take_review",
+          "label": "Take Review",
+          "required_roles": [],
+          "work_area": "produce"
+        },
+        {
+          "depends_on": [
+            "take_review"
+          ],
+          "id": "assemble",
+          "label": "Assemble",
+          "required_roles": [],
+          "work_area": "finish"
+        }
+      ]
+    },
+    "recipes": [
+      {
+        "id": "narrative_dialogue",
+        "label": "Narrative dialogue"
+      },
+      {
+        "id": "montage",
+        "label": "Montage"
+      }
+    ],
+    "scenes": [
+      {
+        "approved_start_frames": 0,
+        "can_backfill_sketches": false,
+        "cut_sketches": false,
+        "cuts_found": 0,
+        "effectively_performance_heavy": false,
+        "id": 1,
+        "mix": {
+          "lipsync": 0,
+          "silent": 0,
+          "voice_over": 0
+        },
+        "mix_verdict": {
+          "messages": [],
+          "mix": {
+            "other_dialogue": 0,
+            "performance": 0,
+            "silent": 0
+          },
+          "status": "ok",
+          "strategy": "cinematic_balanced"
+        },
+        "navigation": [
+          {
+            "available": true,
+            "depends_on": [],
+            "disabled_reason": null,
+            "id": "script",
+            "label": "Script",
+            "status": "present",
+            "work_area": "plan"
+          },
+          {
+            "available": true,
+            "depends_on": [
+              "script"
+            ],
+            "disabled_reason": null,
+            "id": "characters",
+            "label": "Characters",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "characters"
+            ],
+            "disabled_reason": "Waiting on Characters.",
+            "id": "scene_intent",
+            "label": "Scene Intent",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "scene_intent"
+            ],
+            "disabled_reason": "Waiting on Scene Intent.",
+            "id": "scene_look",
+            "label": "Scene Look",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "scene_look"
+            ],
+            "disabled_reason": "Waiting on Scene Look.",
+            "id": "cut_sketches",
+            "label": "Cut Sketches",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "cut_sketches"
+            ],
+            "disabled_reason": "Waiting on Cut Sketches.",
+            "id": "reference_images",
+            "label": "Reference Images",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "reference_images"
+            ],
+            "disabled_reason": "Waiting on Reference Images.",
+            "id": "production_notes",
+            "label": "Production Notes",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "production_notes"
+            ],
+            "disabled_reason": "Waiting on Production Notes.",
+            "id": "render",
+            "label": "Render",
+            "status": "missing",
+            "work_area": "produce"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "render"
+            ],
+            "disabled_reason": "Waiting on Render.",
+            "id": "take_review",
+            "label": "Take Review",
+            "status": "missing",
+            "work_area": "produce"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "take_review"
+            ],
+            "disabled_reason": "Waiting on Take Review.",
+            "id": "assemble",
+            "label": "Assemble",
+            "status": "missing",
+            "work_area": "finish"
+          }
+        ],
+        "planned_visual_sources": 0,
+        "production_notes": false,
+        "render_ready_sources": 0,
+        "scene_intent": false,
+        "scene_look": false,
+        "sketch_mix": {
+          "other_dialogue": 0,
+          "performance": 0,
+          "silent": 0
+        },
+        "strategy": "cinematic_balanced",
+        "summary": "Scene 1 \u2014 Earlier:\n- 0 cuts found\n- 0 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 0 source strategies planned; 0 render ready\n- production notes missing\n- scene look board missing\n- scene intent missing\n- cut sketches missing",
+        "title": "Scene 1 \u2014 Earlier",
+        "unresolved_visual_sources": 0,
+        "warnings": [
+          "scene look board missing"
+        ]
+      },
+      {
+        "approved_start_frames": 0,
+        "can_backfill_sketches": false,
+        "cut_sketches": false,
+        "cuts_found": 0,
+        "effectively_performance_heavy": false,
+        "id": 7,
+        "mix": {
+          "lipsync": 0,
+          "silent": 0,
+          "voice_over": 0
+        },
+        "mix_verdict": {
+          "messages": [],
+          "mix": {
+            "other_dialogue": 0,
+            "performance": 0,
+            "silent": 0
+          },
+          "status": "ok",
+          "strategy": "cinematic_balanced"
+        },
+        "navigation": [
+          {
+            "available": true,
+            "depends_on": [],
+            "disabled_reason": null,
+            "id": "script",
+            "label": "Script",
+            "status": "present",
+            "work_area": "plan"
+          },
+          {
+            "available": true,
+            "depends_on": [
+              "script"
+            ],
+            "disabled_reason": null,
+            "id": "characters",
+            "label": "Characters",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "characters"
+            ],
+            "disabled_reason": "Waiting on Characters.",
+            "id": "scene_intent",
+            "label": "Scene Intent",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "scene_intent"
+            ],
+            "disabled_reason": "Waiting on Scene Intent.",
+            "id": "scene_look",
+            "label": "Scene Look",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "scene_look"
+            ],
+            "disabled_reason": "Waiting on Scene Look.",
+            "id": "cut_sketches",
+            "label": "Cut Sketches",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "cut_sketches"
+            ],
+            "disabled_reason": "Waiting on Cut Sketches.",
+            "id": "reference_images",
+            "label": "Reference Images",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "reference_images"
+            ],
+            "disabled_reason": "Waiting on Reference Images.",
+            "id": "production_notes",
+            "label": "Production Notes",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "production_notes"
+            ],
+            "disabled_reason": "Waiting on Production Notes.",
+            "id": "render",
+            "label": "Render",
+            "status": "missing",
+            "work_area": "produce"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "render"
+            ],
+            "disabled_reason": "Waiting on Render.",
+            "id": "take_review",
+            "label": "Take Review",
+            "status": "missing",
+            "work_area": "produce"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "take_review"
+            ],
+            "disabled_reason": "Waiting on Take Review.",
+            "id": "assemble",
+            "label": "Assemble",
+            "status": "missing",
+            "work_area": "finish"
+          }
+        ],
+        "planned_visual_sources": 0,
+        "production_notes": false,
+        "render_ready_sources": 0,
+        "scene_intent": false,
+        "scene_look": false,
+        "sketch_mix": {
+          "other_dialogue": 0,
+          "performance": 0,
+          "silent": 0
+        },
+        "strategy": "cinematic_balanced",
+        "summary": "Scene 7 \u2014 Arrival:\n- 0 cuts found\n- 0 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 0 source strategies planned; 0 render ready\n- production notes missing\n- scene look board missing\n- scene intent missing\n- cut sketches missing",
+        "title": "Scene 7 \u2014 Arrival",
+        "unresolved_visual_sources": 0,
+        "warnings": [
+          "scene look board missing"
+        ]
+      },
+      {
+        "approved_start_frames": 0,
+        "can_backfill_sketches": false,
+        "cut_sketches": false,
+        "cuts_found": 0,
+        "effectively_performance_heavy": false,
+        "id": 8,
+        "mix": {
+          "lipsync": 0,
+          "silent": 0,
+          "voice_over": 0
+        },
+        "mix_verdict": {
+          "messages": [],
+          "mix": {
+            "other_dialogue": 0,
+            "performance": 0,
+            "silent": 0
+          },
+          "status": "ok",
+          "strategy": "cinematic_balanced"
+        },
+        "navigation": [
+          {
+            "available": true,
+            "depends_on": [],
+            "disabled_reason": null,
+            "id": "script",
+            "label": "Script",
+            "status": "present",
+            "work_area": "plan"
+          },
+          {
+            "available": true,
+            "depends_on": [
+              "script"
+            ],
+            "disabled_reason": null,
+            "id": "characters",
+            "label": "Characters",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "characters"
+            ],
+            "disabled_reason": "Waiting on Characters.",
+            "id": "scene_intent",
+            "label": "Scene Intent",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "scene_intent"
+            ],
+            "disabled_reason": "Waiting on Scene Intent.",
+            "id": "scene_look",
+            "label": "Scene Look",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "scene_look"
+            ],
+            "disabled_reason": "Waiting on Scene Look.",
+            "id": "cut_sketches",
+            "label": "Cut Sketches",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "cut_sketches"
+            ],
+            "disabled_reason": "Waiting on Cut Sketches.",
+            "id": "reference_images",
+            "label": "Reference Images",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "reference_images"
+            ],
+            "disabled_reason": "Waiting on Reference Images.",
+            "id": "production_notes",
+            "label": "Production Notes",
+            "status": "missing",
+            "work_area": "plan"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "production_notes"
+            ],
+            "disabled_reason": "Waiting on Production Notes.",
+            "id": "render",
+            "label": "Render",
+            "status": "missing",
+            "work_area": "produce"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "render"
+            ],
+            "disabled_reason": "Waiting on Render.",
+            "id": "take_review",
+            "label": "Take Review",
+            "status": "missing",
+            "work_area": "produce"
+          },
+          {
+            "available": false,
+            "depends_on": [
+              "take_review"
+            ],
+            "disabled_reason": "Waiting on Take Review.",
+            "id": "assemble",
+            "label": "Assemble",
+            "status": "missing",
+            "work_area": "finish"
+          }
+        ],
+        "planned_visual_sources": 0,
+        "production_notes": false,
+        "render_ready_sources": 0,
+        "scene_intent": false,
+        "scene_look": false,
+        "sketch_mix": {
+          "other_dialogue": 0,
+          "performance": 0,
+          "silent": 0
+        },
+        "strategy": "cinematic_balanced",
+        "summary": "Scene 8 \u2014 Departure:\n- 0 cuts found\n- 0 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 0 source strategies planned; 0 render ready\n- production notes missing\n- scene look board missing\n- scene intent missing\n- cut sketches missing",
+        "title": "Scene 8 \u2014 Departure",
+        "unresolved_visual_sources": 0,
+        "warnings": [
+          "scene look board missing"
+        ]
+      }
+    ],
+    "script_count": 2,
+    "summary": "project\n2 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 3 scene(s)\n\nScene 1 \u2014 Earlier:\n- 0 cuts found\n- 0 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 0 source strategies planned; 0 render ready\n- production notes missing\n- scene look board missing\n- scene intent missing\n- cut sketches missing\n\nScene 7 \u2014 Arrival:\n- 0 cuts found\n- 0 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 0 source strategies planned; 0 render ready\n- production notes missing\n- scene look board missing\n- scene intent missing\n- cut sketches missing\n\nScene 8 \u2014 Departure:\n- 0 cuts found\n- 0 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 0 source strategies planned; 0 render ready\n- production notes missing\n- scene look board missing\n- scene intent missing\n- cut sketches missing",
+    "voice_ready": 0,
+    "warnings": [
+      "no Characters/ directory at /source/Studio/Desktop_App/evidence/sc05-2ggchv_n/project/Characters",
+      "Scene 1: scene look board missing",
+      "Scene 7: scene look board missing",
+      "Scene 8: scene look board missing"
+    ]
+  },
+  "state": {
+    "assets": [],
+    "characters": [],
+    "jobs": [],
+    "notes": [
+      "no Characters/ directory at /source/Studio/Desktop_App/evidence/sc05-2ggchv_n/project/Characters"
+    ],
+    "profile": {
+      "deliverables": [
+        {
+          "id": "del_scene_1_earlier",
+          "name": "Scene 1 \u2014 Earlier"
+        }
+      ],
+      "recipe": "narrative_dialogue"
+    },
+    "project_name": "project",
+    "scenes": [
+      {
+        "cuts": [],
+        "id": 1,
+        "source_excerpt": "Scene 1 \u2014 Earlier\n\nAn unrelated opening.",
+        "source_path": "Scripts/earlier.md",
+        "stable_id": "scene_1",
+        "stages": {
+          "assemble": "missing",
+          "characters": "missing",
+          "cut_sketches": "missing",
+          "production_notes": "missing",
+          "reference_images": "missing",
+          "render": "missing",
+          "scene_intent": "missing",
+          "scene_look": "missing",
+          "script": "present",
+          "take_review": "missing"
+        },
+        "title": "Scene 1 \u2014 Earlier"
+      },
+      {
+        "cuts": [],
+        "id": 7,
+        "source_excerpt": "Scene 7 \u2014 Arrival\n\nRain falls.",
+        "source_path": "Scripts/imported.md",
+        "stable_id": "scene_2",
+        "stages": {
+          "assemble": "missing",
+          "characters": "missing",
+          "cut_sketches": "missing",
+          "production_notes": "missing",
+          "reference_images": "missing",
+          "render": "missing",
+          "scene_intent": "missing",
+          "scene_look": "missing",
+          "script": "present",
+          "take_review": "missing"
+        },
+        "title": "Scene 7 \u2014 Arrival"
+      },
+      {
+        "cuts": [],
+        "id": 8,
+        "source_excerpt": "Scene 8 \u2014 Departure\n\nThe train leaves.",
+        "source_path": "Scripts/imported.md",
+        "stable_id": "scene_3",
+        "stages": {
+          "assemble": "missing",
+          "characters": "missing",
+          "cut_sketches": "missing",
+          "production_notes": "missing",
+          "reference_images": "missing",
+          "render": "missing",
+          "scene_intent": "missing",
+          "scene_look": "missing",
+          "script": "present",
+          "take_review": "missing"
+        },
+        "title": "Scene 8 \u2014 Departure"
+      }
+    ],
+    "scripts": [
+      {
+        "path": "Scripts/earlier.md",
+        "title": "Scene 1 \u2014 Earlier"
+      },
+      {
+        "path": "Scripts/imported.md",
+        "title": "Scene 7 \u2014 Arrival"
+      }
+    ],
+    "settings": {},
+    "state_revision": 1,
+    "version": 2
+  },
+  "summary": "project\n2 script(s), 0 character(s) (0 identity-ready, 0 voice-ready), 3 scene(s)\n\nScene 1 \u2014 Earlier:\n- 0 cuts found\n- 0 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 0 source strategies planned; 0 render ready\n- production notes missing\n- scene look board missing\n- scene intent missing\n- cut sketches missing\n\nScene 7 \u2014 Arrival:\n- 0 cuts found\n- 0 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 0 source strategies planned; 0 render ready\n- production notes missing\n- scene look board missing\n- scene intent missing\n- cut sketches missing\n\nScene 8 \u2014 Departure:\n- 0 cuts found\n- 0 lip-sync / 0 voice-over / 0 silent\n- 0 approved cut-specific start frames\n- 0 source strategies planned; 0 render ready\n- production notes missing\n- scene look board missing\n- scene intent missing\n- cut sketches missing"
+}

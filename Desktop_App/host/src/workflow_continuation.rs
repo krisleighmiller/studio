@@ -14,10 +14,10 @@ pub(crate) struct Parent {
     epoch: Mutex<u64>,
     output: PathBuf,
     audio: Mutex<Option<PathBuf>>,
-    binding: render_jobs::Binding,
+    binding: Option<render_jobs::Binding>,
 }
 #[derive(Clone, Copy, PartialEq)]
-enum Stage { Audio, Video }
+enum Stage { Audio, Video, Image }
 #[derive(Clone)]
 struct Child { parent: Arc<Parent>, stage: Stage, path: PathBuf, prediction: Option<String>, hash: String, job_id: Option<String>, at: Instant }
 fn children() -> &'static Mutex<HashMap<String, Child>> {
@@ -43,10 +43,11 @@ impl Parent {
         if director_actions::snapshot_input_files(&validated)? != self.inputs {
             return Err("An originating talking-shot input changed while permission was pending.".into());
         }
-        render_jobs::check_binding(&self.root, &self.binding)?;
+        if self.action.specialist.as_deref() == Some("dialogue_audio") { crate::workflow::dialogue_audio::validate(&self.root, &self.action)?; }
+        if let Some(binding) = &self.binding { render_jobs::check_binding(&self.root, binding)?; }
         Ok(())
     }
-    fn valid(&self) -> Result<(), String> {
+    pub(crate) fn valid(&self) -> Result<(), String> {
         self.valid_inputs()?;
         if pending::generation() != *self.epoch.lock().expect("workflow epoch") {
             return Err("A newer approval or project transition superseded this continuation.".into());
@@ -56,12 +57,19 @@ impl Parent {
 }
 
 pub(crate) fn attach(app: &HostCtx, context: &DirectorContext, validated: &ValidatedAction, epoch: u64) -> Result<Option<Arc<Parent>>, String> {
-    if validated.action.specialist.as_deref() != Some("text_sync") || validated.action.inputs.contains_key("collect_prediction_id") { return Ok(None); }
+    if !matches!(validated.action.specialist.as_deref(), Some("text_sync" | "model_sheet" | "dialogue_audio")) || validated.action.inputs.contains_key("collect_prediction_id") { return Ok(None); }
     let Some(root) = session::root() else { return Ok(None) };
     let Some(raw) = input(&validated.action, &["output_video", "output_path", "save_path"]) else { return Ok(None) };
     if !root.join(crate::workflow::state::STATE_REL).is_file() { return Ok(None); }
-    let Some(binding) = render_jobs::pending_binding(&root, &raw)? else { return Ok(None) };
-    let output = path(&root, &raw)?;
+    let (binding, output) = if validated.action.specialist.as_deref() == Some("model_sheet") {
+        let Some(output) = crate::specialists::model_sheet_pending_output(&validated.action.inputs, root.to_str())? else { return Ok(None) };
+        (None, output)
+    } else if validated.action.specialist.as_deref() == Some("dialogue_audio") {
+        (None, crate::workflow::dialogue_audio::validate(&root, &validated.action)?)
+    } else {
+        let Some(binding) = render_jobs::pending_binding(&root, &raw)? else { return Ok(None) };
+        (Some(binding), path(&root, &raw)?)
+    };
     Ok(Some(Arc::new(Parent { admission: app.clone(), root, action: validated.action.clone(), context: context.clone(), inputs: director_actions::snapshot_input_files(validated)?, epoch: Mutex::new(epoch), output, audio: Mutex::new(None), binding })))
 }
 pub(crate) fn set_outputs(app: &HostCtx, video: &Path, audio: &Path) -> Result<(), String> {
@@ -78,10 +86,10 @@ pub(crate) fn defer(app: &HostCtx, root: &Path, hash: &str, operation: &str, sav
     parent.valid()?;
     if root != parent.root { return Err("Deferred media belongs to a different project.".into()); }
     let destination = path(root, save.ok_or("Deferred talking-shot media needs an output")?)?;
-    let stage = if operation == "atlas_generate_audio" && parent.audio.lock().expect("audio output").as_ref() == Some(&destination) {
-        if input(&parent.action, &["performance_wav", "reuse_audio"]).is_some() { return Err("Saved-audio continuation must not synthesize speech again.".into()); }
+    let stage = if operation == "atlas_generate_audio" && parent.action.specialist.as_deref() == Some("dialogue_audio") && destination == parent.output {
         Stage::Audio
     } else if operation == "atlas_generate_video" && destination == parent.output { Stage::Video }
+    else if operation == "atlas_generate_image" && parent.action.specialist.as_deref() == Some("model_sheet") && destination == parent.output { Stage::Image }
     else { return Err("Deferred media does not match its originating talking-shot stage.".into()); };
     if destination.exists() { return Err("Deferred media output already exists; review/reuse the saved result instead.".into()); }
     let mut store = children().lock().expect("workflow children");
@@ -111,24 +119,45 @@ fn publish(parent: &Arc<Parent>, action: DirectorAction, origin: Option<String>)
     })
 }
 fn continuation(parent: &Arc<Parent>, stage: Stage, audio: &Path) -> Result<DirectorTurnResponse, String> {
-    let mut action = parent.action.clone();
+    if stage == Stage::Image { return settle_image(parent, audio, None, true, None); }
     if stage == Stage::Audio {
-        let inspected = crate::media_inspect::inspect_media(audio, &serde_json::Map::new())?;
-        if inspected.get("has_audio").and_then(Value::as_bool) != Some(true) || !inspected.get("video_stream").is_some_and(Value::is_null) { return Err("Delivered performance is not valid audio-only media".into()); }
-        for k in ["voice_clone", "voice_clone_path", "clone_wav", "voice_profile", "voice_profile_path", "reuse_audio"] { action.inputs.remove(k); }
-        action.inputs.insert("performance_wav".into(), json!(audio));
-        action.inputs.insert("output_audio".into(), json!(audio));
-        let card = publish(parent, action, None)?;
-        Ok(crate::director::workflow_response(format!("Speech is saved. Review this one-time approval to resume using that exact audio, without another speech-generation call.\n\n{card}")))
+        parent.valid()?;
+        crate::workflow::dialogue_audio::settle_guarded(&parent.root, &parent.action, audio, || parent.valid())?;
+        Ok(crate::director::workflow_response(format!("Dialogue audio saved as Draft to `{}`. Audition and select the complete WAV in Scene Look. Video requires separate preparation and approval; nothing advances automatically.", audio.display())))
     } else {
-        render_jobs::finish_collected(&parent.root, &parent.binding)?;
+        if let Some(binding) = &parent.binding { render_jobs::finish_collected(&parent.root, binding)?; }
         Ok(crate::director::workflow_response(format!("Talking shot saved to `{}`. No speech or video was resubmitted.", parent.output.display())))
     }
+}
+fn settle_image(parent: &Arc<Parent>, output: &Path, prediction: Option<&str>, saved: bool, error: Option<&str>) -> Result<DirectorTurnResponse, String> {
+    parent.valid()?;
+    let (message, next) = crate::specialists::settle_model_sheet_plate(&parent.action, &parent.root, output, prediction, saved, error)?;
+    let card = if let Some(action) = next {
+        let raw = crate::director::prepare_workflow_approval(&parent.admission, &parent.context, &action)?;
+        pending::publish_guarded(&raw, *parent.epoch.lock().expect("workflow epoch"), None, || !parent.admission.director_cancelled() && session::root().as_ref() == Some(&parent.root))?
+    } else { String::new() };
+    Ok(crate::director::workflow_response(format!("{message}\n\n{card}")))
 }
 pub(crate) fn after_generation(app: &HostCtx, root: &Path, hash: &str, result: &Result<DispatchOutcome, String>) {
     let id = key(root, hash);
     let Some(mut child) = children().lock().expect("workflow children").get(&id).cloned() else { return };
-    if result.is_err() { children().lock().expect("workflow children").remove(&id); return; }
+    if child.stage == Stage::Image {
+        let outcome = (|| -> Result<DirectorTurnResponse, String> {
+            let state = import::load_state(root)?;
+            let job = state.jobs.iter().find(|j| j.request_metadata.as_ref().is_some_and(|m| m.request_hash == hash));
+            let prediction = job.and_then(|j| j.request_metadata.as_ref()).and_then(|m| m.prediction_id.as_deref());
+            let saved = matches!(result, Ok(DispatchOutcome::Completed(_))) && job.is_some_and(|j| j.status == JobStatus::Completed);
+            settle_image(&child.parent, &child.path, prediction, saved, result.as_ref().err().map(String::as_str))
+        })();
+        children().lock().expect("workflow children").remove(&id);
+        let response = outcome.unwrap_or_else(|e| crate::director::workflow_response(format!("Model-sheet continuation held without resubmission: {e}")));
+        app.set_workflow_reply(serde_json::to_value(response).expect("workflow response"));
+        return;
+    }
+    if let Err(error) = result {
+        if child.stage == Stage::Audio { let _ = crate::workflow::dialogue_audio::fail(root, &child.parent.action, error); }
+        children().lock().expect("workflow children").remove(&id); return;
+    }
     let outcome = (|| -> Result<DirectorTurnResponse, String> {
         child.parent.valid()?;
         let state = import::load_state(root)?;
@@ -183,7 +212,7 @@ fn settle_child(root:&Path,child:&Child,error:Option<&str>)->Result<(),String> {
     let js:Vec<_>=state.jobs.iter().enumerate().filter(|(_,j)|Some(j.id.as_str())==child.job_id.as_deref()).map(|(i,_)|i).collect();
     if js.len()!=1 { return Err("Deferred provider job disappeared or is ambiguous".into()); }
     let j=&mut state.jobs[js[0]];
-    let kind=if child.stage==Stage::Audio {"atlas_generate_audio"}else{"atlas_generate_video"};
+    let kind=match child.stage { Stage::Audio => "atlas_generate_audio", Stage::Image => "atlas_generate_image", Stage::Video => "atlas_generate_video" };
     if !j.request_metadata.as_ref().is_some_and(|m|m.request_hash==child.hash && m.prediction_id==child.prediction) || j.kind!=kind { return Err("Deferred provider job ownership changed".into()); }
     if let Some(error)=error { j.fail(None,error.to_string()); }
     else if j.status==JobStatus::Running { j.finish(None,None); }
@@ -200,7 +229,8 @@ pub(crate) fn after_collect(app: &HostCtx, root: &Path, pred: &str, save: &str, 
         if let Err(error)=result {
             if error.starts_with("provider-failed:") {
                 settle_child(root,&child,Some(error))?;
-                render_jobs::fail_collected(root,&child.parent.binding,error)?;
+                if child.stage == Stage::Audio { crate::workflow::dialogue_audio::fail(root,&child.parent.action,error)?; }
+                if let Some(binding) = &child.parent.binding { render_jobs::fail_collected(root,binding,error)?; }
                 children().lock().expect("workflow children").remove(&id);
                 return Ok(crate::director::workflow_response("The existing provider prediction failed. No replacement was submitted.".into()));
             }

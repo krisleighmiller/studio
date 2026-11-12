@@ -1,0 +1,158 @@
+{
+  "version": 2,
+  "state_revision": 6,
+  "project_name": "issue1",
+  "scripts": [
+    {
+      "path": "Scripts/Final authored dialogue.md",
+      "title": "Two friends"
+    },
+    {
+      "path": "Scripts/Reviewer saved.md",
+      "title": "Two friends"
+    }
+  ],
+  "characters": [],
+  "scenes": [
+    {
+      "id": 1,
+      "title": "Scene 1 — Hello independent reviewer",
+      "source_path": "Scripts/Reviewer saved.md",
+      "source_excerpt": "## Scene 1 — Hello independent reviewer\n- **Location:** A quiet doorway\n- **Action:** Alice waves to Bob.\n- **Dialogue:**\n  - **Alice:** Hello, Bob!\n  - **Bob:** Hello, Alice!",
+      "location": "A quiet doorway",
+      "action": [
+        "Alice waves to Bob."
+      ],
+      "dialogue": [
+        {
+          "speaker": "Alice",
+          "text": "Hello, Bob!"
+        },
+        {
+          "speaker": "Bob",
+          "text": "Hello, Alice!"
+        }
+      ],
+      "beats": [
+        {
+          "kind": "location",
+          "text": "A quiet doorway"
+        },
+        {
+          "kind": "action",
+          "text": "Alice waves to Bob."
+        },
+        {
+          "kind": "dialogue",
+          "speaker": "Alice",
+          "text": "Hello, Bob!"
+        },
+        {
+          "kind": "dialogue",
+          "speaker": "Bob",
+          "text": "Hello, Alice!"
+        }
+      ],
+      "cuts": [],
+      "stages": {
+        "script": "present",
+        "characters": "missing",
+        "scene_intent": "missing",
+        "scene_look": "missing",
+        "cut_sketches": "missing",
+        "reference_images": "missing",
+        "production_notes": "missing",
+        "render": "missing",
+        "take_review": "missing",
+        "assemble": "missing"
+      },
+      "stable_id": "scene_1"
+    },
+    {
+      "id": 2,
+      "title": "Scene 2 — Goodbye",
+      "source_path": "Scripts/Reviewer saved.md",
+      "source_excerpt": "## Scene 2 — Goodbye\n- **Action:** The friends wave goodbye.\n- **Dialogue:**\n  - **Bob:** See you soon!",
+      "action": [
+        "The friends wave goodbye."
+      ],
+      "dialogue": [
+        {
+          "speaker": "Bob",
+          "text": "See you soon!"
+        }
+      ],
+      "beats": [
+        {
+          "kind": "action",
+          "text": "The friends wave goodbye."
+        },
+        {
+          "kind": "dialogue",
+          "speaker": "Bob",
+          "text": "See you soon!"
+        }
+      ],
+      "cuts": [],
+      "stages": {
+        "script": "present",
+        "characters": "missing",
+        "scene_intent": "missing",
+        "scene_look": "missing",
+        "cut_sketches": "missing",
+        "reference_images": "missing",
+        "production_notes": "missing",
+        "render": "missing",
+        "take_review": "missing",
+        "assemble": "missing"
+      },
+      "stable_id": "scene_2"
+    }
+  ],
+  "assets": [],
+  "jobs": [],
+  "settings": {},
+  "profile": {
+    "recipe": "narrative_dialogue",
+    "deliverables": [
+      {
+        "id": "del_issue1",
+        "name": "issue1"
+      }
+    ]
+  },
+  "requirements": [
+    {
+      "id": "req_voice_alice",
+      "kind": "voice",
+      "name": "Alice",
+      "status": "missing",
+      "scene_ids": [
+        1
+      ]
+    },
+    {
+      "id": "req_voice_bob",
+      "kind": "voice",
+      "name": "Bob",
+      "status": "missing",
+      "scene_ids": [
+        1,
+        2
+      ]
+    },
+    {
+      "id": "req_location_a_quiet_doorway",
+      "kind": "location",
+      "name": "A quiet doorway",
+      "status": "draft",
+      "scene_ids": [
+        1
+      ],
+      "notes": "A quiet doorway"
+    }
+  ],
+  "notes": [
+    "no Characters/ directory at /runtime/functional-review/issue1/Characters"
+  ]
+}

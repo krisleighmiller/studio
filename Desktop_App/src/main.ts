@@ -13,6 +13,7 @@ import {
   toMediaUrlAsync,
 } from "./host";
 import { createSpendConfirmationHandler } from "./spendConfirmation";
+import { activeRequestSummary } from "./studio/requestReceipt";
 import { isMarkdownPath, renderMarkdown } from "./markdown";
 import workbenchGuideMd from "./docs/workbench-guide.md?raw";
 import {
@@ -28,6 +29,7 @@ import {
 import {
   bindSettingsHost,
   getSettings,
+  getSavedSettings,
   loadAppSettings,
   populateChatModelSelect,
   persistSettings,
@@ -36,14 +38,18 @@ import {
   settingsAreDirty,
 } from "./settingsPanel";
 import { bindVoiceHost, openVoicePanelContext, renderVoicePanel } from "./voicePanel";
+import { imageCapabilityRoutes } from "./settingsTypes";
 import {
   bindWorkflowDesk,
   clearWorkflowDesk,
   jobsSummary,
   loadWorkflowDesk,
+  handleUseAsProjectScript,
   toggleJobsDrawer,
   setStudioWorkArea,
   refreshWorkflowDesk,
+  refreshSavedScript,
+  modelSheetMediaOwners,
   refreshWorkflowJobsOnly,
   renderWorkflowDesk,
   attachDirectorContext,
@@ -160,6 +166,7 @@ const els = {
   settingsBtn: document.querySelector<HTMLButtonElement>("#settings-btn")!,
   fileTree: document.querySelector<HTMLElement>("#file-tree")!,
   newFileBtn: document.querySelector<HTMLButtonElement>("#new-file-btn")!,
+  openFileBtn: document.querySelector<HTMLButtonElement>("#open-file-btn")!,
   newFolderBtn: document.querySelector<HTMLButtonElement>("#new-folder-btn")!,
   editorTabs: document.querySelector<HTMLElement>("#editor-tabs")!,
   editorEmpty: document.querySelector<HTMLElement>("#editor-empty")!,
@@ -221,6 +228,7 @@ const els = {
   chatRail: document.querySelector<HTMLButtonElement>("#chat-rail")!,
   inspectorTabDirector: document.querySelector<HTMLButtonElement>("#inspector-tab-director")!,
   inspectorTabFinish: document.querySelector<HTMLButtonElement>("#inspector-tab-finish")!,
+  inspectorTabState: document.querySelector<HTMLButtonElement>("#inspector-tab-state")!,
   finishMount: document.querySelector<HTMLElement>("#studio-finish-mount")!,
   directorSection: document.querySelector<HTMLElement>("#director-section")!,
   contextMenu: document.querySelector<HTMLElement>("#context-menu")!,
@@ -330,26 +338,6 @@ function createChatTab(title?: string): ChatTab {
   chatTabs.push(tab);
   activeChatId = tab.id;
   return tab;
-}
-
-function addPathToChat(path: string): void {
-  const tab = activeChat();
-  if (!tab) {
-    createChatTab("Director");
-  }
-  const target = activeChat();
-  if (!target) return;
-  const normalized = normalizePath(path);
-  if (!normalized) return;
-  if (target.attachments.some((item) => normalizePath(item) === normalized)) {
-    setStatus("Already attached to chat", basename(normalized));
-    renderChatAttachments();
-    return;
-  }
-  target.attachments.push(normalized);
-  renderChatAttachments();
-  setStatus("Added to chat", basename(normalized));
-  setChatCollapsed(false);
 }
 
 function removeChatAttachment(path: string): void {
@@ -499,13 +487,15 @@ function paintSurface(): void {
   els.settingsBtn.setAttribute("aria-pressed", shellSurface === "settings" ? "true" : "false");
   const labels: Record<ShellSurface, string> = {
     home: "Home",
-    studio: "Studio",
-    files: "Files",
+    studio: "Production workflow",
+    files: "File editor",
     assets: "Assets",
     voices: "Voices",
     settings: "Settings",
   };
   document.querySelector("#editor-panel")?.setAttribute("aria-label", labels[shellSurface]);
+  const heading = document.querySelector("#center-panel-heading");
+  if (heading) heading.textContent = labels[shellSurface];
   updateShellChrome();
 }
 
@@ -664,16 +654,16 @@ async function renderAssetBrowser(): Promise<void> {
   }
 }
 
-type InspectorTab = "director" | "finish";
+type InspectorTab = "history" | "finish" | "state";
 
 function inspectorTab(): InspectorTab {
   try {
     const saved = localStorage.getItem("studio-inspector-tab");
-    if (saved === "finish") return "finish";
+    if (saved === "history" || saved === "state") return saved;
   } catch {
     /* ignore */
   }
-  return "director";
+  return "finish";
 }
 
 function setInspectorTab(tab: InspectorTab): void {
@@ -682,15 +672,24 @@ function setInspectorTab(tab: InspectorTab): void {
   } catch {
     /* ignore */
   }
-  const director = tab === "director";
-  els.inspectorTabDirector?.classList.toggle("active", director);
-  els.inspectorTabFinish?.classList.toggle("active", !director);
-  els.inspectorTabDirector?.setAttribute("aria-selected", director ? "true" : "false");
-  els.inspectorTabFinish?.setAttribute("aria-selected", !director ? "true" : "false");
-  els.chatPanel?.classList.toggle("inspector-finish", !director);
-  els.chatPanel?.classList.toggle("inspector-director", director);
-  if (els.directorSection) els.directorSection.hidden = !director;
-  if (els.finishMount) els.finishMount.hidden = director;
+  const history = tab === "history";
+  const state = tab === "state";
+  els.inspectorTabDirector?.classList.toggle("active", history);
+  els.inspectorTabFinish?.classList.toggle("active", !history && !state);
+  els.inspectorTabState?.classList.toggle("active", state);
+  els.inspectorTabDirector?.setAttribute("aria-selected", history ? "true" : "false");
+  els.inspectorTabFinish?.setAttribute("aria-selected", !history && !state ? "true" : "false");
+  els.inspectorTabState?.setAttribute("aria-selected", state ? "true" : "false");
+  els.chatPanel?.classList.toggle("inspector-finish", !history && !state);
+  els.chatPanel?.classList.toggle("inspector-director", history);
+  els.chatPanel?.classList.toggle("inspector-state", state);
+  // Historical transcript files use the ordinary editor, never the old composer.
+  const saved = document.querySelector<HTMLElement>("#saved-conversations");
+  if (saved) saved.hidden = !history;
+  const stateMount = document.querySelector<HTMLElement>("#studio-state-mount");
+  if (stateMount) stateMount.hidden = !state;
+  if (els.directorSection) els.directorSection.hidden = true;
+  if (els.finishMount) els.finishMount.hidden = history || state;
 }
 
 function setChatCollapsed(collapsed: boolean): void {
@@ -698,7 +697,7 @@ function setChatCollapsed(collapsed: boolean): void {
   els.chatPanel.classList.toggle("collapsed", collapsed);
   els.chatSplitter.classList.toggle("chat-collapsed", collapsed);
   els.chatRail.classList.toggle("hidden", !collapsed);
-  const label = collapsed ? "Show Director" : "Hide Director";
+  const label = collapsed ? "Show Finish and history" : "Hide Finish and history";
   els.toggleChatBtn.title = `${label} (Ctrl+Alt+H)`;
   els.toggleChatBtn.setAttribute("aria-label", label);
   els.toggleChatBtn.setAttribute("aria-pressed", collapsed ? "true" : "false");
@@ -1165,6 +1164,7 @@ function setEditorValue(
 function updateExplorerActionState(): void {
   const enabled = Boolean(projectRoot);
   els.newFileBtn.disabled = !enabled;
+  els.openFileBtn.disabled = !enabled;
   els.newFolderBtn.disabled = !enabled;
 }
 
@@ -1216,10 +1216,7 @@ function renderEditorTabs(): void {
     button.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      syncTabFromEditor();
-      activeEditorId = tab.id;
-      renderEditor();
-      showEditorTabContextMenu(event.clientX, event.clientY);
+      showEditorTabContextMenu(event.clientX, event.clientY, tab);
     });
     els.editorTabs.append(button);
   }
@@ -1675,17 +1672,21 @@ function syncExplorerSelection(path: string | null): void {
   explorerRowByPath(path)?.classList.add("selected");
 }
 
-function restoreExplorerViewport(scrollTop: number, scrollLeft: number): void {
+function restoreExplorerViewport(scrollTop: number, scrollLeft: number, hadTreeFocus: boolean): void {
   els.fileTree.scrollTop = scrollTop;
   els.fileTree.scrollLeft = scrollLeft;
-  if (pendingCreate || pendingRename) return;
+  if (pendingCreate || pendingRename || !hadTreeFocus) return;
   explorerRowByPath(selectedPath)?.focus({ preventScroll: true });
 }
 
-async function renderExplorer(): Promise<void> {
+async function renderExplorer(isCurrent: () => boolean = () => true): Promise<void> {
+  if (!isCurrent()) return;
+  const root = projectRoot;
+  const epoch = projectEpoch;
   const seq = ++explorerRenderSeq;
   const scrollTop = els.fileTree.scrollTop;
   const scrollLeft = els.fileTree.scrollLeft;
+  const hadTreeFocus = els.fileTree.contains(document.activeElement);
   updateExplorerActionState();
   if (!projectRoot) {
     pendingCreate = null;
@@ -1704,11 +1705,11 @@ async function renderExplorer(): Promise<void> {
   updateShellChrome();
 
   const next = document.createElement("div");
-  await renderTreeNode(next, projectRoot, 0);
-  if (seq !== explorerRenderSeq) return;
+  await renderTreeNode(next, root!, 0);
+  if (seq !== explorerRenderSeq || projectRoot !== root || projectEpoch !== epoch || !isCurrent()) return;
 
   els.fileTree.replaceChildren(...next.childNodes);
-  restoreExplorerViewport(scrollTop, scrollLeft);
+  restoreExplorerViewport(scrollTop, scrollLeft, hadTreeFocus);
   if (shellSurface === "assets") void renderAssetBrowser();
 }
 
@@ -2251,8 +2252,7 @@ function releaseOpenHandlesUnder(targetPath: string): void {
     }
   }
 
-  // Drop tabs first so nothing keeps a stale handle after delete.
-  closeTabsForDeletedPath(targetPath);
+  // Release streams before trash, but retain tabs until the host confirms success.
 }
 
 async function deleteEntry(path: string | null = pathForFileOps()): Promise<void> {
@@ -2264,6 +2264,8 @@ async function deleteEntry(path: string | null = pathForFileOps()): Promise<void
     setStatus("Cannot delete the project root");
     return;
   }
+  const deletionRoot = projectRoot;
+  const deletionEpoch = projectEpoch;
   const label = basename(path);
   const isDir = await entryIsDirectory(path);
   const proceed = await confirmAction(
@@ -2276,9 +2278,11 @@ async function deleteEntry(path: string | null = pathForFileOps()): Promise<void
     setStatus("Delete cancelled");
     return;
   }
+  if (projectRoot !== deletionRoot || projectEpoch !== deletionEpoch) return;
   releaseOpenHandlesUnder(path);
   // Give Chromium a tick to drop media streams before the host unlinks.
   await new Promise<void>((resolve) => window.setTimeout(resolve, 40));
+  if (projectRoot !== deletionRoot || projectEpoch !== deletionEpoch) return;
   try {
     await invoke("delete_path", { path });
   } catch (error) {
@@ -2287,9 +2291,18 @@ async function deleteEntry(path: string | null = pathForFileOps()): Promise<void
     renderEditor();
     return;
   }
+  if (projectRoot !== deletionRoot || projectEpoch !== deletionEpoch) return;
+  closeTabsForDeletedPath(path);
   await renderExplorer();
   renderEditor();
   renderChatAttachments();
+  if (projectRoot !== deletionRoot || projectEpoch !== deletionEpoch) return;
+  try {
+    await refreshWorkflowDesk(() => projectRoot === deletionRoot && projectEpoch === deletionEpoch, false);
+  } catch (error) {
+    setStatus("Deleted on disk; Studio refresh failed", String(error));
+    return;
+  }
   setStatus(isDir ? "Deleted folder" : "Deleted", path);
 }
 
@@ -2342,6 +2355,8 @@ function makeRenameRow(entry: DirEntry, depth: number): HTMLLIElement {
   });
   input.addEventListener("click", (event) => event.stopPropagation());
   input.addEventListener("mousedown", (event) => event.stopPropagation());
+  // The Explorer blank-area menu owns the tree, not editable rename text.
+  input.addEventListener("contextmenu", (event) => event.stopPropagation());
 
   window.requestAnimationFrame(() => {
     input.focus();
@@ -2371,6 +2386,14 @@ function showExplorerContextMenu(
       ? entry.path
       : null;
   showContextMenu(x, y, [
+    {
+      type: "item",
+      label: "Use as project script",
+      disabled: !entry || entry.isDir || !/\.(md|markdown|txt)$/i.test(entry.path),
+      action: () => {
+        if (entry && !entry.isDir) void handleUseAsProjectScript(entry.path);
+      },
+    },
     {
       type: "item",
       label: "New File…",
@@ -2432,19 +2455,30 @@ function showExplorerContextMenu(
     { type: "separator" },
     {
       type: "item",
-      label: "Add to Chat",
-      disabled: !copyTarget,
-      action: () => {
-        if (copyTarget) addPathToChat(copyTarget);
-      },
-    },
-    {
-      type: "item",
       label: "Open Character Voice…",
       disabled: !copyTarget && !projectRoot,
       action: () => {
         if (copyTarget) selectedPath = copyTarget;
         openVoiceTab();
+      },
+    },
+    {
+      type: "item",
+      label: "Copy name",
+      disabled: !entry,
+      action: () => {
+        if (!entry) return;
+        const priorFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const field = document.createElement("textarea");
+        field.value = entry.name;
+        field.style.position = "fixed";
+        field.style.left = "-9999px";
+        document.body.append(field);
+        field.select();
+        const copied = document.execCommand("copy");
+        field.remove();
+        priorFocus?.focus();
+        if (!copied) setStatus("Could not copy Explorer name");
       },
     },
     {
@@ -2527,13 +2561,42 @@ function showEditorTextContextMenu(x: number, y: number): void {
   ]);
 }
 
-function showEditorTabContextMenu(x: number, y: number): void {
-  const tab = activeEditor();
+function showEditorTabContextMenu(x: number, y: number, tab: EditorTab | undefined = activeEditor()): void {
   const canSave = isTextTab(tab);
   const hasTabs = editorTabs.length > 0;
   const hasOthers = editorTabs.length > 1;
   const hasSaved = editorTabs.some((item) => !tabIsDirty(item));
+  const activateTarget = () => {
+    if (!tab) return;
+    syncTabFromEditor();
+    activeEditorId = tab.id;
+    renderEditor();
+  };
   showContextMenu(x, y, [
+    {
+      type: "item",
+      label: "Copy tab name",
+      disabled: !tab,
+      action: () => {
+        if (!tab) return;
+        const priorFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const selection = window.getSelection();
+        const ranges = selection ? [...Array(selection.rangeCount)].map((_, i) => selection.getRangeAt(i)) : [];
+        const field = document.createElement("textarea");
+        field.value = tab.name;
+        field.style.position = "fixed";
+        field.style.left = "-9999px";
+        document.body.append(field);
+        field.select();
+        const copied = document.execCommand("copy");
+        field.remove();
+        priorFocus?.focus();
+        selection?.removeAllRanges();
+        for (const range of ranges) selection?.addRange(range);
+        if (!copied) setStatus("Could not copy tab name");
+      },
+    },
+    { type: "separator" },
     {
       type: "item",
       label: "New Text File",
@@ -2550,18 +2613,10 @@ function showEditorTabContextMenu(x: number, y: number): void {
     { type: "separator" },
     {
       type: "item",
-      label: "Add to Chat",
-      disabled: !tab?.path,
-      action: () => {
-        if (tab?.path) addPathToChat(tab.path);
-      },
-    },
-    { type: "separator" },
-    {
-      type: "item",
       label: "Save",
       disabled: !canSave,
       action: () => {
+        activateTarget();
         void saveActiveFile();
       },
     },
@@ -2570,6 +2625,7 @@ function showEditorTabContextMenu(x: number, y: number): void {
       label: "Save As…",
       disabled: !canSave,
       action: () => {
+        activateTarget();
         void saveActiveFileAs();
       },
     },
@@ -2587,6 +2643,7 @@ function showEditorTabContextMenu(x: number, y: number): void {
       label: "Close Others",
       disabled: !hasOthers,
       action: () => {
+        activateTarget();
         void closeOtherEditorTabs();
       },
     },
@@ -2715,19 +2772,25 @@ async function openFileDialog(): Promise<void> {
     setStatus("Open a project first");
     return;
   }
-  const selected = await openDialog({
-    multiple: false,
-    directory: false,
-    title: "Open File",
-    defaultPath: projectRoot,
-    filters: OPEN_FILTERS,
-  });
-  if (!selected || Array.isArray(selected)) return;
-  await openFile(selected);
-  selectedPath = selected;
-  const parent = dirname(selected);
-  if (parent) expandedDirs.add(parent);
-  await renderExplorer();
+  try {
+    const selected = await openDialog({
+      multiple: false,
+      directory: false,
+      title: "Open File",
+      defaultPath: projectRoot,
+      filters: OPEN_FILTERS,
+    });
+    if (!selected || Array.isArray(selected)) return;
+    await openFile(selected);
+    const tab = activeEditor();
+    if (tab) placeFileSurface(tab, true);
+    selectedPath = selected;
+    const parent = dirname(selected);
+    if (parent) expandedDirs.add(parent);
+    await renderExplorer();
+  } catch (error) {
+    setStatus("Could not open file", String(error));
+  }
 }
 
 async function closeEditorTab(
@@ -2871,10 +2934,29 @@ async function confirmOpenProjectSwitch(): Promise<boolean> {
   );
 }
 
+let explorerPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function scheduleExplorerPoll(): void {
+  if (explorerPollTimer !== null) clearInterval(explorerPollTimer);
+  explorerPollTimer = null;
+  if (!projectRoot) return;
+  const root = projectRoot;
+  const epoch = projectEpoch;
+  let inFlight = false;
+  const current = () => projectRoot === root && projectEpoch === epoch && !projectTransitionInFlight;
+  explorerPollTimer = setInterval(() => {
+    if (!current() || inFlight || document.hidden || pendingCreate || pendingRename) return;
+    inFlight = true;
+    void renderExplorer(current).finally(() => { inFlight = false; });
+  }, 1200);
+}
+
 async function withProjectTransition(action: () => Promise<void>): Promise<void> {
   if (projectTransitionInFlight) return;
   projectTransitionInFlight = true;
   projectEpoch += 1;
+  if (explorerPollTimer !== null) clearInterval(explorerPollTimer);
+  explorerPollTimer = null;
   if (directorOperation) {
     closeDirectorProgress(directorOperation);
     renderChat();
@@ -2883,6 +2965,7 @@ async function withProjectTransition(action: () => Promise<void>): Promise<void>
     await action();
   } finally {
     projectTransitionInFlight = false;
+    scheduleExplorerPoll();
   }
 }
 
@@ -3001,15 +3084,27 @@ async function saveActiveFile(): Promise<void> {
     return;
   }
   syncTabFromEditor();
-  if (!tab.path) {
-    await saveActiveFileAs();
-    return;
+  const saveRoot = projectRoot;
+  const saveEpoch = projectEpoch;
+  const saveIsCurrent = () => projectRoot === saveRoot && projectEpoch === saveEpoch && !projectTransitionInFlight && editorTabs.includes(tab);
+  try {
+    if (!tab.path) {
+      await saveActiveFileAs();
+      return;
+    }
+    const path = tab.path;
+    const contents = tab.contents;
+    await invoke("write_text_file", { path, contents });
+    if (!saveIsCurrent()) return;
+    syncTabFromEditor();
+    tab.original = contents;
+    tab.dirty = tab.contents !== contents;
+    renderEditor();
+    setStatus("Saved", path);
+    await refreshSavedScript(path, saveIsCurrent);
+  } catch (error) {
+    if (saveIsCurrent()) setStatus("Could not save file — use Save As… to choose another location", String(error));
   }
-  await invoke("write_text_file", { path: tab.path, contents: tab.contents });
-  tab.original = tab.contents;
-  tab.dirty = false;
-  renderEditor();
-  setStatus("Saved", tab.path);
 }
 
 async function saveActiveFileAs(): Promise<void> {
@@ -3034,26 +3129,33 @@ async function saveActiveFileAs(): Promise<void> {
       ? joinPath(projectRoot, `${tab.name}.md`)
       : `${tab.name}.md`;
 
-  const selected = await saveDialog({
-    title: "Save As",
-    defaultPath,
-    filters: OPEN_FILTERS,
-  });
-  if (!selected) return;
-
-  await invoke("write_text_file", { path: selected, contents: tab.contents });
-  tab.path = selected;
-  tab.name = basename(selected);
-  tab.original = tab.contents;
-  tab.dirty = false;
-  selectedPath = selected;
-  const parent = dirname(selected);
-  if (projectRoot && normalizePath(parent).startsWith(normalizePath(projectRoot))) {
-    expandedDirs.add(parent);
-    await renderExplorer();
+  const root = projectRoot;
+  const epoch = projectEpoch;
+  const contents = tab.contents;
+  const current = () => projectRoot === root && projectEpoch === epoch && !projectTransitionInFlight && editorTabs.includes(tab);
+  try {
+    const selected = await saveDialog({ title: "Save As", defaultPath, filters: OPEN_FILTERS });
+    if (!selected || !current()) return;
+    await invoke("write_text_file", { path: selected, contents });
+    if (!current()) return;
+    syncTabFromEditor();
+    tab.path = selected;
+    tab.name = basename(selected);
+    tab.original = contents;
+    tab.dirty = tab.contents !== contents;
+    selectedPath = selected;
+    const parent = dirname(selected);
+    if (root && normalizePath(parent).startsWith(normalizePath(root) + "/")) {
+      expandedDirs.add(parent);
+      await renderExplorer();
+      if (!current()) return;
+    }
+    renderEditor();
+    setStatus("Saved", selected);
+    await refreshSavedScript(selected, current);
+  } catch (error) {
+    if (current()) setStatus("Could not save file — use Save As… to choose another location", String(error));
   }
-  renderEditor();
-  setStatus("Saved", selected);
 }
 
 function directorHistory(tab: ChatTab): Array<{ role: string; content: string }> {
@@ -3380,6 +3482,9 @@ function currentDirectorContext() {
     focusedEditorExcerpt: focusedEditorExcerpt(editor),
     attachedPaths: [...(tab?.attachments ?? [])],
     capabilityDefaults: settings.capabilityDefaults ?? {},
+    // TODO(adult-content): adult slots were consumed only through the Director
+    // chat, now retired, so no per-request adult trigger remains. Wire one into
+    // the generation surfaces to make adultCapabilityDefaults usable again.
     adultContentEnabled: Boolean(settings.adultContentEnabled),
     adultCapabilityDefaults: settings.adultCapabilityDefaults ?? {},
     workflowStage: scope.stage,
@@ -3506,6 +3611,8 @@ async function sendChatMessage(
     projectEpoch?: number;
   },
 ): Promise<void> {
+  // Retired UI events/shortcuts must not resurrect the conversational workflow.
+  if (els.directorSection?.dataset.retired === "true") return;
   const tab = activeChat();
   const isResume = Boolean(options?.resume);
   const addsUserMessage = !isResume && !options?.afterApproval && !options?.autoContinue;
@@ -3755,7 +3862,11 @@ async function copySelection(): Promise<void> {
     els.editor.selectionEnd,
   );
   if (!selected) return;
-  await navigator.clipboard.writeText(selected);
+  // The Electron window denies web clipboard permissions; copy the selected
+  // textarea range through Chromium's editing command instead.
+  if (!document.execCommand("copy")) {
+    setStatus("Could not copy editor selection");
+  }
 }
 
 async function cutSelection(): Promise<void> {
@@ -3782,19 +3893,11 @@ async function cutSelection(): Promise<void> {
   const start = els.editor.selectionStart;
   const end = els.editor.selectionEnd;
   if (start === end) return;
-  const selected = els.editor.value.slice(start, end);
-  await navigator.clipboard.writeText(selected);
-  pushUndoSnapshot(tab, els.editor.value);
-  const next = els.editor.value.slice(0, start) + els.editor.value.slice(end);
-  applyingHistory = true;
-  setEditorValue(next, start, start);
-  applyingHistory = false;
-  tab.contents = next;
-  tab.dirty = tab.contents !== tab.original;
-  tab.selectionStart = start;
-  tab.selectionEnd = start;
-  renderEditorTabs();
-  setStatus(tab.dirty ? "Unsaved changes" : "Ready", tab.path ?? tab.name);
+  // Chromium owns the clipboard and emits the editor input event, which records
+  // the dirty state and undo snapshot. Web Clipboard writes are denied here.
+  if (!document.execCommand("cut")) {
+    setStatus("Could not cut editor selection");
+  }
 }
 
 async function pasteClipboard(): Promise<void> {
@@ -3822,28 +3925,14 @@ async function pasteClipboard(): Promise<void> {
   const tab = activeEditor();
   if (!isTextTab(tab) || tab.preview) return;
   focusEditor();
-  let text = "";
+  // Chromium owns clipboard access here; its focused paste emits the editor's
+  // input event so dirty state and undo history follow the ordinary path.
   try {
-    text = await navigator.clipboard.readText();
+    if (!window.workbench?.pasteFocused) throw new Error("Native paste unavailable");
+    await window.workbench.pasteFocused();
   } catch {
     setStatus("Clipboard paste blocked — try focusing the editor and using Ctrl+V");
-    return;
   }
-  const start = els.editor.selectionStart;
-  const end = els.editor.selectionEnd;
-  pushUndoSnapshot(tab, els.editor.value);
-  const next =
-    els.editor.value.slice(0, start) + text + els.editor.value.slice(end);
-  const caret = start + text.length;
-  applyingHistory = true;
-  setEditorValue(next, caret, caret);
-  applyingHistory = false;
-  tab.contents = next;
-  tab.dirty = tab.contents !== tab.original;
-  tab.selectionStart = caret;
-  tab.selectionEnd = caret;
-  renderEditorTabs();
-  setStatus(tab.dirty ? "Unsaved changes" : "Ready", tab.path ?? tab.name);
 }
 
 function selectAllInEditor(): void {
@@ -4170,6 +4259,17 @@ function handleMenuAction(action: string): void {
   }
 
   switch (action) {
+    case "new-file":
+      openUntitledFile();
+      break;
+    case "open-file":
+      void openFileDialog();
+      break;
+    case "close-file": {
+      const tab = activeEditor();
+      if (tab) void closeEditorTab(tab.id);
+      break;
+    }
     case "open-project":
       void openProject();
       break;
@@ -4240,10 +4340,10 @@ function handleMenuAction(action: string): void {
       openDocsTab();
       break;
     case "copy-chat":
-      void copyChatTranscript();
-      break;
     case "save-chat":
-      void saveChatTranscript();
+    case "open-conversation-history":
+      setInspectorTab("history");
+      setChatCollapsed(false);
       break;
     default:
       break;
@@ -4251,6 +4351,24 @@ function handleMenuAction(action: string): void {
 }
 
 function bindUi(): void {
+  document.addEventListener("studio-job-output-context", (event) => {
+    const { path, x, y } = (event as CustomEvent<{ path: string; x: number; y: number }>).detail;
+    showContextMenu(x, y, [{
+      type: "item",
+      label: "Copy output path",
+      action: () => {
+        const field = document.createElement("textarea");
+        field.value = path;
+        field.style.position = "fixed";
+        field.style.left = "-9999px";
+        document.body.append(field);
+        field.select();
+        const copied = document.execCommand("copy");
+        field.remove();
+        if (!copied) setStatus("Could not copy Job output path");
+      },
+    }]);
+  });
   for (const button of els.navRail.querySelectorAll<HTMLButtonElement>(".nav-item")) {
     button.addEventListener("click", () => {
       const surface = button.dataset.surface;
@@ -4298,6 +4416,8 @@ function bindUi(): void {
     if (shellSurface !== "studio") showShell("studio");
   });
   setInterval(refreshJobsButton, 2000);
+  // External writers are polled by a timer owned by the open project session.
+  // A queued callback from an earlier session cannot refresh a reopened root.
   els.shellWorkArea.addEventListener("change", () => {
     const value = els.shellWorkArea.value;
     if (value === "plan" || value === "produce" || value === "finish") {
@@ -4368,6 +4488,13 @@ function bindUi(): void {
   applyMediaVolume(mediaVolume);
   updatePlayPauseButton();
 
+  els.shellProjectName.addEventListener("contextmenu", () => {
+    const range = document.createRange();
+    range.selectNodeContents(els.shellProjectName);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+  });
+
   els.editor.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -4432,54 +4559,48 @@ function bindUi(): void {
   els.chatRail.addEventListener("click", () => setChatCollapsed(false));
   setInspectorTab(inspectorTab());
   els.inspectorTabDirector?.addEventListener("click", () => {
-    setInspectorTab("director");
+    setInspectorTab("history");
     setChatCollapsed(false);
+  });
+  document.querySelector("#open-saved-conversation")?.addEventListener("click", () => {
+    void openFileDialog();
   });
   els.inspectorTabFinish?.addEventListener("click", () => {
     setInspectorTab("finish");
     setChatCollapsed(false);
   });
-  els.chatPanel.addEventListener("contextmenu", (event) => {
+  els.inspectorTabState?.addEventListener("click", () => {
+    setInspectorTab("state");
+    setChatCollapsed(false);
+  });
+  for (const tab of [els.inspectorTabFinish, els.inspectorTabDirector, els.inspectorTabState]) {
+    tab.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const label = tab.textContent?.trim() ?? "";
+      showContextMenu(event.clientX, event.clientY, [{
+        type: "item",
+        label: "Copy label",
+        action: () => {
+          const field = document.createElement("textarea");
+          field.value = label;
+          field.style.position = "fixed";
+          field.style.left = "-9999px";
+          document.body.append(field);
+          field.select();
+          const copied = document.execCommand("copy");
+          field.remove();
+          if (!copied) setStatus("Could not copy inspector label");
+        },
+      }]);
+    });
+  }
+  els.directorSection.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     event.stopPropagation();
     showChatContextMenu(event.clientX, event.clientY);
   });
 
-  const setChatDragOver = (active: boolean) => {
-    els.chatPanel.classList.toggle("drag-over", active);
-  };
-
-  els.chatPanel.addEventListener("dragenter", (event) => {
-    event.preventDefault();
-    setChatDragOver(true);
-  });
-  els.chatPanel.addEventListener("dragover", (event) => {
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
-    setChatDragOver(true);
-  });
-  els.chatPanel.addEventListener("dragleave", (event) => {
-    const related = event.relatedTarget as Node | null;
-    if (related && els.chatPanel.contains(related)) return;
-    setChatDragOver(false);
-  });
-  els.chatPanel.addEventListener("drop", (event) => {
-    event.preventDefault();
-    setChatDragOver(false);
-    const transfer = event.dataTransfer;
-    if (!transfer) return;
-    const workbenchPath =
-      transfer.getData(WORKBENCH_PATH_MIME) || transfer.getData("text/plain");
-    if (workbenchPath && workbenchPath.startsWith("/")) {
-      addPathToChat(workbenchPath.trim());
-      return;
-    }
-    // Fallback: some environments expose a path on dropped File objects.
-    for (const file of Array.from(transfer.files)) {
-      const maybePath = (file as File & { path?: string }).path;
-      if (maybePath) addPathToChat(maybePath);
-    }
-  });
 
   els.chatModelSelect.addEventListener("change", () => {
     setSelectedChatModelFromSelect(els.chatModelSelect.value);
@@ -4491,6 +4612,10 @@ function bindUi(): void {
   els.newFileBtn.addEventListener("click", () => {
     if (!projectRoot) return;
     void createEntryAt(projectRoot, "file");
+  });
+
+  els.openFileBtn.addEventListener("click", () => {
+    void openFileDialog();
   });
 
   els.newFolderBtn.addEventListener("click", () => {
@@ -4515,15 +4640,8 @@ function bindUi(): void {
     toggleMarkdownPreview();
   });
 
-  // Capture-phase: always suppress Chromium's default menu in the desk UI.
-  // Specific handlers below populate our custom menu.
-  document.addEventListener(
-    "contextmenu",
-    (event) => {
-      event.preventDefault();
-    },
-    true,
-  );
+  // Unowned text reaches the native selection menu; specialized object menus
+  // below preventDefault on their own targets.
 
   els.fileTree.addEventListener("contextmenu", (event) => {
     if (!projectRoot) return;
@@ -4714,9 +4832,19 @@ function bindUi(): void {
       return;
     }
 
-    if (key === "o") {
+    if (key === "n" && !event.shiftKey && !event.altKey) {
       event.preventDefault();
-      handleMenuAction("open-project");
+      handleMenuAction("new-file");
+      return;
+    }
+    if (key === "w" && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      handleMenuAction("close-file");
+      return;
+    }
+    if (key === "o" && !event.altKey) {
+      event.preventDefault();
+      handleMenuAction(event.shiftKey ? "open-file" : "open-project");
       return;
     }
     if (key === "s" && event.shiftKey) {
@@ -4773,10 +4901,14 @@ async function bindMenuAndProgress(): Promise<void> {
     ask,
     projectRoot: () => projectRoot,
     projectEpoch: () => projectEpoch,
-    ownerIsCurrent: (id) => { const owner = id ? deferredMediaOwners.get(id) : undefined; return Boolean(owner && chatTabs.includes(owner.tab) && owner.serial === directorPresentationSerial && owner.epoch === projectEpoch && owner.root === projectRoot && !projectTransitionInFlight && !directorStopRequested); },
+    ownerIsCurrent: (id) => { if (id && modelSheetMediaOwners.get(id)?.isCurrent()) return true; const owner = id ? deferredMediaOwners.get(id) : undefined; return Boolean(owner && chatTabs.includes(owner.tab) && owner.serial === directorPresentationSerial && owner.epoch === projectEpoch && owner.root === projectRoot && !projectTransitionInFlight && !directorStopRequested); },
+    authorizeWorkflowMedia: ({ ownerRequestId, operation, args }) => ownerRequestId
+      ? modelSheetMediaOwners.get(ownerRequestId)?.authorizeMedia({ operation, args }) : undefined,
     status: setStatus,
     onSubmitted: async (result, isCurrent, ownerRequestId) => {
       if (!isCurrent()) return;
+      const direct = ownerRequestId ? modelSheetMediaOwners.get(ownerRequestId) : undefined;
+      if (direct) { await direct.settle({ success: true, result }); await renderExplorer(); return; }
       publishMediaContinuation(result, ownerRequestId);
       await renderExplorer();
       if (!isCurrent()) return;
@@ -4784,7 +4916,11 @@ async function bindMenuAndProgress(): Promise<void> {
       await refreshWorkflowJobsOnly(isCurrent);
     },
     onProgress: (isCurrent) => refreshWorkflowJobsOnly(isCurrent),
-    onSettled: (_outcome, isCurrent) => refreshWorkflowJobsOnly(isCurrent),
+    onSettled: async (outcome, isCurrent, ownerRequestId) => {
+      const direct = ownerRequestId ? modelSheetMediaOwners.get(ownerRequestId) : undefined;
+      if (direct && !outcome.success && isCurrent()) await direct.settle(outcome);
+      await refreshWorkflowJobsOnly(isCurrent);
+    },
   });
   await bindHostEvents({
     onMenu: (id) => handleMenuAction(id),
@@ -4801,6 +4937,58 @@ async function bindMenuAndProgress(): Promise<void> {
       upsertDirectorProgressMessage(operation, text);
     },
   });
+}
+
+let activeWorkCloseDialog: HTMLDialogElement | null = null;
+
+function handleCloseRequested(): void {
+  const summary = activeRequestSummary(projectRoot);
+  if (!summary) {
+    window.workbench?.respondToClose("close");
+    return;
+  }
+  if (activeWorkCloseDialog?.isConnected) return;
+  const previous = document.activeElement as HTMLElement | null;
+  const dialog = document.createElement("dialog");
+  activeWorkCloseDialog = dialog;
+  dialog.className = "studio-generation-prompt";
+  dialog.dataset.activeWorkClose = "";
+  dialog.setAttribute("aria-labelledby", "active-work-close-title");
+  const title = document.createElement("h2");
+  title.id = "active-work-close-title";
+  title.textContent = "Active work is still running";
+  const message = document.createElement("p");
+  message.textContent = "Keep Studio open until this work finishes. Closing now may interrupt it.";
+  const work = document.createElement("strong");
+  work.dataset.activeWorkSummary = "";
+  work.textContent = summary;
+  const controls = document.createElement("form");
+  controls.method = "dialog";
+  const stay = document.createElement("button");
+  stay.type = "button";
+  stay.textContent = "Keep Studio open";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "Close Studio";
+  const finish = (decision: "stay" | "close") => {
+    if (activeWorkCloseDialog !== dialog) return;
+    activeWorkCloseDialog = null;
+    dialog.close();
+    dialog.remove();
+    if (decision === "stay" && previous?.isConnected) previous.focus();
+    window.workbench?.respondToClose(decision);
+  };
+  stay.onclick = () => finish("stay");
+  close.onclick = () => finish("close");
+  dialog.addEventListener("cancel", event => {
+    event.preventDefault();
+    finish("stay");
+  });
+  controls.append(stay, close);
+  dialog.append(title, message, work, controls);
+  document.body.append(dialog);
+  dialog.showModal();
+  stay.focus();
 }
 
 function bindPreviewLinkGuard(): void {
@@ -4869,18 +5057,22 @@ async function boot(): Promise<void> {
     onOpenPath: (path) => {
       void openFile(path);
     },
-    onAddToChat: (path) => addPathToChat(path),
+    onPathTrashed: (path) => {
+      closeTabsForDeletedPath(path);
+      renderEditor();
+      renderChatAttachments();
+      void renderExplorer();
+    },
+    onProjectFilesChanged: (isCurrent) => { void renderExplorer(isCurrent); },
+    onAddToChat: (path) => { void openFile(path); },
     onOpenVoice: (characterDirectory) => {
       selectedPath = characterDirectory;
       showShell("voices");
     },
     onComposeChat: (text, attachment) => {
-      if (!activeChat()) createChatTab("Director");
-      if (attachment) addPathToChat(attachment);
-      setChatCollapsed(false);
-      renderChat();
-      els.chatInput.value = text;
-      els.chatInput.focus();
+      // Compatibility hook for older surfaces: never reopen embedded chat.
+      if (attachment) void openFile(attachment);
+      setStatus("Use the Studio task's prompt dialog", text);
     },
     onSelectionChange: (selection) => {
       if (selection.path) selectedPath = selection.path;
@@ -4888,24 +5080,8 @@ async function boot(): Promise<void> {
       renderDirectorContext();
     },
     chatModel: () => getSettings().selectedChatModel,
+    imageRoutes: () => imageCapabilityRoutes(getSavedSettings()),
     onStatus: setStatus,
-    onPendingPlan: (text) => {
-      const tab = activeChat() ?? createChatTab("Director");
-      tab.messages.push({
-        id: uid("msg"),
-        role: "assistant",
-        text,
-      });
-      setChatCollapsed(false);
-      renderChat();
-      const hasApprovalId = /\[\[workbench_approve:[A-Za-z0-9]+\]\]/.test(text);
-      setStatus(
-        hasApprovalId ? "Approval ready" : "Plan prepared",
-        hasApprovalId
-          ? "Use the one-time approval button; chat text cannot approve"
-          : "No provider operation has been approved or started",
-      );
-    },
   });
   try {
     await loadAppSettings();
@@ -4931,4 +5107,5 @@ async function boot(): Promise<void> {
   setStatus("Ready — open a project to begin");
 }
 
+window.workbench?.onCloseRequested(handleCloseRequested);
 void boot();

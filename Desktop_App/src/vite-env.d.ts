@@ -10,7 +10,10 @@ interface WorkbenchBridge {
   onMenu: (handler: (id: string) => void) => () => void;
   onDirectorProgress: (handler: (payload: unknown) => void) => () => void;
   onSpendConfirmationRequired: (handler: (payload: unknown) => void) => () => void;
+  onCloseRequested: (handler: () => void) => () => void;
+  respondToClose: (decision: "stay" | "close") => void;
   toMediaUrl: (path: string) => string;
+  pasteFocused?: () => Promise<void>;
   openProject?: () => Promise<string | null>;
   useProject?: (projectPath: string) => Promise<string | null>;
   closeProject?: () => Promise<boolean>;

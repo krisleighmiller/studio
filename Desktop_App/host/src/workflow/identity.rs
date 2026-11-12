@@ -72,6 +72,78 @@ pub fn add_alternate_shot(state: &mut ProjectState, scene_id: u32) -> Result<Str
     Ok(stable)
 }
 
+/// Remove only a sketch-stage cut, never a source-backed or produced shot.
+/// A stable id selects the target; survivors are renumbered through the same
+/// relinking path as manual reorder. Nothing on disk is removed.
+fn removable_planning_cut(state: &ProjectState, scene_id: u32, shot_id: &str, allow_approved: bool) -> Result<CutId, String> {
+    let scene = state.scene(scene_id).ok_or_else(|| format!("scene {scene_id} not found"))?;
+    let cut = scene.cuts.iter().find(|cut| !shot_id.is_empty() && cut.stable_id == shot_id)
+        .ok_or_else(|| format!("shot `{shot_id}` is not in scene {scene_id}"))?;
+    let cut_id = cut.id;
+    let label = cut.id.cut;
+    let path_fragment = format!("Scene{scene_id}/Cut{label}/");
+    if cut.source_origin.is_some() || cut.has_production_note() || cut.visual_source.is_some()
+        || cut.approved_start_frame.is_some() || !cut.identity_ref_paths.is_empty()
+        || cut.start_frame_prompt.is_some() || cut.start_frame_negative_prompt.is_some()
+        || !cut.takes.is_empty() || cut.selected_take.is_some()
+        || scene.post.is_some()
+        || scene.animatic.as_ref().is_some_and(|animatic| (animatic.approved && !allow_approved)
+            || animatic.shots.iter().any(|shot| shot.cut_id == cut_id && shot.scratch_audio_path.is_some()))
+        || state.assets.iter().any(|asset| asset.cut_id == Some(cut_id))
+        || state.versions.iter().any(|version| version.path.contains(&path_fragment))
+        || state.jobs.iter().any(|job| {
+            job.scope.as_ref().is_some_and(|scope| scope.kind == "shot"
+                && (scope.id == shot_id || scope.id == format!("Scene{scene_id}/Cut{label}")))
+                || job.output_path.as_ref().is_some_and(|path| path.contains(&path_fragment))
+                || job.assembly_snapshot.as_ref().is_some_and(|shots| shots.iter().any(|shot| shot.shot_id == shot_id))
+        })
+    {
+        return Err(format!("Cut {label} has source, media, production, or approved work. Nothing was removed."));
+    }
+    if state.scenes.iter().flat_map(|scene| &scene.cuts).any(|other| other.id != cut_id
+        && other.visual_source.as_ref().is_some_and(|source|
+            source.predecessor == Some(cut_id)
+                || source.predecessor_shot_id.as_deref() == Some(shot_id)))
+    {
+        return Err(format!("Cut {label} is used as another shot's continuity source. Nothing was removed."));
+    }
+    Ok(cut_id)
+}
+
+/// Reopen the scene's sketch approval only when this exact cut is otherwise
+/// removable. No media, production data, jobs, or rendered review is changed.
+pub fn reopen_planning_sketch(state: &mut ProjectState, scene_id: u32, shot_id: &str) -> Result<(), String> {
+    removable_planning_cut(state, scene_id, shot_id, true)?;
+    let scene = state.scenes.iter_mut().find(|scene| scene.id == scene_id).expect("validated scene");
+    let animatic = scene.animatic.as_mut().filter(|animatic| animatic.approved)
+        .ok_or("This sketch animatic is not approved; no reopen is needed.")?;
+    animatic.approved = false;
+    Ok(())
+}
+
+/// Remove only a sketch-stage cut. Nothing on disk is removed.
+pub fn remove_planning_cut(state: &mut ProjectState, scene_id: u32, shot_id: &str) -> Result<(), String> {
+    let cut_id = removable_planning_cut(state, scene_id, shot_id, false)?;
+    let scene = state.scene(scene_id).expect("validated scene");
+    let surviving_ids: Vec<String> = scene.cuts.iter().filter(|other| other.stable_id != shot_id)
+        .map(|other| other.stable_id.clone()).collect();
+    if surviving_ids.iter().any(String::is_empty) {
+        return Err("A surviving cut has no stable ID; refresh the project before removing cuts.".into());
+    }
+    let scene = state.scenes.iter_mut().find(|scene| scene.id == scene_id).expect("checked above");
+    scene.cuts.retain(|other| other.stable_id != shot_id);
+    if let Some(animatic) = scene.animatic.as_mut() {
+        animatic.shots.retain(|shot| shot.cut_id != cut_id);
+    }
+    if surviving_ids.is_empty() {
+        scene.animatic = None;
+    } else {
+        reorder_cuts(state, scene_id, &surviving_ids)?;
+        crate::workflow::animatic::sync(state);
+    }
+    Ok(())
+}
+
 pub fn assign(state: &mut ProjectState) -> bool {
     let mut next_scene = next_numeric(state, true);
     let mut next_shot = next_numeric(state, false);
@@ -225,10 +297,7 @@ pub fn mark_upstream_changed(
         .and_then(|scene| scene.cuts.iter().find(|cut| cut.id.cut == cut_number))
         .map(|cut| cut.stable_id.clone())
         .unwrap_or_default();
-    let Some(scene) = state.scenes.iter_mut().find(|scene| scene.id == scene_id) else {
-        return;
-    };
-    for cut in &mut scene.cuts {
+    for cut in state.scenes.iter_mut().flat_map(|scene| &mut scene.cuts) {
         if cut.id == cut_id {
             if !cut.takes.is_empty() {
                 cut.dependency_state = Some(DependencyState::NeedsReview);
@@ -314,6 +383,28 @@ fn permute(
     };
     if matches!(relink, Relink::Live) {
         retarget_assets(state, scene_id, &stable_for_old, keep_asset_ids);
+    }
+    let labels: HashMap<String, CutId> = state.scenes[scene_index].cuts.iter()
+        .filter(|cut| !cut.stable_id.is_empty())
+        .map(|cut| (cut.stable_id.clone(), cut.id)).collect();
+    let final_cut = state.scenes[scene_index].cuts.iter().map(|cut| cut.id.cut).max();
+    for scene in &mut state.scenes {
+        if scene.id == scene_id { continue; }
+        for cut in &mut scene.cuts {
+            if let Some(source) = cut.visual_source.as_mut() {
+                if source.predecessor.is_some_and(|id| id.source_scene == scene_id) {
+                    if let Some(id) = source.predecessor_shot_id.as_ref().and_then(|stable| labels.get(stable)) {
+                        source.predecessor = Some(*id);
+                        if Some(scene.id) == scene_id.checked_add(1) && cut.id.cut == 1 && final_cut != Some(id.cut) {
+                            source.asset_id = None;
+                            source.source_take_id = None;
+                            source.frame_time_seconds = None;
+                            cut.dependency_state = Some(DependencyState::NeedsReview);
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -622,6 +713,78 @@ mod tests {
         cut.stable_id = stable.into();
         cut.production_note_path = Some(note.into());
         cut
+    }
+
+    #[test]
+    fn removal_refuses_produced_source_or_dependent_cuts_without_mutation() {
+        let mut base = ProjectState::new();
+        let scene = base.scene_mut(1, "Scene");
+        let mut first = CutRecord::new(CutId::new(1, 1));
+        first.stable_id = "shot_a".into();
+        let mut second = CutRecord::new(CutId::new(1, 2));
+        second.stable_id = "shot_b".into();
+        scene.cuts = vec![first, second];
+        for kind in ["source", "note", "asset", "dependent", "approved"] {
+            let mut state = base.clone();
+            match kind {
+                "source" => state.scenes[0].cuts[0].source_origin = Some(CutId::new(1, 1)),
+                "note" => state.scenes[0].cuts[0].production_note_path = Some("Scene_Prompts/Scene1/Cut1.txt".into()),
+                "asset" => state.assets.push(AssetRecord {
+                    id: "asset_1".into(), path: "Scenes/Scene1/Cut1/frame.png".into(),
+                    role: AssetRole::CutStartFrame, status: AssetStatus::Present,
+                    scene_id: Some(1), cut_id: Some(CutId::new(1, 1)),
+                    character_id: None, source_job_id: None, parent_asset_id: None, notes: None,
+                }),
+                "dependent" => state.scenes[0].cuts[1].visual_source = Some(VisualSourceSpec {
+                    strategy: VisualSourceStrategy::PreproductionStartFrame,
+                    predecessor: Some(CutId::new(1, 1)),
+                    predecessor_shot_id: Some("shot_a".into()),
+                    asset_id: None,
+                    frame_time_seconds: None,
+                    source_take_id: None,
+                }),
+                "approved" => {
+                    crate::workflow::animatic::sync(&mut state);
+                    state.scenes[0].animatic.as_mut().unwrap().approved = true;
+                }
+                _ => unreachable!(),
+            }
+            let original = state.clone();
+            assert!(remove_planning_cut(&mut state, 1, "shot_a").is_err(), "{kind}");
+            assert_eq!(state, original, "{kind}");
+        }
+    }
+
+    #[test]
+    fn cross_scene_predecessor_follows_reorder_and_stops_binding_nonfinal() {
+        use crate::workflow::state::{VisualSourceSpec, VisualSourceStrategy};
+        let mut state = ProjectState::new();
+        state.scene_mut(1, "First").cut_mut(1).stable_id = "first".into();
+        state.scene_mut(1, "First").cut_mut(2).stable_id = "last".into();
+        state.scene_mut(2, "Second").cut_mut(1).stable_id = "next".into();
+        let mut source = VisualSourceSpec::new(VisualSourceStrategy::PreviousSelectedTakeExitFrame);
+        source.predecessor = Some(CutId::new(1, 2));
+        source.predecessor_shot_id = Some("last".into());
+        source.asset_id = Some("frame".into());
+        state.scene_mut(2, "Second").cut_mut(1).visual_source = Some(source);
+        reorder_cuts(&mut state, 1, &["last".into(), "first".into()]).unwrap();
+        let next = &state.scene(2).unwrap().cuts[0];
+        assert_eq!(next.visual_source.as_ref().unwrap().predecessor, Some(CutId::new(1, 1)));
+        assert!(next.visual_source.as_ref().unwrap().asset_id.is_none());
+        assert_eq!(next.dependency_state, Some(DependencyState::NeedsReview));
+    }
+
+    #[test]
+    fn cross_scene_planned_source_prevents_removing_predecessor() {
+        use crate::workflow::state::{VisualSourceSpec, VisualSourceStrategy};
+        let mut state = ProjectState::new();
+        state.scene_mut(1, "First").cut_mut(1).stable_id = "first".into();
+        state.scene_mut(2, "Second").cut_mut(1).stable_id = "next".into();
+        let mut source = VisualSourceSpec::new(VisualSourceStrategy::PreviousSelectedTakeExitFrame);
+        source.predecessor = Some(CutId::new(1, 1));
+        source.predecessor_shot_id = Some("first".into());
+        state.scene_mut(2, "Second").cut_mut(1).visual_source = Some(source);
+        assert!(remove_planning_cut(&mut state, 1, "first").unwrap_err().contains("continuity source"));
     }
 
     #[test]

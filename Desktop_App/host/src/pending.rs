@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::sync::{Mutex, OnceLock};
+use std::sync::{atomic::{AtomicBool, Ordering}, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_secs(15 * 60);
@@ -45,6 +46,9 @@ pub struct PendingApproval {
 
 struct Store {
     generation: u64,
+    // Consumed authority lasts only as long as its exact execution admission.
+    operation_id: Option<String>,
+    execution_cancel: Weak<AtomicBool>,
     items: HashMap<String, Parked>,
 }
 
@@ -53,6 +57,8 @@ fn store() -> &'static Mutex<Store> {
     STORE.get_or_init(|| {
         Mutex::new(Store {
             generation: 0,
+            operation_id: None,
+            execution_cancel: Weak::new(),
             items: HashMap::new(),
         })
     })
@@ -77,6 +83,8 @@ pub fn park(
         .retain(|_, item| now.duration_since(item.at) < TTL);
     guard.items.clear();
     guard.generation = guard.generation.wrapping_add(1);
+    guard.operation_id = Some(id.clone());
+    guard.execution_cancel = Weak::new();
     guard.items.insert(
         id.clone(),
         Parked {
@@ -93,6 +101,14 @@ pub fn park(
 }
 
 pub fn take(id: &str) -> Result<PendingApproval, String> {
+    take_inner(id, Weak::new())
+}
+
+pub(crate) fn take_for_execution(id: &str, app: &crate::ctx::HostCtx) -> Result<PendingApproval, String> {
+    take_inner(id, app.request_cancel_handle())
+}
+
+fn take_inner(id: &str, execution_cancel: Weak<AtomicBool>) -> Result<PendingApproval, String> {
     let mut guard = store().lock().expect("pending store");
     let Some(item) = guard.items.remove(id) else {
         return Err("That approval is no longer active. Ask for a new plan.".into());
@@ -101,6 +117,7 @@ pub fn take(id: &str) -> Result<PendingApproval, String> {
     if item.at.elapsed() > TTL {
         return Err("That approval expired. Ask for a new plan.".into());
     }
+    guard.execution_cancel = execution_cancel;
     Ok(PendingApproval {
         action: item.action,
         project_root: item.project_root,
@@ -128,7 +145,48 @@ pub fn current() -> Option<DirectorAction> {
 pub fn cancel_all() {
     let mut guard = store().lock().expect("pending store");
     guard.items.clear();
+    guard.operation_id = None;
+    guard.execution_cancel = Weak::new();
     guard.generation = guard.generation.wrapping_add(1);
+}
+
+/// Revoke only unsubmitted approvals whose reserved output job was cancelled
+/// by a saved upstream edit. Keep approvals in other projects untouched.
+pub(crate) fn cancel_for_outputs(root: &std::path::Path, outputs: &[String]) {
+    if outputs.is_empty() { return; }
+    let mut guard = store().lock().expect("pending store");
+    let before = guard.items.len();
+    guard.items.retain(|_, item| {
+        if item.project_root.as_deref() != Some(root) { return true; }
+        let Some(output) = item.action.inputs.get("output_path").and_then(Value::as_str) else { return true; };
+        !outputs.iter().any(|reserved| {
+            let relative = std::path::Path::new(reserved);
+            output == reserved || std::path::Path::new(output) == root.join(relative)
+        })
+    });
+    if guard.items.len() != before {
+        guard.generation = guard.generation.wrapping_add(1);
+    }
+}
+
+/// Revoke pending authority or stop only its consumed execution admission.
+pub(crate) fn cancel_operation(id: &str) -> bool {
+    let mut guard = store().lock().expect("pending store");
+    if guard.operation_id.as_deref() != Some(id) { return false; }
+    let was_pending = guard.items.remove(id).is_some();
+    guard.operation_id = None;
+    let execution = std::mem::take(&mut guard.execution_cancel).upgrade();
+    if was_pending {
+        guard.generation = guard.generation.wrapping_add(1);
+        return true;
+    }
+    // Neither global generation belongs to consumed Stop: newer unparked
+    // admissions may own that snapshot. This flag also prevents A's continuation.
+    if let Some(cancel) = execution {
+        cancel.store(true, Ordering::SeqCst);
+        return true;
+    }
+    false
 }
 
 pub(crate) fn cancel_workflow() {
@@ -147,6 +205,8 @@ pub(crate) fn publish_guarded(text: &str, expected: u64, workflow_key: Option<St
     let id = random_id();
     guard.generation = guard.generation.wrapping_add(1);
     guard.items.clear();
+    guard.operation_id = Some(id.clone());
+    guard.execution_cancel = Weak::new();
     guard.items.insert(id.clone(), Parked { action, project_root: crate::session::root(), context, input_fingerprints, at: Instant::now(), workflow_key, workflow_continuation: true });
     Ok(format!("{}\n\n{APPROVE_TOKEN_PREFIX}{id}]]", strip_markers(text)))
 }
@@ -248,6 +308,41 @@ mod tests {
             op: None,
             path: None,
         }
+    }
+
+    #[test]
+    fn consumed_stop_cancels_only_its_live_execution_admission() {
+        let _guard = test_pending_lock();
+        cancel_all();
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::ctx::HostCtx::new(dir.path().into());
+        let execution_a = app.for_request();
+        let a_clone = execution_a.for_request();
+        let id = park(action(), None, None, None);
+        take_for_execution(&id, &execution_a).unwrap();
+        let unparked_b = app.for_request();
+        let publication = generation();
+        assert!(cancel_operation(&id));
+        assert!(execution_a.director_cancelled());
+        assert!(a_clone.director_cancelled(), "nested clones retain exact Stop");
+        assert!(!unparked_b.director_cancelled(), "active A Stop cannot cancel B");
+        assert_eq!(generation(), publication, "A Stop cannot stale B publication");
+        assert!(!cancel_operation(&id), "duplicate Stop has no remaining authority");
+        assert!(take(&id).is_err());
+        // Retiring execution A drops its Stop authority without global effects.
+        let id = park(action(), None, None, None);
+        {
+            let finished = app.for_request();
+            take_for_execution(&id, &finished).unwrap();
+        }
+        let publication = generation();
+        assert!(!cancel_operation(&id));
+        assert_eq!(generation(), publication);
+        assert!(!unparked_b.director_cancelled());
+        // Legacy no-ID process Stop still interrupts admitted requests.
+        app.cancel_director();
+        assert!(unparked_b.director_cancelled());
+        cancel_all();
     }
 
     #[test]

@@ -138,6 +138,13 @@ pub fn apply_llm_sketches(scene: &mut SceneRecord, value: &Value) -> Result<usiz
     if file.cuts.is_empty() {
         return Err("cut sketch JSON had no cuts".into());
     }
+    let max_cuts = scene.max_cuts.unwrap_or(12);
+    if file.cuts.len() > max_cuts as usize {
+        return Err(format!(
+            "Model returned {} cuts, above this scene's maximum of {max_cuts}; no sketches were saved.",
+            file.cuts.len()
+        ));
+    }
 
     let existing = !scene.cuts.is_empty();
     if existing {
@@ -375,13 +382,13 @@ fn parse_look_role(raw: &str) -> Option<AssetRole> {
         })
 }
 
-pub fn sketches_system_prompt(existing_cuts: usize) -> String {
+pub fn sketches_system_prompt(existing_cuts: usize, max_cuts: u32) -> String {
     let numbering = if existing_cuts > 0 {
         format!(
             "There are already {existing_cuts} cuts. Emit exactly those cut numbers 1..{existing_cuts}. Do not add or remove cuts."
         )
     } else {
-        "Propose 5–12 cuts that cover every dialogue line and the important action/sound/transition beats. The host will number them 1..N in order.".into()
+        format!("Propose between 1 and {max_cuts} cuts. Use only the cuts needed for the scene's pace; cover dialogue and essential action without inventing extra angles. The host will number them 1..N in order.")
     };
     format!(
         "You draft typed cut sketches for a production desk. Return ONLY JSON:\n\
@@ -473,6 +480,31 @@ mod tests {
     use crate::script::DialogueLine;
     use crate::workflow::validate::is_performance_dialogue;
     use serde_json::json;
+
+    #[test]
+    fn scene_cut_limit_is_backward_compatible_and_round_trips() {
+        let legacy = json!({"id": 1, "title": "Scene 1"});
+        let mut scene: SceneRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(scene.max_cuts, None);
+        scene.max_cuts = Some(2);
+        let restored: SceneRecord = serde_json::from_value(serde_json::to_value(scene).unwrap()).unwrap();
+        assert_eq!(restored.max_cuts, Some(2));
+        assert!(sketches_system_prompt(0, 2).contains("between 1 and 2 cuts"));
+        assert!(!sketches_system_prompt(0, 2).contains("5–12"));
+    }
+
+    #[test]
+    fn over_limit_model_response_never_mutates_new_or_existing_cuts() {
+        let mut scene = SceneRecord::new(1, "Short scene");
+        scene.max_cuts = Some(2);
+        let oversized = json!({"cuts": [{"title":"A"}, {"title":"B"}, {"title":"C"}]});
+        assert!(apply_llm_sketches(&mut scene, &oversized).unwrap_err().contains("maximum of 2"));
+        assert!(scene.cuts.is_empty());
+        assert_eq!(apply_llm_sketches(&mut scene, &json!({"cuts": [{"title":"A"}]})).unwrap(), 1);
+        let prior = scene.clone();
+        assert!(apply_llm_sketches(&mut scene, &oversized).is_err());
+        assert_eq!(scene, prior);
+    }
 
     #[test]
     fn backfill_maps_lipsync_to_performance() {

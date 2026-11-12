@@ -10,7 +10,7 @@ export type ProjectSummary = {
   pendingApprovals: string[];
 };
 
-const BLOCKING_KINDS = new Set(["location", "prop", "voice", "plate"]);
+const BLOCKING_KINDS = new Set(["location", "voice", "plate"]);
 
 export function requirementBlocks(requirement: Pick<RequirementRecord, "kind" | "status">): boolean {
   return BLOCKING_KINDS.has(requirement.kind) && (requirement.status === "missing" || requirement.status === "draft");

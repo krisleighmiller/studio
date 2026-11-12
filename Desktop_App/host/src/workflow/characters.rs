@@ -1,10 +1,132 @@
 //! Typed character profiles stored beside model-sheet and voice assets.
-use crate::workflow::state::{character_id, CharacterProfile, ProjectState};
+use crate::workflow::state::{character_id, CharacterProfile, ProjectState, STATE_REL};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const PROFILE_VERSION: u32 = 1;
+
+/// Save only the selection, never the discovered inventory, files or readiness.
+pub fn save_character_reference_selection(
+    root: &Path,
+    character_id: &str,
+    asset_ids: Vec<String>,
+) -> Result<crate::workflow::state::CharacterRecord, String> {
+    use crate::workflow::{import, render_jobs, state::AssetRole};
+    let _lock = import::lock_project(root)?;
+    // Do not import/repair on an invalid request: failure must preserve prior bytes.
+    let mut state = render_jobs::read_persisted(root)?;
+    let indices: Vec<_> = state.characters.iter().enumerate()
+        .filter(|(_, character)| character.id == character_id).map(|(index, _)| index).collect();
+    if indices.len() != 1 { return Err("character not found or ambiguous".into()); }
+    let index = indices[0];
+    let character = &state.characters[index];
+    let root_string = root.to_string_lossy();
+    let dir = crate::project_path::resolve(&character.dir, Some(&root_string), crate::project_path::PathIntent::Read)
+        .map_err(|error| error.to_string())?.into_path_buf();
+    validate_character_directory(root, &dir, Some(&character.name))?;
+    let mut seen = std::collections::HashSet::new();
+    for id in &asset_ids {
+        if id.is_empty() || !seen.insert(id) { return Err("empty or duplicate reference asset ID".into()); }
+        let matches: Vec<_> = state.assets.iter().filter(|asset| asset.id == *id).collect();
+        if matches.len() != 1 { return Err(format!("reference asset `{id}` not found or ambiguous")); }
+        let asset = matches[0];
+        if asset.character_id.as_deref() != Some(character_id)
+            || !matches!(asset.role, AssetRole::IdentityReference | AssetRole::BodyReference | AssetRole::ExpressionReference)
+        {
+            return Err(format!("asset `{id}` is not an available reference for this character"));
+        }
+        let path = crate::project_path::resolve(&asset.path, Some(&root_string), crate::project_path::PathIntent::Read)
+            .map_err(|error| error.to_string())?.into_path_buf();
+        if !path.is_file() || !path.starts_with(&dir)
+            || relative(root, &path)? != asset.path
+            || !matches!(path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase).as_deref(), Some("png" | "jpg" | "jpeg" | "webp")) {
+            return Err(format!("reference asset `{id}` is missing, redirected or not a character image"));
+        }
+    }
+    state.characters[index].reference_asset_ids = asset_ids;
+    import::persist_state_locked(root, &state)?;
+    Ok(state.characters[index].clone())
+}
+
+/// Delete one saved uploaded reference and its project-owned copy as one transaction.
+pub fn delete_character_reference(
+    root: &Path,
+    character_id: &str,
+    asset_id: &str,
+) -> Result<ProjectState, String> {
+    use crate::workflow::{import, render_jobs, state::AssetRole};
+    let _lock = import::lock_project(root)?;
+    let mut state = render_jobs::read_persisted(root)?;
+    let state_path = root.join(STATE_REL);
+    let original_state_bytes = fs::read(&state_path)
+        .map_err(|error| format!("could not capture prior workflow state: {error}"))?;
+    let character_indices: Vec<_> = state.characters.iter().enumerate()
+        .filter(|(_, character)| character.id == character_id).map(|(index, _)| index).collect();
+    if character_indices.len() != 1 { return Err("character not found or ambiguous".into()); }
+    let character_index = character_indices[0];
+    let character = &state.characters[character_index];
+    if !character.reference_asset_ids.iter().any(|id| id == asset_id)
+        || !character.asset_ids.iter().any(|id| id == asset_id)
+    {
+        return Err("uploaded reference is not bound to this character".into());
+    }
+    let assets: Vec<_> = state.assets.iter().filter(|asset| {
+        asset.id == asset_id
+            && asset.character_id.as_deref() == Some(character_id)
+            && matches!(asset.role, AssetRole::IdentityReference | AssetRole::BodyReference | AssetRole::ExpressionReference)
+            && asset.notes.as_deref() == Some("uploaded reference image")
+    }).collect();
+    if assets.len() != 1 { return Err("saved uploaded reference not found or ambiguous".into()); }
+    let asset = assets[0];
+    let root_string = root.to_string_lossy();
+    let character_dir = crate::project_path::resolve(
+        &character.dir,
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Read,
+    ).map_err(|error| error.to_string())?.into_path_buf();
+    validate_character_directory(root, &character_dir, Some(&character.name))?;
+    let path = crate::project_path::resolve(
+        &asset.path,
+        Some(root_string.as_ref()),
+        crate::project_path::PathIntent::Read,
+    ).map_err(|error| error.to_string())?.into_path_buf();
+    if !path.is_file() || !path.starts_with(&character_dir)
+        || relative(root, &path)? != asset.path
+        || path.components().any(|part| part.as_os_str().to_string_lossy().eq_ignore_ascii_case("model_sheet"))
+    {
+        return Err("uploaded reference is missing, redirected, or is a generated model-sheet plate".into());
+    }
+
+    let trashed = crate::project_path::move_to_trash(root, &path)?;
+    state.assets.retain(|asset| asset.id != asset_id);
+    state.characters[character_index].asset_ids.retain(|id| id != asset_id);
+    state.characters[character_index].reference_asset_ids.retain(|id| id != asset_id);
+    for job in &mut state.jobs {
+        job.input_asset_ids.retain(|id| id != asset_id);
+        job.output_asset_ids.retain(|id| id != asset_id);
+        for attempt in &mut job.attempts {
+            attempt.output_asset_ids.retain(|id| id != asset_id);
+        }
+    }
+    if let Err(error) = import::persist_state_locked(root, &state) {
+        let mut rollback_errors = Vec::new();
+        if let Err(restore) = fs::rename(&trashed, &path) {
+            rollback_errors.push(format!("could not restore trashed reference: {restore}"));
+        }
+        if fs::read(&state_path).ok().as_deref() != Some(original_state_bytes.as_slice()) {
+            let temp = state_path.with_extension("json.rollback.tmp");
+            if let Err(restore) = fs::write(&temp, &original_state_bytes)
+                .and_then(|_| fs::rename(&temp, &state_path))
+            {
+                rollback_errors.push(format!("could not restore workflow state: {restore}"));
+            }
+        }
+        return if rollback_errors.is_empty() { Err(error) }
+            else { Err(format!("{error}; deletion rollback failed: {}", rollback_errors.join("; "))) };
+    }
+    render_jobs::read_persisted(root)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CharacterProfileFile {
@@ -237,6 +359,7 @@ mod tests {
                 voice_ready: false,
                 profile_path: Some(path),
                 model_sheet_manifest_path: None,
+                reference_asset_ids: Vec::new(),
                 profile: profile.clone(),
                 asset_ids: Vec::new(),
                 notes: Vec::new(),
@@ -277,6 +400,7 @@ mod tests {
             voice_ready: false,
             profile_path: None,
             model_sheet_manifest_path: None,
+            reference_asset_ids: Vec::new(),
             profile: CharacterProfile::default(),
             asset_ids: Vec::new(),
             notes: Vec::new(),
@@ -303,6 +427,7 @@ mod tests {
             voice_ready: false,
             profile_path: None,
             model_sheet_manifest_path: None,
+            reference_asset_ids: Vec::new(),
             profile: CharacterProfile::default(),
             asset_ids: Vec::new(),
             notes: Vec::new(),

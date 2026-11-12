@@ -5,6 +5,8 @@ import { actionButton, block, missingPanel, newAlternateAngleButton, presentSurf
 import { dependencyNote, renderBlocker, visualSourceStatus } from "./surfaceSelectors";
 import { buildNotesModel } from "./surfaceModels";
 import type { NotesIntent } from "./surfaceIntents";
+import { renderPerformanceAudio } from "./performanceAudio";
+import { renderVideoTakeEdit } from "./videoTakeEdit";
 
 function paintProductionNotesStage(
   scene: SceneRecord,
@@ -26,7 +28,7 @@ function paintProductionNotesStage(
   intro.append(
     block(
       "workflow-field-hint",
-      "Build complete moving-image prompts from the script, scene intent, ordered cut sketches, dialogue, approved scene references, and each cut’s approved visual source. Use this after planning or reference images change.",
+      "Build moving-image prompts from the script, scene intent, ordered cut sketches and dialogue. Approved scene references and a visual source are used when available; you do not need separate images of ordinary props to write a prompt. Rendering checks its own source requirements.",
     ),
     block(
       "workflow-field-hint",
@@ -56,7 +58,9 @@ export function renderProductionNoteCard(
   const status = document.createElement("span");
   status.className = "workflow-look-status";
   const blocker = renderBlocker(cut);
-  status.textContent = cut.package_needs_review
+  status.textContent = cut.script_dialogue_review
+    ? "Script dialogue changed · cut plan needs review"
+    : cut.package_needs_review
     ? blocker
       ? `Needs review · render blocked · ${blocker}`
       : `Needs review · ${cut.takes?.length ?? 0} take(s) kept`
@@ -65,6 +69,12 @@ export function renderProductionNoteCard(
       : `${cut.takes?.length ?? 0} take(s) · ready`;
   header.append(heading, status);
   card.append(header);
+  if (cut.script_dialogue_review) {
+    card.append(block("workflow-banner warn", "Script dialogue changed. The production-note cues and cut sketch below are retained from the earlier plan, not current script dialogue. Compare and resolve this cut in Sketches before treating these as current."));
+  }
+  if (cut.script_dialogue_kept && !cut.script_dialogue_review) {
+    card.append(block("workflow-field-hint", "Authored production-note cues deliberately kept after script revision. These are not current script text."));
+  }
   if (cut.package_needs_review) {
     card.append(
       block(
@@ -90,6 +100,7 @@ export function renderProductionNoteCard(
     visualSourceStatus(cut),
   ].join(" · ");
   card.append(facts);
+  if (cut.speech_mode === "source_video_lipsync") card.append(renderPerformanceAudio(cut, emit));
 
   if (!renderQueue) {
     const promptLabel = document.createElement("label");
@@ -130,36 +141,39 @@ export function renderProductionNoteCard(
         negativePrompt: negative.value,
       });
     });
-    save.disabled = Boolean(getSurfaceHost().busy) || !cut.production_note_path;
+    save.disabled = Boolean(getSurfaceHost().busy) || !cut.sketch;
     const actions = document.createElement("div");
     actions.className = "workflow-inspector-actions";
     const sync = actionButton("Build full video prompt", () => {
       emit({ type: "sync-cut", cut: cut.id.cut });
     });
-    sync.disabled = Boolean(getSurfaceHost().busy) || !cut.production_note_path || !cut.sketch;
+    sync.disabled = Boolean(getSurfaceHost().busy) || !cut.sketch;
     sync.title =
       "Synthesize a complete video prompt from the script, cut sequence, current sketch, dialogue, and approved visual references.";
     actions.append(sync, save);
+    const review = actionButton("Review planning → production note", () => emit({ type: "review-handoff", cut: cut.id.cut }));
+    review.disabled = Boolean(getSurfaceHost().busy) || !cut.sketch || !cut.production_note_path;
+    actions.append(review);
     const notePath = getSurfaceHost().resolvePath(cut.production_note_path);
     if (notePath) {
       actions.append(actionButton("Open full handoff", () => getSurfaceHost().hooks?.onOpenPath(notePath)));
     }
-    actions.append(renderCutButton(cut, emit));
-    if (cut.speech_mode === "source_video_lipsync") {
+    if (!cut.selected_performance_asset_id) actions.append(renderCutButton(cut, emit));
+    if (cut.speech_mode === "source_video_lipsync" && !cut.selected_performance_asset_id) {
       const resume = actionButton("Resume with saved audio", () => emit({ type: "resume-audio", cut: cut.id.cut }));
       resume.disabled = Boolean(getSurfaceHost().busy) || Boolean(renderBlocker(cut));
-      resume.title = "Prepare a fresh approval for this pending shot's saved performance WAV. Never synthesize speech again.";
+      resume.title = "Check whether this shot's saved WAV and job history are safe to resume, then prepare a fresh approval only. No speech or video is submitted by this check.";
       actions.append(resume);
     }
     card.append(actions);
   } else {
     const actions = document.createElement("div");
     actions.className = "workflow-inspector-actions";
-    actions.append(renderCutButton(cut, emit));
-    if (cut.speech_mode === "source_video_lipsync") {
+    if (!cut.selected_performance_asset_id) actions.append(renderCutButton(cut, emit));
+    if (cut.speech_mode === "source_video_lipsync" && !cut.selected_performance_asset_id) {
       const resume = actionButton("Resume with saved audio", () => emit({ type: "resume-audio", cut: cut.id.cut }));
       resume.disabled = Boolean(getSurfaceHost().busy) || Boolean(renderBlocker(cut));
-      resume.title = "Prepare a fresh approval for this pending shot's saved performance WAV. Never synthesize speech again.";
+      resume.title = "Check whether this shot's saved WAV and job history are safe to resume, then prepare a fresh approval only. No speech or video is submitted by this check.";
       actions.append(resume);
     }
     card.append(actions);
@@ -208,6 +222,18 @@ export function renderProductionNoteCard(
     }
     card.append(takeList);
     queueTakeVideos(takeList);
+  }
+  const selectedTake = takes.find(take => take.id === cut.selected_take || take.path === cut.selected_take);
+  if (selectedTake) {
+    const scene = getSurfaceHost().state?.scenes?.find(item => item.id === cut.id.source_scene);
+    const shot = scene?.animatic?.shots?.find(item => item.cut_id.source_scene === cut.id.source_scene && item.cut_id.cut === cut.id.cut);
+    if (shot) {
+      card.append(renderVideoTakeEdit(shot, selectedTake, intent => {
+        if (intent.type === "set-shot-trim") emit(intent);
+      }));
+    } else {
+      card.append(block("workflow-field-hint", "To edit this selected take, create its sketch animatic timing first."));
+    }
   }
   return card;
 }

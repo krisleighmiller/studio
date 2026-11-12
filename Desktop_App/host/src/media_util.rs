@@ -200,6 +200,12 @@ fn sniff_media(path: &Path, bytes: &[u8]) -> Result<String, String> {
     Ok(mime.to_string())
 }
 
+pub(crate) fn detected_image_extension(bytes: &[u8]) -> Option<&'static str> {
+    ["png", "jpg", "webp", "gif", "bmp"]
+        .into_iter()
+        .find(|ext| magic_matches(ext, bytes))
+}
+
 fn magic_matches(ext: &str, bytes: &[u8]) -> bool {
     match ext {
         "png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),

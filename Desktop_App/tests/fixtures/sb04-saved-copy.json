@@ -1,0 +1,95 @@
+{
+  "command": [
+    "cargo",
+    "test",
+    "--test",
+    "sb_a1_assembly",
+    "sb03_saved_project_copy_local_ffmpeg",
+    "--",
+    "--exact",
+    "--ignored",
+    "--nocapture"
+  ],
+  "exit": 0,
+  "original_files_unchanged": true,
+  "original_file_count": 56,
+  "copy_only": true,
+  "copy_change": "Scene 3 animatic omitted only in disposable copy; original selections/order/timing in other scenes retained",
+  "no_director_approve": true,
+  "no_provider_calls": true,
+  "output": "/source/Studio/Desktop_App/evidence/sb03/SecondBrain_project_draft.mp4",
+  "saved_job": {
+    "id": "job_13",
+    "kind": "assemble",
+    "input_asset_ids": [
+      "asset_27",
+      "asset_34",
+      "asset_45"
+    ],
+    "output_asset_ids": [
+      "asset_46"
+    ],
+    "status": "completed",
+    "output_path": "Final/Project_master.mp4",
+    "raw_provider_id": "project",
+    "attempts": [
+      {
+        "id": "job_13_attempt_1",
+        "status": "completed",
+        "output_asset_ids": [
+          "asset_46"
+        ],
+        "started_at": "2026-11-02T05:19:32Z",
+        "completed_at": "2026-11-02T05:22:11Z"
+      }
+    ],
+    "created_at": "2026-11-02T05:19:31Z",
+    "started_at": "2026-11-02T05:19:32Z",
+    "completed_at": "2026-11-02T05:22:11Z",
+    "scope": {
+      "kind": "project",
+      "id": "project"
+    },
+    "progress": "completed",
+    "actual_verified": false,
+    "unbounded_exposure": false,
+    "assembly_snapshot": [
+      {
+        "shot_id": "shot_1",
+        "cut_label": 1,
+        "take_id": "asset_27",
+        "path": "Scenes/Scene1/Cut1/S01C01_v3.mp4",
+        "start_seconds": 0.0,
+        "duration_seconds": 7.64,
+        "transition": "cut"
+      },
+      {
+        "shot_id": "shot_2",
+        "cut_label": 1,
+        "take_id": "asset_34",
+        "path": "Scenes/Scene2/Cut1/S02C01.mp4",
+        "start_seconds": 0.0,
+        "duration_seconds": 5.0,
+        "transition": "dissolve"
+      },
+      {
+        "shot_id": "shot_3",
+        "cut_label": 1,
+        "take_id": "asset_45",
+        "path": "Scenes/Scene3/Cut1/S03C01_v3.mp4",
+        "start_seconds": 0.0,
+        "duration_seconds": 10.041667,
+        "transition": "cut"
+      }
+    ]
+  },
+  "prior_jobs_equal_after_reopen": true,
+  "saved_asset": {
+    "id": "asset_46",
+    "path": "Final/Project_master.mp4",
+    "role": "assembly_draft",
+    "status": "present",
+    "source_job_id": "job_13",
+    "notes": "review export"
+  }
+}

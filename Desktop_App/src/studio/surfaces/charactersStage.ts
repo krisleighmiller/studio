@@ -3,7 +3,8 @@ import { getSurfaceHost, characterDrafts, isNewCharacterOpen, setNewCharacterOpe
 import { actionButton, block, findAsset, missingPanel, presentSurface, queueLookThumbs, sketchTextarea, sketchTextField } from "./shared";
 import { nullable, splitList } from "./surfaceSelectors";
 import { buildCharactersModel } from "./surfaceModels";
-import type { CharacterIntent } from "./surfaceIntents";
+import type { CharacterIntent, CharacterReferenceImage, CharacterReferenceIntent } from "./surfaceIntents";
+import { renderCharacterWardrobe } from "./characterWardrobe";
 
 function paintCharactersStage(emit: (intent: CharacterIntent) => void): HTMLElement {
   const list = document.createElement("div");
@@ -40,6 +41,7 @@ function renderCharacterEditor(
   emit: (intent: CharacterIntent) => void,
 ): HTMLElement {
   const key = character?.id ?? "__new__";
+  const busyControl = getSurfaceHost().busyControl;
   const draft = characterDraft(key, character);
   const card = document.createElement("article");
   card.className = "workflow-character-card workflow-character-editor";
@@ -115,8 +117,14 @@ function renderCharacterEditor(
   });
   card.append(fields);
 
+  const references = character
+    ? (character.reference_asset_ids ?? []).map(findAsset).filter((asset): asset is AssetRecord => Boolean(asset))
+    : (characterDrafts.get(key)?.references ?? []);
+  card.append(renderCharacterReferenceControls(character ?? { key }, references, emit));
+
   if (character) {
-    card.append(renderCharacterModelSheet(character));
+    card.append(renderCharacterModelSheet(character, emit));
+    card.append(renderCharacterWardrobe(character, emit));
     const voice = renderCharacterVoice(character);
     if (voice) card.append(voice);
   }
@@ -146,16 +154,17 @@ function renderCharacterEditor(
       actionButton(character.voice_ready ? "Edit voice" : "Create voice", () => {
         getSurfaceHost().hooks?.onOpenVoice(directory);
       }),
-      actionButton(
-        character.identity_ready ? "Update identity" : "Build identity",
-        () => {
-          const profilePath = getSurfaceHost().resolvePath(character.profile_path);
-          const identityBrief = draft.profile.identity_prompt?.trim();
-          const prompt = `Build or update the model sheet for ${character.name} in ${character.dir}/model_sheet.${
-            identityBrief ? ` Identity brief: ${identityBrief}` : ""
-          }`;
-          getSurfaceHost().hooks?.onComposeChat(prompt, profilePath);
-        },
+      workingButton(
+        character.model_sheet_manifest_path || character.identity_ready ? "Update full 12-pose sheet" : "Create full 12-pose sheet",
+        "Preparing model sheet…",
+        busyControl === `character-model-sheet:${key}:each`,
+        () => emit({ type: "create-model-sheet", characterKey: key, approvalMode: "each" }),
+      ),
+      workingButton(
+        "Generate entire 12-pose sheet (one approval)",
+        "Preparing model sheet…",
+        busyControl === `character-model-sheet:${key}:whole`,
+        () => emit({ type: "create-model-sheet", characterKey: key, approvalMode: "whole" }),
       ),
     );
     if (character.profile_path) {
@@ -175,8 +184,21 @@ function renderCharacterEditor(
       );
     }
   }
+  if (!character) actions.append(workingButton(
+    "Create full 12-pose sheet",
+    "Preparing model sheet…",
+    busyControl === `character-model-sheet:${key}:each`,
+    () => emit({ type: "create-model-sheet", characterKey: key, approvalMode: "each" }),
+  ));
   card.append(actions);
   return card;
+}
+
+function workingButton(label: string, workingLabel: string, working: boolean, onClick: () => void): HTMLButtonElement {
+  const button = actionButton(working ? workingLabel : label, onClick);
+  button.classList.toggle("is-working", working);
+  button.setAttribute("aria-busy", String(working));
+  return button;
 }
 
 function characterDraft(
@@ -221,7 +243,49 @@ const CHARACTER_IMAGE_ROLES = new Set([
   "expression_reference",
 ]);
 
-function renderCharacterModelSheet(character: CharacterRecord): HTMLElement {
+/** Presentation only; selection effects belong to the controller. */
+export function renderCharacterReferenceControls(
+  characterOrDraft: CharacterRecord | { key: string },
+  references: readonly CharacterReferenceImage[],
+  emit: (intent: CharacterReferenceIntent) => void,
+): HTMLElement {
+  const key = "id" in characterOrDraft ? characterOrDraft.id : characterOrDraft.key;
+  const section = document.createElement("section");
+  section.className = "workflow-character-references";
+  section.dataset.characterKey = key;
+  const heading = document.createElement("h4");
+  heading.textContent = "Reference images";
+  section.append(heading, block("workflow-field-hint", "Uploaded reference images guide appearance; they are not generated identity stills."));
+  section.append(actionButton("Add reference image", () => emit({
+    type: "add-reference", characterKey: key, assetIds: references.map(reference => reference.id),
+  })));
+  const gallery = document.createElement("div");
+  gallery.className = "workflow-character-reference-gallery";
+  for (const reference of references) {
+    const figure = document.createElement("figure");
+    figure.dataset.assetId = reference.id;
+    const name = reference.name ?? reference.path.split(/[\\/]/).pop() ?? reference.id;
+    const image = document.createElement("img");
+    image.alt = `Reference image · ${name}`;
+    image.dataset.lookPath = getSurfaceHost().resolvePath(reference.path) ?? reference.path;
+    const caption = document.createElement("figcaption");
+    caption.textContent = name;
+    const saved = "id" in characterOrDraft;
+    const remove = actionButton(saved ? "Delete" : "Remove", () => emit({
+      type: "remove-reference", characterKey: key, assetId: reference.id,
+      assetIds: references.filter(item => item.id !== reference.id).map(item => item.id),
+    }));
+    remove.setAttribute("aria-label", saved
+      ? `Delete saved reference image ${name} from project`
+      : `Remove staged reference image ${name}`);
+    figure.append(image, caption, remove);
+    gallery.append(figure);
+  }
+  section.append(gallery);
+  return section;
+}
+
+function renderCharacterModelSheet(character: CharacterRecord, emit: (intent: CharacterIntent) => void): HTMLElement {
   const section = document.createElement("section");
   section.className = "workflow-character-model-sheet";
   const heading = document.createElement("h4");
@@ -229,7 +293,7 @@ function renderCharacterModelSheet(character: CharacterRecord): HTMLElement {
     .map(findAsset)
     .filter(
       (asset): asset is AssetRecord =>
-        Boolean(asset && CHARACTER_IMAGE_ROLES.has(asset.role)),
+        Boolean(asset && CHARACTER_IMAGE_ROLES.has(asset.role) && asset.notes !== "uploaded reference image" && !(character.reference_asset_ids ?? []).includes(asset.id)),
     );
   heading.textContent = assets.length
     ? `Model sheet · ${assets.length} saved still${assets.length === 1 ? "" : "s"}`
@@ -239,7 +303,7 @@ function renderCharacterModelSheet(character: CharacterRecord): HTMLElement {
     section.append(
       block(
         "empty-state",
-        "No saved model-sheet stills. Use Build identity to create the pack.",
+        "No saved model-sheet stills. Use Create full 12-pose sheet to create the complete pack.",
       ),
     );
     return section;
@@ -256,7 +320,11 @@ function renderCharacterModelSheet(character: CharacterRecord): HTMLElement {
     });
     const caption = document.createElement("figcaption");
     caption.textContent = asset.notes?.trim() || asset.role.replace(/_/g, " ");
-    figure.append(image, caption);
+    const remove = actionButton("Delete", () => emit({
+      type: "delete-model-sheet-photo", characterKey: character.id, assetId: asset.id,
+    }));
+    remove.setAttribute("aria-label", `Delete model-sheet photo ${caption.textContent}`);
+    figure.append(image, caption, remove);
     gallery.append(figure);
   }
   section.append(gallery);

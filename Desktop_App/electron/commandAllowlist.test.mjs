@@ -24,6 +24,16 @@ test("the allowlist remains deny-by-default", () => {
   assert.equal(HOST_COMMANDS.has("shell:openPath"), false);
 });
 
+test("shot dialogue import crosses only the admitted native command boundary", () => {
+  assert.equal(HOST_COMMANDS.has("workflow_import_performance"), true);
+  assert.equal(HOST_COMMANDS.has("workflow_generate_performance"), false);
+});
+
+test("authored script-dialogue resolution is admitted without opening generic host commands", () => {
+  assert.equal(HOST_COMMANDS.has("workflow_resolve_script_dialogue"), true);
+  assert.equal(HOST_COMMANDS.has("workflow_resolve_script_dialogue_unchecked"), false);
+});
+
 test("Phase 4 workflow commands stay allowlisted (removal must fail CI)", () => {
   for (const command of [
     // Chain: approval head, dependent render, continuity, assembly, reconcile, QC.

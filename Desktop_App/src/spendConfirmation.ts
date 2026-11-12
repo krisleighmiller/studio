@@ -43,10 +43,11 @@ export function createSpendConfirmationHandler(deps: {
   projectRoot: () => string | null;
   projectEpoch?: () => number;
   ownerIsCurrent?: (ownerRequestId: string | undefined) => boolean;
+  authorizeWorkflowMedia?: (request: { ownerRequestId?: string; operation: string; args: Record<string, unknown> }) => boolean | undefined;
   status: (message: string) => void;
   onSubmitted?: (result: unknown, isCurrent: () => boolean, ownerRequestId?: string) => void | Promise<void>;
   onProgress?: (isCurrent: () => boolean) => void | Promise<void>;
-  onSettled?: (outcome: { success: boolean; result?: unknown; error?: unknown }, isCurrent: () => boolean) => void | Promise<void>;
+  onSettled?: (outcome: { success: boolean; result?: unknown; error?: unknown }, isCurrent: () => boolean, ownerRequestId?: string) => void | Promise<void>;
 }): (payload: unknown) => Promise<void> {
   const MAX_QUEUED = 4;
   const queue: Request[] = [];
@@ -81,11 +82,18 @@ export function createSpendConfirmationHandler(deps: {
     };
 
     try {
-      const accepted = await deps.ask(
+      if (!isCurrent()) return; // Never prompt for a retired workflow owner, even on same-root reopen.
+      const scoped = request.workflowBound && isCurrent()
+        ? deps.authorizeWorkflowMedia?.({ ownerRequestId: request.ownerRequestId, operation, args })
+        : undefined;
+      const accepted = scoped === undefined ? await deps.ask(
         `${provider} · ${operation} · ${model}\n\nAuthorize this single media generation?`,
         { title: "Confirm paid generation", kind: "warning" },
-      );
+      ) : scoped;
       if (!accepted || !isCurrent()) {
+        if (!accepted && isCurrent() && deps.onSettled && request.ownerRequestId) {
+          await deps.onSettled({ success: false, error: new Error("Media generation denied; no provider request sent.") }, isCurrent, request.ownerRequestId);
+        }
         if (!accepted) deps.status("Paid generation was not authorized; no provider request was sent.");
         else deps.status(`Paid generation (${operation} · ${model}) was dropped: the open project changed while its authorization was pending. It was not dispatched.`);
         return;
@@ -153,7 +161,10 @@ export function createSpendConfirmationHandler(deps: {
       }
       const detail = error instanceof Error ? error.message : String(error);
       if (deps.onSettled && isCurrent()) {
-        try { await deps.onSettled({ success: false, error }, isCurrent); } catch { /* never replace original outcome */ }
+        try {
+          if (request.ownerRequestId) await deps.onSettled({ success: false, error }, isCurrent, request.ownerRequestId);
+          else await deps.onSettled({ success: false, error }, isCurrent);
+        } catch { /* never replace original outcome */ }
       }
       if (!isCurrent()) return;
       if (!dispatchAttempted && /stale/i.test(detail)) {

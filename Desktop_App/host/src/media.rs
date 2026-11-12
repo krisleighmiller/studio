@@ -209,11 +209,12 @@ fn generate(
         arg_str(args, &["retry_of", "retryOf"]).as_deref(),
         Some(metadata),
         None, // Registry estimates are not contractually verified maxima.
-        |_, submitted| {
+        |spend_id, submitted| {
             if name == "atlas_generate_video" && save_path_str.is_some() {
-                crate::workflow::render_jobs::with_render_job_outcome(
+                crate::workflow::render_jobs::with_render_job_outcome_for_spend(
                     &root,
                     save_path_str.as_deref().unwrap(),
+                    Some(spend_id),
                     || generate_unchecked(name, args, root.to_str(), app, &api, submitted),
                 )
             } else {

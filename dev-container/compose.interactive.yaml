@@ -1,0 +1,14 @@
+# Opt-in only: provider-capable networking and machine-local persistent home.
+# Never include this override for offline fixture acceptance.
+services:
+  ui:
+    network_mode: bridge
+    entrypoint: [bash, /source/Studio/dev-container/session.sh]
+    environment:
+      STUDIO_INTERACTIVE: "1"
+    volumes:
+      - type: bind
+        source: ${STUDIO_INTERACTIVE_HOME:?Use native-display --interactive-providers}
+        target: /studio-home
+        bind:
+          create_host_path: false

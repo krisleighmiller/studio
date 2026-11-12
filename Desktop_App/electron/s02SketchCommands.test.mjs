@@ -23,6 +23,9 @@ test("neighboring sketch commands remain allowlisted", () => {
     "workflow_attach_scratch_audio",
     "workflow_clear_scratch_audio",
     "workflow_set_animatic_duration",
+    "workflow_set_max_cuts",
+    "workflow_remove_cut",
+    "workflow_reopen_sketch",
   ]) {
     assert.equal(HOST_COMMANDS.has(command), true, `${command} must remain allowlisted`);
   }

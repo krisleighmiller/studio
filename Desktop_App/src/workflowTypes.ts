@@ -166,9 +166,12 @@ export type AnimaticShot = {
   id: string;
   cut_id: CutId;
   duration_seconds: number;
+  /** Host seed provenance; absent on legacy or explicitly edited shots. */
+  auto_duration_seed_seconds?: number | null;
   scratch_audio_path?: string | null;
   trim_in_seconds?: number | null;
   trim_out_seconds?: number | null;
+  trim_source_take_id?: string | null;
   transition?: SequenceTransition | null;
 };
 
@@ -212,6 +215,8 @@ export type CutRecord = {
   id: CutId;
   title?: string | null;
   dialogue?: DialogueLine[];
+  script_dialogue_review?: { previous: DialogueLine[]; current: DialogueLine[] } | null;
+  script_dialogue_kept?: DialogueLine[] | null;
   speech_mode?: SpeechMode | null;
   scene_type?: string | null;
   subject?: string | null;
@@ -226,6 +231,7 @@ export type CutRecord = {
   start_frame_negative_prompt?: string | null;
   sketch?: CutSketch | null;
   visual_source?: VisualSourceSpec | null;
+  selected_performance_asset_id?: string | null;
   takes?: TakeRecord[];
   selected_take?: string | null;
   stable_id?: string;
@@ -236,18 +242,23 @@ export type CutRecord = {
 export type SceneRecord = {
   id: number;
   title: string;
+  source_missing?: boolean;
   source_path?: string | null;
+  /** Original Scene N heading within this script; id is project-wide. */
+  source_scene_number?: number | null;
   source_excerpt?: string | null;
   location?: string | null;
   action?: string[];
   sound?: string[];
   transitions?: string[];
   dialogue?: DialogueLine[];
+  script_dialogue_review?: { previous: DialogueLine[]; current: DialogueLine[] } | null;
   beats?: unknown[];
   intent?: SceneIntent | null;
   intent_approved?: boolean;
   strategy?: SceneStrategy | null;
   strategy_override?: boolean;
+  max_cuts?: number | null;
   look_board?: LookBoard | null;
   cuts: CutRecord[];
   stages: StageMap;
@@ -369,6 +380,7 @@ export type CharacterRecord = {
   voice_ready: boolean;
   profile_path?: string | null;
   model_sheet_manifest_path?: string | null;
+  reference_asset_ids?: string[];
   profile?: CharacterProfile;
   asset_ids?: string[];
   notes?: string[];
@@ -438,6 +450,7 @@ export type JobRecord = {
   spend_category?: string | null;
   /** Ordered assembly snapshot for timing/order parity checks. Absent on legacy jobs. */
   assembly_snapshot?: AssemblyShotSnapshot[] | null;
+  performance_asset_id?: string | null;
   /** Human-reviewed provider evidence; not independently provider-verified. */
   reconciliation?: {
     source: "manual_evidence_review";
@@ -572,6 +585,11 @@ export type ProjectBudget = {
 };
 
 export type ProjectState = {
+  /** Native optimistic-write fence; missing old fixtures cannot acquire media. */
+  state_revision?: number;
+  rendered_review?: { job_id: string } | null;
+  /** Immutable source→dependent edit edges; receipts stay after subsequent edits. */
+  change_impacts?: { revision: number; source: string; dependent: string; disposition: "needs_review" | "invalidated" }[];
   version: number;
   project_name?: string | null;
   scripts?: { path: string; title?: string | null; aspect_ratio?: string | null }[];
@@ -579,6 +597,8 @@ export type ProjectState = {
   scenes: SceneRecord[];
   assets?: AssetRecord[];
   jobs?: JobRecord[];
+  /** Retained media-version ledger; older versions are history, not approvals. */
+  versions?: { id: string; asset_id: string; version: number; path: string; status: string }[];
   /** Structured project budget. Absent means unbudgeted (no limit, no warning). */
   budget?: ProjectBudget | null;
   profile?: ProductionProfile | null;
@@ -587,6 +607,12 @@ export type ProjectState = {
 };
 
 export type WorkflowImportResult = {
+  /** Native receipt for an explicitly refreshed saved source, not a downstream approval. */
+  editedScript?: { path: string; sourceSha256: string; stateRevision: number; affectedSceneIds: number[] };
+  performanceImport?: {
+    sceneId: number; cut: number; shotStableId: string;
+    assetId: string; path: string; created: boolean; registered: boolean;
+  };
   state: ProjectState;
   report: ProjectReport;
   summary: string;

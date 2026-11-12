@@ -24,6 +24,27 @@ function setup(accept = true) {
 }
 
 describe("paid media confirmation handoff (host mocked; no provider calls)", () => {
+  it("uses an explicitly scoped workflow grant but still obtains a fresh token for each image", async () => {
+    let issued = 0;
+    const invoke = vi.fn(async (command: string, _args?: Record<string, unknown>) => command === "confirm_unbounded_spend" ? `token-${++issued}` : "saved");
+    const ask = vi.fn(async () => true);
+    const authorizeWorkflowMedia = vi.fn(({ args }: { args: Record<string, unknown> }) =>
+      typeof args.save_path === "string" && args.save_path.startsWith("/project/Characters/Alice/model_sheet/"));
+    const handle = createSpendConfirmationHandler({ invoke, ask, authorizeWorkflowMedia, status: vi.fn(),
+      projectRoot: () => "/project", ownerIsCurrent: id => id === "sheet-one" });
+    const pack = (shot: string, hash: string) => ({ projectRoot: "/project", provider: "replicate", category: "media",
+      operation: "atlas_generate_image", model: "chosen-image-model", ownerRequestId: "sheet-one", workflowContinuationBound: true,
+      args: { model: "chosen-image-model", save_path: `/project/Characters/Alice/model_sheet/alice_${shot}.png` },
+      quote: { currency: "USD", requestHash: hash.repeat(64), ledgerRevision: `revision-${hash}`, disclosure: "Unknown total" } });
+    await handle(pack("standing_front", "a"));
+    await handle(pack("standing_left", "b"));
+    expect(ask).not.toHaveBeenCalled();
+    expect(authorizeWorkflowMedia).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "confirm_unbounded_spend")).toHaveLength(2);
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "media_generate_confirmed").map(([, args]) => (args as { token: string }).token)).toEqual(["token-1", "token-2"]);
+    await handle({ ...pack("standing_right", "c"), workflowContinuationBound: false });
+    expect(ask).toHaveBeenCalledOnce();
+  });
   it("notifies the application after confirmed dispatch so Jobs can refresh", async () => {
     const invoke = vi.fn(async (command: string): Promise<string> => {
       if (command === "confirm_spend") return "one-use-token";

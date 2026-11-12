@@ -1,41 +1,67 @@
 import { VISUAL_SOURCE_STRATEGIES, type AssetRecord, type CutRecord, type SceneRecord, type SceneReport, type VisualSourceStrategy } from "../../workflowTypes";
 import { continuityChoice } from "../selectors/continuityChoice";
 import { getSurfaceHost, startFrameEditBriefs } from "./session";
-import { actionButton, block, findAsset, missingPanel, presentSurface, queueLookThumbs, queueTakeVideos } from "./shared";
+import { actionButton, block, findAsset, queueTakeVideos } from "./shared";
 import { approvedSceneLookAssets, cutImageAssets, effectiveVisualSourceStrategy, visualSourceHint, visualSourceStatus } from "./surfaceSelectors";
-import { buildReferenceModel } from "./surfaceModels";
 import type { ReferenceIntent } from "./surfaceIntents";
+import { orderedReferencePicker } from "../orderedReferencePicker";
 
 function paintReferenceImagesStage(
   scene: SceneRecord,
-  sceneStatus: SceneReport | undefined,
+  _sceneStatus: SceneReport | undefined,
   emit: (intent: ReferenceIntent) => void,
+  imageWorkspace?: (slotId: string) => HTMLElement,
 ): HTMLElement {
   const wrap = document.createElement("div");
-  wrap.className = "workflow-start-frames";
-  const planned = sceneStatus?.planned_visual_sources ?? 0;
-  const ready = sceneStatus?.render_ready_sources ?? 0;
-  wrap.append(
-    block(
-      planned ? "workflow-banner" : "workflow-missing",
-      planned
-        ? `${planned} of ${scene.cuts.length} cuts have a planned visual-source strategy; ${ready} are render ready. Continuity-linked cuts remain correctly planned while they wait for a selected predecessor take.`
-        : "No visual-source strategies are approved. Choose how each cut obtains its opening image; not every cut needs a preproduction start frame.",
-    ),
-  );
-  if (!scene.cuts.length) {
-    wrap.append(
-      missingPanel(
-        "No cuts are available.",
-        "Draft cut sketches before generating cut-specific start frames.",
-      ),
-    );
-    return wrap;
-  }
-  for (const cut of scene.cuts) {
-    wrap.append(renderStartFrameCard(scene, cut, emit));
-  }
-  queueLookThumbs(wrap);
+  wrap.className = "workflow-reference-descriptions";
+  wrap.append(block("workflow-field-hint", "Describe the images you want for this scene. Suggested descriptions can be edited; adding a description does not generate an image."));
+  const choices = [
+    ["user_defined", "User Defined"], ["interior_reference", "Interior"], ["exterior_reference", "Exterior"],
+    ["prop_reference", "Prop"], ["wardrobe_reference", "Wardrobe"], ["mood_reference", "Mood"],
+  ];
+  const entries: { description: HTMLTextAreaElement; category: HTMLSelectElement; save: HTMLButtonElement; remove?: HTMLButtonElement; controls?: HTMLFieldSetElement; hint?: HTMLElement; initialDescription: string; initialCategory: string }[] = [];
+  const updateDirty = () => {
+    const dirty = entries.find((item) => item.description.value !== item.initialDescription || item.category.value !== item.initialCategory);
+    for (const item of entries) {
+      item.description.disabled = !!dirty && item !== dirty;
+      item.category.disabled = !!dirty && item !== dirty;
+      item.save.disabled = !!dirty && item !== dirty;
+      if (item.remove) item.remove.disabled = !!dirty;
+      if (item.controls) item.controls.disabled = !!dirty;
+      if (item.hint) item.hint.hidden = !dirty;
+    }
+  };
+  const entry = (slot: NonNullable<NonNullable<SceneRecord["look_board"]>["slots"]>[number] | null) => {
+    const section = document.createElement("section");
+    const title = document.createElement("h3"); title.textContent = slot?.title || "New reference image";
+    const category = document.createElement("select"); category.setAttribute("aria-label", slot ? `Category for ${slot.title}` : "New reference category");
+    for (const [value, label] of choices) { const option = document.createElement("option"); option.value = value; option.textContent = label; category.append(option); }
+    category.value = slot ? (slot.title === "User Defined" ? "user_defined" : slot.role) : "user_defined";
+    const description = document.createElement("textarea"); description.value = slot?.prompt ?? ""; description.setAttribute("aria-label", slot ? `Description for ${slot.title}` : "New reference description");
+    const save = actionButton(slot ? "Save description" : "Add description", () => {
+      if (description.value.trim()) emit({ type: "save-description", slotId: slot?.id ?? null, description: description.value, category: category.value });
+    });
+    const item: typeof entries[number] = { description, category, save, initialDescription: description.value, initialCategory: category.value };
+    entries.push(item);
+    description.addEventListener("input", updateDirty);
+    category.addEventListener("change", updateDirty);
+    section.append(title, category, description, save);
+    if (slot) {
+      item.remove = actionButton("Delete look", () => emit({ type: "delete-look-slot", slotId: slot.id, title: slot.title || "Untitled" }));
+      section.append(item.remove);
+    }
+    if (slot && imageWorkspace) {
+      const hint = block("workflow-field-hint", "Save changed descriptions before using image actions.");
+      hint.hidden = true;
+      const controls = document.createElement("fieldset");
+      controls.append(imageWorkspace(slot.id));
+      item.controls = controls; item.hint = hint;
+      section.append(hint, controls);
+    }
+    return section;
+  };
+  wrap.append(entry(null));
+  for (const slot of scene.look_board?.slots ?? []) wrap.append(entry(slot));
   return wrap;
 }
 
@@ -81,17 +107,29 @@ export function renderStartFrameCard(
   predecessorTitle.textContent = "Predecessor cut";
   const predecessorSelect = document.createElement("select");
   const earlierCuts = scene.cuts.filter((candidate) => candidate.id.cut < cut.id.cut);
-  for (const candidate of earlierCuts) {
+  const previousScene = cut.id.cut === 1
+    ? getSurfaceHost().state?.scenes?.find((candidate) => candidate.id === scene.id - 1)
+    : undefined;
+  const previousFinal = previousScene?.cuts.reduce<CutRecord | undefined>(
+    (last, candidate) => !last || candidate.id.cut > last.id.cut ? candidate : last, undefined,
+  );
+  const predecessors = [...earlierCuts, ...(previousFinal ? [previousFinal] : [])];
+  for (const candidate of predecessors) {
     const item = document.createElement("option");
-    item.value = String(candidate.id.cut);
-    item.textContent = `Cut ${candidate.id.cut} · ${candidate.title?.trim() || "Untitled"}`;
+    item.value = `${candidate.id.source_scene}:${candidate.id.cut}`;
+    item.textContent = `Scene ${candidate.id.source_scene} Cut ${candidate.id.cut} · ${candidate.title?.trim() || "Untitled"}`;
     predecessorSelect.append(item);
   }
-  predecessorSelect.value = String(
-    cut.visual_source?.predecessor?.cut ??
-      earlierCuts[earlierCuts.length - 1]?.id.cut ??
-      "",
+  const savedPredecessor = cut.visual_source?.predecessor;
+  const defaultPredecessor = earlierCuts[earlierCuts.length - 1] ?? previousFinal;
+  predecessorSelect.value = savedPredecessor
+    ? `${savedPredecessor.source_scene}:${savedPredecessor.cut}`
+    : defaultPredecessor ? `${defaultPredecessor.id.source_scene}:${defaultPredecessor.id.cut}` : "";
+  const chosenPredecessor = () => predecessors.find(
+    (candidate) => `${candidate.id.source_scene}:${candidate.id.cut}` === predecessorSelect.value,
   );
+  const savedChoice = () => chosenPredecessor()?.id.source_scene === savedPredecessor?.source_scene
+    && chosenPredecessor()?.id.cut === savedPredecessor?.cut;
   predecessorLabel.append(predecessorTitle, predecessorSelect);
 
   const sharedLabel = document.createElement("label");
@@ -127,7 +165,8 @@ export function renderStartFrameCard(
       type: "set-source",
       cut: cut.id.cut,
       strategy,
-      predecessorCut: strategy === "previous_selected_take_exit_frame" ? Number(predecessorSelect.value) : null,
+      predecessorCut: strategy === "previous_selected_take_exit_frame" ? chosenPredecessor()?.id.cut ?? null : null,
+      predecessorScene: strategy === "previous_selected_take_exit_frame" ? chosenPredecessor()?.id.source_scene ?? null : null,
       assetId: strategy === "shared_reference" && sharedSelect.value ? sharedSelect.value : null,
     });
   });
@@ -152,20 +191,25 @@ export function renderStartFrameCard(
   preview.className = "workflow-take-video";
   let frameTimeEdited = frameTime.value !== "";
   const refreshBindState = (): void => {
-    const predecessor = earlierCuts.find(
-      (candidate) => candidate.id.cut === Number(predecessorSelect.value),
-    );
+    const predecessor = chosenPredecessor();
     const take = predecessor?.takes?.find(
       (candidate) =>
         candidate.id === predecessor?.selected_take ||
         candidate.path === predecessor?.selected_take,
     );
     const editedTime = frameTimeEdited && frameTime.value !== "" ? Number(frameTime.value) : null;
+    const predecessorScene = predecessor?.id.source_scene === scene.id ? scene : getSurfaceHost().state?.scenes?.find(item => item.id === predecessor?.id.source_scene);
+    const shot = predecessorScene?.animatic?.shots?.find(item => item.cut_id.source_scene === predecessor?.id.source_scene && item.cut_id.cut === predecessor?.id.cut);
+    const end = shot ? shot.duration_seconds - (shot.trim_out_seconds ?? 0) : NaN;
+    const start = shot?.trim_in_seconds ?? 0;
+    const editedEnding = take && shot?.trim_source_take_id === take.id && Number.isFinite(preview.duration)
+      && Number.isFinite(end) && Number.isFinite(start) && start >= 0 && end > start && end <= preview.duration + 0.001
+      ? Math.max(start, end - 0.1) : null;
     const choice = continuityChoice({
       strategy: strategySelect.value as VisualSourceStrategy,
-      predecessorTakeSelected: Boolean(take),
+      predecessorTakeSelected: Boolean(take) && savedChoice(),
       durationSeconds: Number.isFinite(preview.duration) ? preview.duration : null,
-      editedTimeSeconds: editedTime,
+      editedTimeSeconds: editedTime ?? editedEnding,
       boundAssetId: cut.visual_source?.asset_id,
       dependentLabels: predecessor ? getSurfaceHost().continuityDependents(predecessor) : [],
       busy: getSurfaceHost().busy,
@@ -190,7 +234,8 @@ export function renderStartFrameCard(
     emit({
       type: "bind-frame",
       cut: cut.id.cut,
-      predecessorCut: Number(predecessorSelect.value),
+      predecessorCut: chosenPredecessor()?.id.cut ?? 0,
+      predecessorScene: chosenPredecessor()?.id.source_scene ?? scene.id,
       frameTimeSeconds: Number(frameTime.value),
     });
   });
@@ -214,9 +259,7 @@ export function renderStartFrameCard(
     preview.hidden = !continuity;
     sharedLabel.hidden = strategy !== "shared_reference";
     bindContinuity.hidden = !continuity;
-    const predecessor = earlierCuts.find(
-      (candidate) => candidate.id.cut === Number(predecessorSelect.value),
-    );
+    const predecessor = chosenPredecessor();
     const take = predecessor?.takes?.find(
       (candidate) =>
         candidate.id === predecessor?.selected_take ||
@@ -224,7 +267,7 @@ export function renderStartFrameCard(
     );
     const choice = continuityChoice({
       strategy,
-      predecessorTakeSelected: Boolean(take),
+      predecessorTakeSelected: Boolean(take) && savedChoice(),
       durationSeconds: Number.isFinite(preview.duration) ? preview.duration : null,
       editedTimeSeconds: frameTimeEdited && frameTime.value !== "" ? Number(frameTime.value) : null,
       boundAssetId: cut.visual_source?.asset_id,
@@ -269,14 +312,20 @@ export function renderStartFrameCard(
     cut.negative_prompt ??
     "";
   negativeLabel.append(negativeTitle, negative);
-  directSource.append(promptLabel, negativeLabel);
+  const references = orderedReferencePicker((getSurfaceHost().state?.assets ?? [])
+    .filter(asset => asset.status !== "rejected" && /\.(png|jpe?g|webp|gif)$/i.test(asset.path))
+    .map(asset => ({ id: asset.id, label: asset.path })));
+  directSource.append(promptLabel, negativeLabel, references.element);
 
   const promptActions = document.createElement("div");
   promptActions.className = "workflow-inspector-actions";
+  const draftPrompt = actionButton("Draft image prompt", () => {
+    if (!getSurfaceHost().busy && getSurfaceHost().chatReady) emit({ type: "draft-prompt", cut: cut.id.cut });
+  });
+  const draftReason = getSurfaceHost().busy ?? (getSurfaceHost().chatReady ? null : "Pick a chat model in the dropdown first.");
+  if (draftReason) { draftPrompt.disabled = true; draftPrompt.title = draftReason; }
   promptActions.append(
-    actionButton("Draft image prompt", () => {
-      emit({ type: "draft-prompt", cut: cut.id.cut });
-    }),
+    draftPrompt,
     actionButton("Save prompt", () => {
       emit({
         type: "save-prompt",
@@ -286,7 +335,7 @@ export function renderStartFrameCard(
       });
     }),
     actionButton("Generate start frame", () => {
-      emit({ type: "generate", cut: cut.id.cut });
+      emit({ type: "generate", cut: cut.id.cut, referenceAssetIds: references.selected() });
     }),
     actionButton("Attach still", () => {
       emit({ type: "attach-still", cut: cut.id.cut });
@@ -383,14 +432,10 @@ export function renderReferenceImagesStage(
   scene: SceneRecord,
   sceneStatus: SceneReport | undefined,
   onIntent: (intent: ReferenceIntent) => void,
+  imageWorkspace?: (slotId: string) => HTMLElement,
 ): HTMLElement {
-  const model = buildReferenceModel({
-    scene,
-    report: sceneStatus,
-    busy: getSurfaceHost().busy,
-    error: getSurfaceHost().error,
-    blocked: getSurfaceHost().blockerNames(scene.id),
-    chatReady: getSurfaceHost().chatReady,
-  });
-  return presentSurface(paintReferenceImagesStage(scene, sceneStatus, onIntent), model, true);
+  const view = paintReferenceImagesStage(scene, sceneStatus, onIntent, imageWorkspace);
+  const error = getSurfaceHost().error;
+  if (error) view.prepend(block("workflow-banner reject", error));
+  return view;
 }

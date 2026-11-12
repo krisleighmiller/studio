@@ -1,0 +1,34 @@
+import {afterEach, expect, it, vi} from 'vitest';
+import {renderPerformanceAudio} from '../src/studio/surfaces/performanceAudio';
+import {bindSurfaceHost, getSurfaceHost, resetSurfaceSession} from '../src/studio/surfaces/session';
+const path='Scenes/Scene1/Cut1/source.wav';
+afterEach(()=>{resetSurfaceSession();document.body.replaceChildren();});
+it('exposes independent bounded pitch without changing speed or selecting automatically',async()=>{
+ bindSurfaceHost({state:{scenes:[],assets:[{id:'audio_1',path,role:'source_audio'}]},mediaUrl:async (p:string)=>`file://${p}`,resolvePath:(p:string)=>`/fixture/${p}`} as any);
+ const host=getSurfaceHost();
+ const emit=vi.fn();const section=renderPerformanceAudio({id:{source_scene:1,cut:1}} as any,emit);document.body.append(section);
+ const pitch=section.querySelector<HTMLInputElement>(`input[aria-label="Pitch for ${path}"]`)!;
+ expect(pitch).not.toBeNull();expect([pitch.min,pitch.max]).toEqual(['0.5','2']);
+ const create=[...section.querySelectorAll('button')].find(b=>b.textContent==='Create local pitch version')!;
+ pitch.value='2.01';create.click();expect(emit).not.toHaveBeenCalled();expect(section.textContent).toContain('Choose a pitch');
+ pitch.value='1.5';create.click();expect(emit).toHaveBeenCalledExactlyOnceWith({type:'version-pitch',cut:1,assetId:'audio_1',pitch:1.5});
+ expect(section.querySelector<HTMLInputElement>(`input[aria-label="Speed for ${path}"]`)!.value).toBe('1.25');
+ await vi.waitFor(()=>expect(section.querySelector('audio')!.src).toContain(path));
+ expect(section.querySelector('audio')!.autoplay).toBe(false);
+ host.busy='Creating local pitch version…';const busy=renderPerformanceAudio({id:{source_scene:1,cut:1}} as any,emit);
+ expect(busy.querySelector<HTMLInputElement>(`input[aria-label="Pitch for ${path}"]`)!.disabled).toBe(true);
+ expect([...busy.querySelectorAll('button')].find(b=>b.textContent==='Create local pitch version')!.disabled).toBe(true);
+});
+it('requires a valid source window and exposes sample lineage without selecting or submitting',()=>{
+ bindSurfaceHost({state:{scenes:[],assets:[{id:'audio_1',path,role:'source_audio'},{id:'audio_2',path:path.replace('source.wav','source_trim_v2.wav'),role:'source_audio',parent_asset_id:'audio_1',notes:JSON.stringify({source_window:{start_sample:24000,end_sample_exclusive:120000,sample_rate:48000}})}]},mediaUrl:async(p:string)=>`file://${p}`,resolvePath:(p:string)=>p} as any);
+ const emit=vi.fn();const section=renderPerformanceAudio({id:{source_scene:1,cut:1}} as any,emit);document.body.append(section);
+ expect(section.textContent).toContain('source samples [24000, 120000) at 48000 Hz');
+ const start=section.querySelector<HTMLInputElement>(`input[aria-label="Trim start for ${path}"]`)!;
+ const end=section.querySelector<HTMLInputElement>(`input[aria-label="Trim end for ${path}"]`)!;
+ const create=[...section.querySelectorAll('button')].find(b=>b.textContent==='Create local trim version')!;
+ end.value='';create.click();expect(emit).not.toHaveBeenCalled();
+ start.value='2';end.value='1';create.click();expect(emit).not.toHaveBeenCalled();
+ start.value='0.5';end.value='2.5';create.click();
+ expect(emit).toHaveBeenCalledExactlyOnceWith({type:'version-trim',cut:1,assetId:'audio_1',startSeconds:0.5,endSeconds:2.5});
+ expect(section.querySelectorAll('audio')).toHaveLength(2);
+});

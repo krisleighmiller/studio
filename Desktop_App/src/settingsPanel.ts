@@ -51,6 +51,11 @@ export function getSettings(): AppSettings {
   return cloneSettings(draft);
 }
 
+/** The host routes using saved settings, not unsaved edits in the panel. */
+export function getSavedSettings(): AppSettings {
+  return savedSnapshot ? JSON.parse(savedSnapshot) as AppSettings : defaultSettings();
+}
+
 export function settingsAreDirty(): boolean {
   return snapshotOf(draft) !== savedSnapshot;
 }
@@ -247,9 +252,8 @@ export function renderSettingsPanel(): void {
         <p class="settings-help">
           Optional parallel generation defaults for adult / NSFW workflows. Lists all models (including Atlas
           <strong>spicy</strong> ones hidden from main Generation defaults). Enable this section to configure
-          slots, then in Director chat say <strong>adult</strong> or <strong>nsfw</strong> (e.g. “generate this
-          scene using the adult models”) so that turn uses these defaults. Unset adult slots fall back to main
-          Generation defaults.
+          slots. <strong>To do:</strong> adult slots have no trigger yet since Director chat was removed, so
+          they are not usable end to end. Unset adult slots fall back to main Generation defaults.
         </p>
         <label class="settings-field settings-toggle">
           <span>Enable adult content defaults</span>

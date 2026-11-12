@@ -1,14 +1,107 @@
-import type { AnimaticShot, SceneRecord } from "../../workflowTypes";
+import type { AnimaticShot, JobRecord, SceneRecord } from "../../workflowTypes";
 import { getRoughPlayback, getSurfaceHost, setRoughPlayback, stopRoughCut } from "./session";
 import { actionButton, block } from "./shared";
 import { cutForShot } from "./surfaceSelectors";
-import type { SketchIntent } from "./surfaceIntents";
+import { renderAnimaticTiming } from "./animaticTiming";
+import { renderedSnapshotCurrent } from "./renderedSnapshot";
+import type { AssembleIntent, SketchIntent } from "./surfaceIntents";
 
 const TRANSITIONS: { value: string; label: string }[] = [
   { value: "", label: "Cut" },
   { value: "dissolve", label: "Dissolve" },
   { value: "fade_through_black", label: "Fade through black" },
 ];
+
+/** Review the actual assembled bytes, never a timed slideshow of planning stills. */
+export function renderRenderedSequence(job: JobRecord | undefined, emit: (intent: AssembleIntent) => void): HTMLElement {
+  const host = getSurfaceHost();
+  const section = document.createElement("section");
+  section.className = "workflow-production-take";
+  section.setAttribute("aria-label", "Rendered rough-cut review");
+  const heading = document.createElement("h3");
+  heading.textContent = "Rendered rough-cut review";
+  section.append(heading);
+  if (!job?.output_path) {
+    section.append(block("workflow-field-hint", "No completed project draft yet. Prepare project master below, then return here after the local assembly completes."));
+    return section;
+  }
+  const current = renderedSnapshotCurrent(host.state?.scenes ?? [], job.assembly_snapshot);
+  const approved = current && host.state?.rendered_review?.job_id === job.id;
+  section.append(block("workflow-field-hint", approved
+    ? "Approved rendered sequence · this saved project master. Sketch planning approval is separate. Changing selected takes, order, trims, duration or transitions clears this review."
+    : current ? "Draft · not a creative approval. Play, pause and seek the assembled rendered takes below. This is the saved assembly, not a sketch preview; prepare a new master after changing selections or timing."
+    : "Stale master · playback shows the previous saved sequence, not the current selected order/timing. Prepare a new project master before approving."));
+  const video = document.createElement("video");
+  video.controls = true;
+  video.preload = "metadata";
+  video.playsInline = true;
+  video.setAttribute("aria-label", "Selected rendered takes · saved project master");
+  const status = block("workflow-field-hint", `Loading ${job.output_path}…`);
+  status.addEventListener("contextmenu", () => {
+    const selection = window.getSelection();
+    if (!selection || !status.textContent) return;
+    const range = document.createRange();
+    range.selectNodeContents(status);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  const seekLabel = document.createElement("label");
+  seekLabel.className = "workflow-field";
+  seekLabel.textContent = "Seek rendered rough cut";
+  const seek = document.createElement("input");
+  seek.type = "range";
+  seek.min = "0";
+  seek.max = "0";
+  seek.step = "0.1";
+  seek.value = "0";
+  seek.disabled = true;
+  seek.setAttribute("aria-label", "Seek rendered rough cut");
+  seek.addEventListener("input", () => { video.currentTime = Number(seek.value); });
+  video.addEventListener("timeupdate", () => { seek.value = String(video.currentTime); });
+  seekLabel.append(seek);
+  let playing = false;
+  const play = actionButton("Play rendered rough cut", () => {
+    if (playing) video.pause();
+    else void video.play().catch(() => { status.textContent = "Could not play this master. Try the video controls or Open project draft."; });
+  });
+  play.disabled = true;
+  video.addEventListener("play", () => { playing = true; play.textContent = "Pause rendered rough cut"; });
+  const paused = () => { playing = false; play.textContent = "Play rendered rough cut"; };
+  video.addEventListener("pause", paused);
+  video.addEventListener("ended", paused);
+  video.addEventListener("loadedmetadata", () => {
+    const valid = Number.isFinite(video.duration) && video.duration > 0;
+    seek.max = valid ? String(video.duration) : "0";
+    seek.disabled = !valid || Boolean(host.busy);
+    status.textContent = `${job.output_path} · ${video.duration.toFixed(2)}s · use the seek slider or video controls`;
+  });
+  video.addEventListener("error", () => { status.textContent = "Could not load the rendered master. Prepare a new project master if this file is missing or unreadable."; play.disabled = true; seek.disabled = true; });
+  section.append(video, play, seekLabel, status);
+  const list = document.createElement("ol");
+  list.setAttribute("aria-label", "Saved rendered sequence order");
+  for (const shot of job.assembly_snapshot ?? []) {
+    const row = document.createElement("li");
+    row.dataset.takeId = shot.take_id;
+    row.textContent = `${shot.take_id} · ${shot.path} · from ${shot.start_seconds.toFixed(2)}s · ${shot.duration_seconds.toFixed(2)}s · ${shot.transition.replace(/_/g, " ")}`;
+    list.append(row);
+  }
+  const approve = actionButton(approved ? "Rendered rough cut approved" : "Approve rendered rough cut", () => emit({ type: "approve-rendered", jobId: job.id }));
+  approve.disabled = !current || approved || Boolean(host.busy);
+  approve.title = "Record creative review of this exact saved rendered sequence, not permission to generate or spend. A stale master cannot be approved; prepare a new master after timing or take changes.";
+  section.append(list, approve);
+  for (const scene of host.state?.scenes ?? []) {
+    if (!scene.animatic?.shots?.length) section.append(block("workflow-field-hint", `Scene ${scene.id}: no sketch animatic. Rendered review uses the full selected takes for this scene when assembled without timing.`));
+  }
+  const state = host.state;
+  void host.mediaUrl(host.resolvePath(job.output_path) ?? job.output_path).then(url => {
+    if (!video.isConnected || getSurfaceHost().state !== state) return;
+    video.src = url;
+    play.disabled = Boolean(host.busy);
+  }).catch(() => {
+    if (video.isConnected) status.textContent = "Could not load the rendered master. Try Open project draft or prepare a new master.";
+  });
+  return section;
+}
 
 function paintRoughStage(scene: SceneRecord, shot: AnimaticShot | null): void {
   const stage = document.querySelector<HTMLElement>(".workflow-rough-cut-stage");
@@ -130,13 +223,18 @@ export function renderAnimatic(scene: SceneRecord, emit: (intent: SketchIntent) 
   const total = shots.reduce((sum, shot) => sum + (shot.duration_seconds || 0), 0);
   const heading = document.createElement("h2");
   heading.textContent = scene.animatic?.approved
-    ? `Rough cut · approved · ${total.toFixed(1)}s`
-    : `Rough cut · ${total.toFixed(1)}s`;
+    ? `Sketch animatic · planning approved · ${total.toFixed(1)}s`
+    : `Sketch animatic · ${total.toFixed(1)}s`;
   const note = document.createElement("p");
   note.className = "workflow-field-hint";
   note.textContent =
-    "Timing and order sit on the cut sketches. Dialogue without a scratch file plays as temporary on-screen text. A timing change marks later shot packages for review and keeps existing renders.";
+    "Planning preview only: stills, scratch audio and temporary dialogue, not rendered film. Review the rendered sequence in Assemble / Edit after preparing a project master. Timing and order sit on the cut sketches; changes keep existing renders.";
   section.append(heading, note);
+
+  if (!shots.length) {
+    section.append(block("workflow-field-hint", `No sketch animatic for Scene ${scene.id}. Selected rendered takes can still be assembled and reviewed in Assemble / Edit.`));
+    return section;
+  }
 
   const stage = document.createElement("div");
   stage.className = "workflow-rough-cut-stage";
@@ -147,7 +245,7 @@ export function renderAnimatic(scene: SceneRecord, emit: (intent: SketchIntent) 
   const controls = document.createElement("div");
   controls.className = "workflow-inspector-actions";
   controls.append(
-    actionButton(getRoughPlayback()?.sceneId === scene.id ? "Stop rough cut" : "Play rough cut", () => {
+    actionButton(getRoughPlayback()?.sceneId === scene.id ? "Stop sketch preview" : "Play sketch preview", () => {
       if (getRoughPlayback()?.sceneId === scene.id) {
         stopRoughCut();
         getSurfaceHost().rerender();
@@ -155,7 +253,7 @@ export function renderAnimatic(scene: SceneRecord, emit: (intent: SketchIntent) 
       }
       playRoughCut(scene);
     }),
-    actionButton(scene.animatic?.approved ? "Rough cut approved" : "Approve rough cut", () => {
+    actionButton(scene.animatic?.approved ? "Sketch animatic approved" : "Approve sketch animatic", () => {
       emit({ type: "approve-animatic" });
     }),
   );
@@ -293,13 +391,14 @@ export function renderAnimatic(scene: SceneRecord, emit: (intent: SketchIntent) 
     flag.textContent = flags.length ? `⚠ ${flags.join(", ")}` : "";
 
     item.append(label, takeInfo, trimIn, trimOut, transition, duration, scratch, flag, rowActions);
+    item.append(renderAnimaticTiming(shot, cut, emit));
     list.append(item);
   });
   section.append(list);
 
   const timeline = document.createElement("div");
   timeline.className = "workflow-animatic-timeline";
-  timeline.setAttribute("aria-label", "Rough cut timeline");
+  timeline.setAttribute("aria-label", "Sketch animatic timeline");
   const totalSecs = shots.reduce((sum, shot) => sum + (shot.duration_seconds || 0), 0);
   shots.forEach((shot, index) => {
     const segment = document.createElement("button");

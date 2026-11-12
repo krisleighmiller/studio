@@ -30,6 +30,16 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 cache/
+__pycache__/
+*.py[cod]
+
+# Local verification receipts, disposable projects and application profiles.
+# Required reusable test inputs belong in tests/fixtures, not evidence.
+/Desktop_App/evidence/
+/Dev_Notes/V2/evidence/
+
+# Syncthing conflict backups are not implementation source.
+*.sync-conflict-*
 
 # Editor / OS
 .vscode/*

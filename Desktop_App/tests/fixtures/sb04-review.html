@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><meta charset="UTF-8"><title>SB04 isolated selected-take review</title></head>
+<body class="workflow-desk"><main id="fixture" style="max-width:900px;margin:auto"></main>
+<script type="module">
+import '/src/styles.css';
+import { renderAssembleStage } from '/src/studio/surfaces/assembleStage.ts';
+import { renderAnimatic } from '/src/studio/surfaces/sequenceReview.ts';
+import { bindSurfaceHost } from '/src/studio/surfaces/session.ts';
+import receipt from './sb04-saved-copy.json';
+const scenes = receipt.saved_job.assembly_snapshot.map((shot, i) => ({
+  id:i+1,stable_id:`scene-${i+1}`,title:`Scene ${i+1}`,
+  cuts:[{id:{source_scene:i+1,cut:1},stable_id:shot.shot_id,title:`Cut ${i+1}`,selected_take:shot.take_id,takes:[{id:shot.take_id,path:shot.path,status:'selected'}]}],
+  ...(i<2 ? {animatic:{approved:true,shots:[{id:`animatic-${i}`,cut_id:{source_scene:i+1,cut:1},duration_seconds:shot.duration_seconds}],warnings:[]}} : {}),
+}));
+const state = {scenes, assets:[receipt.saved_asset], jobs:[receipt.saved_job], profile:{}};
+window.fixtureState = state;
+window.fixtureBefore = JSON.stringify(state);
+window.fixtureIntents = [];
+const emit = intent => window.fixtureIntents.push(intent);
+bindSurfaceHost({state,busy:null,error:null,blockerNames:()=>[],reviewExportPath:()=>null,
+  resolvePath:p=>p,mediaUrl:async p=>{
+    if(p!=='Final/Project_master.mp4') throw new Error(`Unexpected media path: ${p}`);
+    return '/evidence/sb03/SecondBrain_project_draft.mp4';
+  },hooks:{onOpenPath:()=>{throw new Error('No external media tabs in this fixture')}},
+});
+const title = document.createElement('h1'); title.textContent='Assemble / Edit · isolated selected-take review';
+document.querySelector('#fixture').append(title,renderAssembleStage(scenes[2],emit),renderAnimatic(scenes[2],emit),renderAnimatic(scenes[0],emit));
+window.fixtureReady=true;
+</script></body></html>

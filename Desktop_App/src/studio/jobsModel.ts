@@ -20,6 +20,7 @@ export type JobRowModel = {
   cancellation: string;
   resume: string;
   detail: string;
+  failureError: string | null;
   outputPath: string | null;
   outputKind: JobOutputKind | null;
   actionLabel: string | null;
@@ -108,6 +109,7 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
   const outputPath = outputOf(job, assets);
   const outputKind = outputPath ? outputKindOf(job.kind, outputPath) : null;
   const elapsed = elapsedLabel(job);
+  const failureError = job.status === "failed" ? job.error?.trim() || null : null;
   const detail = job.error?.trim() || located.label || job.progress?.trim() || "Scope unknown";
   const created = knownText(job.created_at);
   const started = knownText(job.started_at);
@@ -143,6 +145,7 @@ function jobRow(job: JobRecord, scenes: SceneRecord[], assets: AssetRecord[]): J
         ? "Automatic retry disabled · read-only status recovery available"
         : "Provider support unknown · unavailable in Studio",
     detail,
+    failureError,
     outputPath,
     outputKind,
     actionLabel: outputKind

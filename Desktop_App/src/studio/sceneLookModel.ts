@@ -51,9 +51,12 @@ export type SceneLookModel = {
   blockers: string[];
   narrativePurpose: string;
   notes: string[];
+  affectedCuts: { label: string; assetId: string; notePath: string | null; pending: boolean; stale: boolean }[];
   slots: LookSlotModel[];
   selectedSlotId: string | null;
   versions: LookVersionModel[];
+  referenceChoices?: { assetId: string; label: string }[];
+  imageRoutes?: { id: string; label: string }[];
   selectedAssetId: string | null;
   primary: LookVersionModel | null;
   identityHint: string | null;
@@ -121,6 +124,19 @@ export function buildSceneLook(input: {
   const versions = selected ? lookVersions(selected, input.assets, input.resolvePath) : [];
   const primary = pickPrimary(versions, input.focusedAssetId);
   const plates = wardrobePlates(input.scene, input.assets, input.characters, input.resolvePath);
+  const slotIds = new Set(selected?.asset_ids ?? []);
+  const affectedCuts = input.scene.cuts
+    .filter((cut) => !!cut.visual_source?.asset_id && slotIds.has(cut.visual_source.asset_id))
+    .map((cut) => {
+      const assetId = cut.visual_source!.asset_id!;
+      return {
+        label: `Scene ${cut.id.source_scene} Cut ${cut.id.cut}${cut.title ? ` · ${cut.title}` : ""}`,
+        assetId,
+        notePath: cut.production_note_path ?? null,
+        pending: input.jobs.some((job) => job.kind === "render" && job.status === "pending" && job.input_asset_ids?.includes(assetId)),
+        stale: input.assets.some((asset) => asset.id === assetId && asset.status === "superseded"),
+      };
+    });
   return {
     title: sceneHeadingTitle(input.scene.id, input.scene.title),
     counts: sceneCounts(input.scene, input.report, input.blockers.length),
@@ -128,6 +144,7 @@ export function buildSceneLook(input: {
     blockers: input.blockers,
     narrativePurpose: input.scene.intent?.narrative_purpose?.trim() || "No narrative purpose yet.",
     notes: input.scene.look_board?.notes ?? [],
+    affectedCuts,
     slots: slots.map((slot) => ({
       id: slot.id,
       role: knownRole(slot.role),
@@ -137,6 +154,9 @@ export function buildSceneLook(input: {
       approvalLabel: approvalLabel(slot),
     })),
     selectedSlotId: selected?.id ?? null,
+    referenceChoices: input.assets.filter(asset => asset.status !== "rejected" && /\.(png|jpe?g|webp|gif)$/i.test(asset.path)).map(asset => ({
+      assetId: asset.id, label: `${asset.path} · ${asset.id}`,
+    })),
     versions,
     selectedAssetId: primary?.assetId ?? null,
     primary,

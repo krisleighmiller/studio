@@ -78,6 +78,11 @@ export function surfacesForArea(input: {
       ),
     );
   if (input.area === "plan") {
+    const referenceIndex = items.findIndex(item => item.id === "reference_images");
+    if (referenceIndex >= 0) {
+      const [reference] = items.splice(referenceIndex, 1);
+      items.splice(Math.min(2, items.length), 0, reference);
+    }
     items.push(navItem("profile", "Profile", "neutral", input.active, true, null));
     items.push(navItem("assets", "Assets", "neutral", input.active, true, null));
   }

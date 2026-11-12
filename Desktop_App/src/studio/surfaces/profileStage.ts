@@ -42,6 +42,7 @@ function paintProjectProfile(emit: (intent: ProfileIntent) => void): HTMLElement
 
 function renderProfileForm(emit: (intent: ProfileIntent) => void): HTMLElement {
   const host = getSurfaceHost();
+  const working = host.busyControl === "profile-save";
   const activeRecipeId = host.activeRecipe()?.id;
   const profile = host.state?.profile;
   const deliverable = profile?.deliverables?.[0];
@@ -126,9 +127,14 @@ function renderProfileForm(emit: (intent: ProfileIntent) => void): HTMLElement {
   const save = document.createElement("button");
   save.type = "submit";
   save.className = "ghost-button";
-  save.textContent = "Save profile";
+  save.textContent = working ? "Saving profile…" : "Save profile";
   save.disabled = Boolean(getSurfaceHost().busy);
-  form.append(save);
+  save.classList.toggle("is-working", working);
+  save.setAttribute("aria-busy", String(working));
+  // While the receipt is inserted above the form, keep the initiating control
+  // in the first form row instead of letting it fall below the viewport.
+  if (working) form.insertBefore(save, form.children[1] ?? null);
+  else form.append(save);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const read = (key: string) =>

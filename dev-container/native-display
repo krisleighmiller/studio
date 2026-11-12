@@ -11,5 +11,32 @@ trap 'rm -f -- "$STUDIO_XAUTHORITY"' EXIT
 xauth nlist "$DISPLAY" | python3 -c 'import sys;print("".join("ffff"+s[4:] for s in sys.stdin),end="")' | xauth -f "$STUDIO_XAUTHORITY" nmerge -
 test -s "$STUDIO_XAUTHORITY"
 chmod 0600 "$STUDIO_XAUTHORITY"
+files=(-f compose.yaml)
+if docker info --format '{{json .SecurityOptions}}' | grep -q 'name=rootless'; then
+  files+=(-f compose.rootless.yaml)
+fi
+files+=(-f compose.native.yaml)
+interactive=0
+if [[ ${1:-} == --interactive-providers ]]; then
+  shift
+  interactive=1
+  # This deliberate opt-in is the only launcher path enabling outbound traffic.
+  # Fixed machine-local path: never reuse host app/keyring directories or sync it.
+  export STUDIO_INTERACTIVE_HOME=$HOME/.local/share/studio-docker/interactive
+  (umask 077; mkdir -p "$STUDIO_INTERACTIVE_HOME")
+  [[ ! -L $STUDIO_INTERACTIVE_HOME && -O $STUDIO_INTERACTIVE_HOME ]] || exit 1
+  chmod 0700 "$STUDIO_INTERACTIVE_HOME"
+  exec 9>"$STUDIO_INTERACTIVE_HOME/.session.lock"
+  chmod 0600 "$STUDIO_INTERACTIVE_HOME/.session.lock"
+  flock -n 9 || { echo 'Studio interactive session already running' >&2; exit 1; }
+  files+=(-f compose.interactive.yaml)
+  echo 'Studio interactive mode: outbound networking ON; machine-local settings and encrypted keyring retained.'
+elif [[ ${1:-} == --* ]]; then
+  echo 'Usage: ./native-display [--interactive-providers] [command ...]' >&2
+  exit 2
+fi
 if [[ $# == 0 ]]; then set -- bash /source/Studio/dev-container/run-ui.sh; fi
-./studio -f compose.yaml -f compose.native.yaml --profile ui run --rm --no-deps ui desktop "$@"
+if [[ $interactive == 1 ]]; then
+  set -- bash /source/Studio/dev-container/interactive-ui.sh "$@"
+fi
+./studio "${files[@]}" --profile ui run --rm --no-deps ui desktop "$@"

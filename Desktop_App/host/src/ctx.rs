@@ -3,13 +3,14 @@
 use serde_json::{json, Value};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Clone)]
 pub struct HostCtx {
     inner: Arc<HostInner>,
     request_generation: Option<u64>,
+    request_cancel: Option<Arc<AtomicBool>>,
     progress_id: Option<String>,
     pub(crate) workflow_parent: Option<Arc<crate::workflow_continuation::Parent>>,
     workflow_reply: Option<Arc<Mutex<Option<Value>>>>,
@@ -37,6 +38,7 @@ impl HostCtx {
                 out: Mutex::new(io::stdout()),
             }),
             request_generation: None,
+            request_cancel: None,
             progress_id: None,
             workflow_parent: None,
             workflow_reply: None,
@@ -56,6 +58,7 @@ impl HostCtx {
         request
             .request_generation
             .get_or_insert_with(|| self.inner.cancel_generation.load(Ordering::SeqCst));
+        request.request_cancel.get_or_insert_with(|| Arc::new(AtomicBool::new(false)));
         if request.workflow_reply.is_none() { request.workflow_reply = Some(Arc::new(Mutex::new(None))); }
         request
     }
@@ -66,9 +69,15 @@ impl HostCtx {
     }
 
     pub fn director_cancelled(&self) -> bool {
-        self.request_generation.is_some_and(|generation| {
+        self.request_cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::SeqCst)) || self.request_generation.is_some_and(|generation| {
             generation != self.inner.cancel_generation.load(Ordering::SeqCst)
         })
+    }
+
+    /// Exact approval Stop shares only this admission's cooperative flag.
+    /// A weak handle cannot keep a finished execution's authority alive.
+    pub(crate) fn request_cancel_handle(&self) -> Weak<AtomicBool> {
+        self.request_cancel.as_ref().map(Arc::downgrade).unwrap_or_default()
     }
 
     pub fn settings_path(&self) -> PathBuf {

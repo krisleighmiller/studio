@@ -14,6 +14,23 @@ use std::collections::BTreeMap;
 pub const WORKFLOW_VERSION: u32 = 2;
 pub const STATE_REL: &str = "Preproduction/workflow_state.json";
 
+/// Explicit creative review, not execution consent or sketch approval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenderedSequenceReview {
+    pub job_id: String,
+}
+
+/// A persisted source-to-dependent edge recorded when an edit changes an accepted input.
+/// Historical jobs and media are deliberately not removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeImpact {
+    pub revision: u64,
+    pub source: String,
+    pub dependent: String,
+    /// `needs_review` retains authored work; `invalidated` revokes an old receipt.
+    pub disposition: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssemblyShotSnapshot {
     pub shot_id: String,
@@ -764,6 +781,9 @@ pub struct CharacterRecord {
     pub profile_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_sheet_manifest_path: Option<String>,
+    /// User-selected reference images; distinct from the discovered asset inventory.
+    #[serde(default)]
+    pub reference_asset_ids: Vec<String>,
     #[serde(default)]
     pub profile: CharacterProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -948,6 +968,13 @@ pub enum DependencyState {
     Keep,
 }
 
+/// Script revision is distinct from authored cut and production-note dialogue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptDialogueReview {
+    pub previous: Vec<DialogueLine>,
+    pub current: Vec<DialogueLine>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TakeRecord {
     pub id: String,
@@ -964,6 +991,11 @@ pub struct CutRecord {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogue: Vec<DialogueLine>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_dialogue_review: Option<ScriptDialogueReview>,
+    /// Explicit keep decision against this exact script dialogue, not a sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_dialogue_kept: Option<Vec<DialogueLine>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speech_mode: Option<SpeechMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -995,6 +1027,9 @@ pub struct CutRecord {
     pub sketch: Option<CutSketch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_source: Option<VisualSourceSpec>,
+    /// Explicit user-selected local performance version; not a transcript certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_performance_asset_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub takes: Vec<TakeRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1016,6 +1051,8 @@ impl CutRecord {
             id,
             title: None,
             dialogue: Vec::new(),
+            script_dialogue_review: None,
+            script_dialogue_kept: None,
             speech_mode: None,
             scene_type: None,
             subject: None,
@@ -1030,6 +1067,7 @@ impl CutRecord {
             start_frame_negative_prompt: None,
             sketch: None,
             visual_source: None,
+            selected_performance_asset_id: None,
             takes: Vec::new(),
             selected_take: None,
             stable_id: String::new(),
@@ -1136,6 +1174,10 @@ pub struct AnimaticShot {
     pub id: String,
     pub cut_id: CutId,
     pub duration_seconds: f64,
+    /// Present only for untouched host-created timing seeds. Legacy shots have
+    /// unknown edit provenance and must not be automatically retimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_duration_seed_seconds: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scratch_audio_path: Option<String>,
     /// Seconds trimmed off the head (edit in-point).
@@ -1144,6 +1186,9 @@ pub struct AnimaticShot {
     /// Seconds trimmed off the tail (edit out-point).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trim_out_seconds: Option<f64>,
+    /// Selected source take this editorial window was saved against. Absent on legacy sketch trims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_source_take_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<SequenceTransition>,
 }
@@ -1164,8 +1209,15 @@ pub struct SceneAnimatic {
 pub struct SceneRecord {
     pub id: u32,
     pub title: String,
+    /// The script file or Scene N heading disappeared; retain work for recovery.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_missing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+    /// Original Scene N heading within source_path; id remains the project-wide number.
+    /// Legacy records without this field use id as their source number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_scene_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_excerpt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1178,6 +1230,8 @@ pub struct SceneRecord {
     pub transitions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogue: Vec<DialogueLine>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_dialogue_review: Option<ScriptDialogueReview>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub beats: Vec<ScriptBeat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1190,6 +1244,9 @@ pub struct SceneRecord {
     pub strategy_override: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub intent_approved: bool,
+    /// User ceiling for AI-drafted cuts; absent keeps the legacy twelve-cut ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cuts: Option<u32>,
     #[serde(default)]
     pub cuts: Vec<CutRecord>,
     #[serde(default)]
@@ -1208,19 +1265,23 @@ impl SceneRecord {
         SceneRecord {
             id,
             title: title.into(),
+            source_missing: false,
             source_path: None,
+            source_scene_number: None,
             source_excerpt: None,
             location: None,
             action: Vec::new(),
             sound: Vec::new(),
             transitions: Vec::new(),
             dialogue: Vec::new(),
+            script_dialogue_review: None,
             beats: Vec::new(),
             intent: None,
             look_board: None,
             strategy: None,
             strategy_override: false,
             intent_approved: false,
+            max_cuts: None,
             cuts: Vec::new(),
             stages: StageMap::default(),
             stable_id: String::new(),
@@ -1328,6 +1389,9 @@ pub struct JobRecord {
     /// Ordered assembly snapshot recorded at preparation, used for parity checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assembly_snapshot: Option<Vec<AssemblyShotSnapshot>>,
+    /// Exact explicitly selected performance version for a video-only preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance_asset_id: Option<String>,
 }
 
 /// Allowlisted nonsecret recovery data, not a raw provider request.
@@ -1424,6 +1488,7 @@ impl JobRecord {
             unbounded_exposure: false,
             request_metadata: None,
             assembly_snapshot: None,
+            performance_asset_id: None,
             attempts: vec![JobAttempt {
                 id: attempt_id,
                 status: JobStatus::Pending,
@@ -1905,12 +1970,12 @@ pub struct RequirementRecord {
 }
 
 impl RequirementRecord {
-    /// A scene can be blocked on a location, prop, voice, or plate.
+    /// Props are script context, not a demand for a separate reference image.
+    /// Location, voice, and plate prerequisites can still block a scene.
     pub fn blocks_scene(&self) -> bool {
         matches!(
             self.kind,
             RequirementKind::Location
-                | RequirementKind::Prop
                 | RequirementKind::Voice
                 | RequirementKind::Plate
         ) && matches!(
@@ -2012,6 +2077,10 @@ pub struct ProjectState {
     pub assets: Vec<AssetRecord>,
     #[serde(default)]
     pub jobs: Vec<JobRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_review: Option<RenderedSequenceReview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub change_impacts: Vec<ChangeImpact>,
     /// Single-use confirmations are project-persisted and consumed with reservation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spend_confirmations: Vec<SpendConfirmation>,
@@ -2106,6 +2175,8 @@ impl ProjectState {
             scenes: Vec::new(),
             assets: Vec::new(),
             jobs: Vec::new(),
+            rendered_review: None,
+            change_impacts: Vec::new(),
             spend_confirmations: Vec::new(),
             settings: SettingsSnapshot::default(),
             profile: None,
@@ -2128,6 +2199,7 @@ impl ProjectState {
             }
         }
         state.version = WORKFLOW_VERSION;
+        super::assembly_jobs::invalidate_review(&mut state);
         Ok(state)
     }
 
@@ -2325,6 +2397,20 @@ pub fn role_for_shot_id(shot_id: &str) -> AssetRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_props_are_context_not_required_images() {
+        let prop = RequirementRecord {
+            id: "prop_laptop".into(), name: "laptop".into(),
+            kind: RequirementKind::Prop, status: RequirementStatus::Draft,
+            scene_ids: vec![1], character_id: None, notes: None,
+            status_override: false, user_added: false,
+        };
+        assert!(!prop.blocks_scene());
+        let mut location = prop.clone();
+        location.kind = RequirementKind::Location;
+        assert!(location.blocks_scene());
+    }
 
     #[test]
     fn round_trips_and_assigns_stable_ids() {

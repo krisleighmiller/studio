@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CDP, checkedValue, until, attemptAll, admitGroups, plannerBody, connectionErrors } from '../tests/ui-tracer.mjs';
+import { CDP, checkedValue, until, attemptAll, admitGroups, plannerBody, connectionErrors } from '../tests/helpers/ui.mjs';
 import { Readable } from 'node:stream';
 
 class Socket extends EventTarget {

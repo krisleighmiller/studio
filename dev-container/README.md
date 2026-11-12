@@ -66,7 +66,7 @@ there are deliberately no personal/provider credentials in this UI session.
 Xvfb has no TCP listener on headless hosts. `run-ui.sh` starts Vite and Electron
 in the same offline container, with local stdio Rust sidecar communication.
 
-The smoke reuses the app's maintained `tests/ui-tracer.mjs` CDP/until helpers,
+The smoke reuses the app's maintained `tests/helpers/ui.mjs` CDP/until helpers,
 opens the real Electron app, checks visible controls and the preload bridge,
 captures the rendered page, and asserts a renderer has zero effective
 capabilities and extra seccomp filters. It does not open projects or submit

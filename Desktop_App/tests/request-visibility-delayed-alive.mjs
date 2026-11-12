@@ -2,17 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { CDP, until } from '/source/Studio/Desktop_App/tests/ui-tracer.mjs';
+import { CDP, until } from './helpers/ui.mjs';
+import { appRoot as app, prepareOutput } from './helpers/runtime.mjs';
 
-const app = '/source/Studio/Desktop_App';
-const out = `${app}/evidence/w1-10/runtime-351`;
+const out = prepareOutput('request-visibility-delayed-alive');
 const root = `${out}/disposable-project`;
-const command = "docker exec studio-dev-workbench-1 bash -lc 'cd /source/Studio/Desktop_App && xvfb-run -a node tests/request-visibility-delayed-alive.mjs'";
+const command = [process.execPath, ...process.execArgv, ...process.argv.slice(1)].map(arg => JSON.stringify(arg)).join(' ');
 const idleLabel = 'Generate script from notes';
 const workingLabel = 'Generating script…';
 const workingReceipt = 'Submitted · Working — Generate script from notes';
 const delayMs = 3000;
-fs.rmSync(out, { recursive: true, force: true });
 fs.mkdirSync(root, { recursive: true });
 fs.writeFileSync(`${root}/sentinel.txt`, 'Disposable offline W1-10 project\n');
 
@@ -51,10 +50,10 @@ try {
     env: {
       ...process.env,
       WORKBENCH_DEV: '1',
-      WORKBENCH_HOST_BIN: '/runtime/target/debug/workbench-host',
-      XDG_CONFIG_HOME: '/runtime/w1-10-config',
-      XDG_CACHE_HOME: '/runtime/w1-10-cache',
-      XDG_DATA_HOME: '/runtime/w1-10-data',
+      WORKBENCH_HOST_BIN: process.env.WORKBENCH_HOST_BIN ?? '/runtime/target/debug/workbench-host',
+      XDG_CONFIG_HOME: `${out}/xdg-config`,
+      XDG_CACHE_HOME: `${out}/xdg-cache`,
+      XDG_DATA_HOME: `${out}/xdg-data`,
     },
   });
   const mt = await until('main target', async () => { try { return (await (await fetch('http://127.0.0.1:9790/json/list')).json())[0]; } catch { return null; } });
@@ -164,7 +163,7 @@ try {
   try { result.diagnostic = { body: await ev('document.body.innerText'), calls: await main.evaluate('globalThis.__w110?.calls'), blocked: await main.evaluate('globalThis.__w110?.blocked'), settled: await main.evaluate('globalThis.__w110?.settled') }; } catch {}
 } finally {
   fs.writeFileSync(`${out}/result.json`, JSON.stringify(result, null, 2));
-  if (main) { try { await main.evaluate(`globalThis.__w110?.resolve?.({cancelled:true}); process.getBuiltinModule('module').createRequire(process.cwd()+'/electron/main.mjs')('electron').app.quit()`); } catch {} }
+  if (main) { try { await main.evaluate(`globalThis.__w110?.resolve?.({cancelled:true}); process.getBuiltinModule('module').createRequire(process.cwd()+'/electron/main.mjs')('electron').app.exit(0)`); } catch {} }
   cdp?.close(); main?.close();
   if (electron?.exitCode === null) electron.kill('SIGTERM');
   if (vite.exitCode === null) vite.kill('SIGTERM');

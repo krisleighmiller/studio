@@ -2,16 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { CDP, until } from '/source/Studio/Desktop_App/tests/ui-tracer.mjs';
+import { CDP, until } from './helpers/ui.mjs';
+import { appRoot as app, prepareOutput } from './helpers/runtime.mjs';
 
-const app = '/source/Studio/Desktop_App';
-const out = `${app}/evidence/w1-27/runtime-368`;
+const out = prepareOutput('request-visibility-reopened-session');
 const rootA = `${out}/project-a`;
 const rootB = `${out}/project-b`;
 const pendingAction = 'Old W1-27 session approval must not become live.\n[[workbench_approve:W127OLD]]';
-const command = "docker exec studio-dev-workbench-1 bash -lc 'cd /source/Studio/Desktop_App && xvfb-run -a node tests/request-visibility-reopened-session.mjs'";
-fs.rmSync(out, { recursive: true, force: true });
-for (const dir of ['/runtime/w1-27-config', '/runtime/w1-27-cache', '/runtime/w1-27-data']) fs.rmSync(dir, { recursive: true, force: true });
+const command = [process.execPath, ...process.execArgv, ...process.argv.slice(1)].map(arg => JSON.stringify(arg)).join(' ');
 for (const [root, label] of [[rootA, 'A'], [rootB, 'B']]) {
   fs.mkdirSync(root, { recursive: true });
   fs.writeFileSync(`${root}/sentinel.txt`, `Disposable offline W1-27 project ${label}\n`);
@@ -37,7 +35,7 @@ async function chooseProfile(){
 }
 try {
   await until('Vite dev server',async()=>{try{return(await fetch('http://127.0.0.1:1420/')).ok}catch{return false}});
-  electron=spawn(`${app}/node_modules/.bin/electron`,['.','--no-sandbox','--disable-gpu','--inspect=127.0.0.1:9830','--remote-debugging-port=9831'],{cwd:app,stdio:['ignore',electronLog,electronLog],env:{...process.env,WORKBENCH_DEV:'1',WORKBENCH_HOST_BIN:'/runtime/target/debug/workbench-host',XDG_CONFIG_HOME:'/runtime/w1-27-config',XDG_CACHE_HOME:'/runtime/w1-27-cache',XDG_DATA_HOME:'/runtime/w1-27-data'}});
+  electron=spawn(`${app}/node_modules/.bin/electron`,['.','--no-sandbox','--disable-gpu','--inspect=127.0.0.1:9830','--remote-debugging-port=9831'],{cwd:app,stdio:['ignore',electronLog,electronLog],env:{...process.env,WORKBENCH_DEV:'1',WORKBENCH_HOST_BIN:process.env.WORKBENCH_HOST_BIN ?? '/runtime/target/debug/workbench-host',XDG_CONFIG_HOME:`${out}/xdg-config`,XDG_CACHE_HOME:`${out}/xdg-cache`,XDG_DATA_HOME:`${out}/xdg-data`}});
   const mt=await until('main target',async()=>{try{return(await(await fetch('http://127.0.0.1:9830/json/list')).json())[0]}catch{return null}}); main=await CDP.open(mt.webSocketDebuggerUrl); await main.call('Runtime.enable');
   const rt=await until('renderer target',async()=>{try{return(await(await fetch('http://127.0.0.1:9831/json/list')).json()).find(t=>t.type==='page')}catch{return null}}); cdp=await CDP.open(rt.webSocketDebuggerUrl);
   await until('ready',()=>ev(`document.querySelector('#status-left')?.textContent?.startsWith('Ready —')`));

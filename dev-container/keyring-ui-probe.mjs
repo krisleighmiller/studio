@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {spawn} from 'node:child_process';
-import {CDP,until} from '../Desktop_App/tests/ui-tracer.mjs';
+import {CDP,until} from '../Desktop_App/tests/helpers/ui.mjs';
 assert.equal(process.env.STUDIO_KEYRING_FIXTURE,'1');
 assert.equal(process.env.HOME,'/studio-home');
 const app='/source/Studio/Desktop_App',out='/tmp/keyring-ui';

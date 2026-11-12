@@ -1,16 +1,17 @@
 // Real application/native picker scenario using the existing owned Electron tracer.
 import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {execFileSync} from 'node:child_process';
-import {run} from './sb14-ui-tracer.mjs';
+import {fileURLToPath} from 'node:url';
+import {run, nativeOptions} from './helpers/native-runner.mjs';
+import {appRoot} from './helpers/runtime.mjs';
 let project,source,original,jobs;
 const scenario={
  async setup({out,env}){
   project=path.join(out,'project');fs.mkdirSync(path.join(project,'Preproduction'),{recursive:true});
-  const state=JSON.parse(fs.readFileSync('tests/fixtures/sb14-attach-initial-state.json'));
+  const state=JSON.parse(fs.readFileSync(path.join(appRoot,'tests/fixtures/sb14-attach-initial-state.json')));
   fs.writeFileSync(path.join(project,'Preproduction/workflow_state.json'),JSON.stringify(state));jobs=state.jobs;
-  source=path.join(out,'external.png');fs.copyFileSync('tests/fixtures/sb14-external.png',source);original=fs.readFileSync(source);
-  return {project,hostBin:'/runtime/target/debug/workbench-host'};
+  source=path.join(out,'external.png');fs.copyFileSync(path.join(appRoot,'tests/fixtures/sb14-external.png'),source);original=fs.readFileSync(source);
+  return {project};
  },
- async plan(){throw Error('No provider/planner call allowed');},
  async exercise({page,main,report,save,wait,out}){
   const read=()=>JSON.parse(fs.readFileSync(path.join(project,'Preproduction/workflow_state.json')));
   await main.evaluate(`(()=>{const w=__t01Electron.BrowserWindow.getAllWindows()[0];w.setSize(1380,1050);w.webContents.setBackgroundThrottling(false);w.show();w.focus();return true;})()`);
@@ -22,7 +23,7 @@ const scenario={
   for(const name of ['empty','populated']){
    const before=read();const count=before.assets.length;
    const clicked=await click(`Array.from(document.querySelectorAll('.scene-look-workspace button')).find(b=>b.textContent==='Attach existing image')`);
-   const picker=JSON.parse(execFileSync('/usr/bin/python3',['tests/sb14-picker.py',source],{encoding:'utf8',timeout:20000}));
+   const picker=JSON.parse(execFileSync('/usr/bin/python3',[path.join(appRoot,'tests/sb14-picker.py'),source],{encoding:'utf8',timeout:20000}));
    const desktop=await main.evaluate(`__t01Electron.desktopCapturer.getSources({types:['screen'],thumbnailSize:{width:1380,height:1050}}).then(s=>s[0].thumbnail.toPNG().toString('base64'))`);
    fs.writeFileSync(path.join(out,name+'-picker.png'),Buffer.from(desktop,'base64'));
    await wait('copied/associated native image',()=>read().assets.length===count+1);
@@ -39,4 +40,12 @@ const scenario={
   report.sb14.final=read();report.sb14.externalUnchanged=true;save('sb14-readback.json',report.sb14);
  }
 };
-process.exitCode=await run(path.resolve(process.argv[2]),false,scenario);
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+ try {
+  const args=process.argv.slice(2);
+  const injectFailure=args.includes('--inject-failure');
+  const positional=args.filter(arg=>arg!=='--inject-failure');
+  assert(positional.length<=1 && positional.every(arg=>!arg.startsWith('--')), 'Usage: node tests/sb14-native-ui.mjs [NEW_OUTPUT_DIRECTORY] [--inject-failure]');
+  process.exitCode=await run(positional[0] ? path.resolve(positional[0]) : process.env.STUDIO_TEST_OUT,scenario,{...nativeOptions(),injectFailure});
+ } catch(error) { console.error(error);process.exitCode=1; }
+}

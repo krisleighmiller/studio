@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {spawn} from 'node:child_process';
-import {CDP, until} from '../Desktop_App/tests/ui-tracer.mjs';
+import {CDP, until} from '../Desktop_App/tests/helpers/ui.mjs';
 const app='/source/Studio/Desktop_App';
 const out=process.env.STUDIO_SMOKE_OUT || '/runtime/ui-smoke';
 fs.mkdirSync(out,{recursive:true});
@@ -18,7 +18,7 @@ try {
  launch(`${app}/node_modules/.bin/electron`,['.','--disable-gpu','--remote-debugging-address=127.0.0.1','--remote-debugging-port=9333'],'electron');
  const target=await until('Electron renderer',async()=>{try{return (await (await fetch('http://127.0.0.1:9333/json/list')).json()).find(x=>x.type==='page')}catch{return null}},30000);
  cdp=await CDP.open(target.webSocketDebuggerUrl);
- const ui=await until('Studio visible',async()=>{const v=await cdp.evaluate('({title:document.title,text:document.body.innerText,buttons:document.querySelectorAll("button").length})');return v.text?.length>100&&v.buttons>0?v:null},30000);
+ const ui=await until('Studio visible',async()=>{const v=await cdp.evaluate('({title:document.title,text:document.body?.innerText,buttons:document.querySelectorAll("button").length})');return v.text?.length>100&&v.buttons>0?v:null},30000);
  assert.match(ui.text,/Studio|Workbench|Project/i);
  fs.writeFileSync(`${out}/ui.json`,JSON.stringify(ui,null,2));
  const screenshot=await cdp.call('Page.captureScreenshot',{format:'png'});

@@ -158,6 +158,7 @@ A frontend hot reload does not rebuild the Rust sidecar. Electron main/preload c
 
 These are not automatic assignments:
 
+- Direct-operation safety while a native project chooser is open has not been established by the retired chat-transition tests. Current direct-workflow approval coverage lives in [sb22-operation-approval.test.ts](../tests/sb22-operation-approval.test.ts); removing the old archived suite neither proves equivalent coverage nor reopens accepted results.
 - Scene Look versus Reference Images versus shot-storyboard responsibilities still need a product decision; shared records do not settle their intended roles.
 - Multi-reference behavior is route- and model-schema-specific. Do not promise uniform coverage across all image editing/model-sheet/wardrobe/video paths.
 - Standalone shot speech is single-speaker; live voice/provider quality and supported formats need route-specific evidence, not inference from a local fixture.
@@ -171,3 +172,5 @@ These are not automatic assignments:
 Start with the relevant screen/section and describe: **what you are trying to make; what you have now; what should happen; and what must remain unchanged.** For example: “On Characters, I want an alternate outfit without a scene; keep the existing outfit and let me choose the references.” The source map gives implementation context without requiring a code tour before the conversation can start.
 
 Update the affected section when behavior or a design decision changes. Keep history and execution receipts out of this document; retain honest limits rather than adding a new phase checklist. This is the current product/code reference, not a substitute for the user-facing help, operational guide or live project board.
+
+The old repository-level `System_Prompts/` collection is retired and removed. Current application/build code does not consume those contracts. The [legacy dependency regression](../host/tests/cleanup_legacy_functions.rs) retains their names to prevent accidental reintroduction; it does not read the removed files.

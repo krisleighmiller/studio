@@ -3,13 +3,12 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { CDP, until } from '/source/Studio/Desktop_App/tests/ui-tracer.mjs';
+import { CDP, until } from './helpers/ui.mjs';
+import { appRoot as app, prepareOutput } from './helpers/runtime.mjs';
 
-const app = '/source/Studio/Desktop_App';
-const out = `${app}/evidence/w1-01/runtime-342`;
+const out = prepareOutput('request-visibility-surface-identity');
 const root = `${out}/disposable-project`;
-const command = "docker exec studio-dev-workbench-1 bash -lc 'cd /source/Studio/Desktop_App && xvfb-run -a node tests/request-visibility-surface-identity.mjs'";
-fs.rmSync(out, { recursive: true, force: true });
+const command = [process.execPath, ...process.execArgv, ...process.argv.slice(1)].map(arg => JSON.stringify(arg)).join(' ');
 fs.mkdirSync(root, { recursive: true });
 fs.writeFileSync(`${root}/sentinel.txt`, 'Disposable offline W1-01 project\n');
 
@@ -52,10 +51,10 @@ try {
     env: {
       ...process.env,
       WORKBENCH_DEV: '1',
-      WORKBENCH_HOST_BIN: '/runtime/target/debug/workbench-host',
-      XDG_CONFIG_HOME: '/runtime/w1-01-config',
-      XDG_CACHE_HOME: '/runtime/w1-01-cache',
-      XDG_DATA_HOME: '/runtime/w1-01-data',
+      WORKBENCH_HOST_BIN: process.env.WORKBENCH_HOST_BIN ?? '/runtime/target/debug/workbench-host',
+      XDG_CONFIG_HOME: `${out}/xdg-config`,
+      XDG_CACHE_HOME: `${out}/xdg-cache`,
+      XDG_DATA_HOME: `${out}/xdg-data`,
     },
   });
   const mt = await until('main target', async () => { try { return (await (await fetch('http://127.0.0.1:9790/json/list')).json())[0]; } catch { return null; } });
@@ -114,7 +113,7 @@ try {
   await until('working receipt', () => ev(`document.querySelector('[data-request-receipt][data-request-outcome="working"]')?.textContent?.includes('Generate script from notes')`));
 
   const readback = await ev(`(() => {
-    const control=[...document.querySelectorAll('button')].find(e=>e.textContent?.trim()==='Generate script from notes');
+    const control=[...document.querySelectorAll('.workflow-script-draft button')].find(e=>e.textContent?.trim()==='Generating script…');
     const receipt=document.querySelector('[data-request-receipt][data-request-outcome="working"]');
     const workspace=document.querySelector('.workflow-desk');
     const rect=e=>{const r=e.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right}};
@@ -142,7 +141,7 @@ try {
   try { result.diagnostic = { body: await ev('document.body.innerText'), calls: await main.evaluate('globalThis.__w101?.calls'), blocked: await main.evaluate('globalThis.__w101?.blocked') }; } catch {}
 } finally {
   fs.writeFileSync(`${out}/result.json`, JSON.stringify(result, null, 2));
-  if (main) { try { await main.evaluate(`globalThis.__w101?.resolve?.({cancelled:true}); process.getBuiltinModule('module').createRequire(process.cwd()+'/electron/main.mjs')('electron').app.quit()`); } catch {} }
+  if (main) { try { await main.evaluate(`globalThis.__w101?.resolve?.({cancelled:true}); process.getBuiltinModule('module').createRequire(process.cwd()+'/electron/main.mjs')('electron').app.exit(0)`); } catch {} }
   cdp?.close(); main?.close();
   if (electron?.exitCode === null) electron.kill('SIGTERM');
   if (vite.exitCode === null) vite.kill('SIGTERM');

@@ -41,6 +41,9 @@ __pycache__/
 # Syncthing conflict backups are not implementation source.
 *.sync-conflict-*
 
+# Personal editor workspace may include production folders outside this repo.
+/Studio.code-workspace
+
 # Editor / OS
 .vscode/*
 !.vscode/extensions.json

@@ -3,14 +3,13 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { CDP, until } from '/source/Studio/Desktop_App/tests/ui-tracer.mjs';
+import { CDP, until } from './helpers/ui.mjs';
+import { appRoot as app, prepareOutput } from './helpers/runtime.mjs';
 
-const app = '/source/Studio/Desktop_App';
-const out = `${app}/evidence/w6-c1/runtime-308`;
+const out = prepareOutput('notes-save-explorer-electron');
 const root = `${out}/disposable-project`;
 const file = `${root}/Notes.md`;
 const exact = 'W6-C1 same-runtime publication proof — café 雨 🎬\n';
-fs.rmSync(out, { recursive: true, force: true });
 fs.mkdirSync(root, { recursive: true });
 fs.writeFileSync(`${root}/sentinel.txt`, 'Disposable W6-C1 project\n');
 const result = {
@@ -23,7 +22,11 @@ const result = {
 };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const electronLog = fs.openSync(`${out}/electron.log`, 'w');
-const electron = spawn(`${app}/node_modules/.bin/electron`, [
+const viteLog = fs.openSync(`${out}/vite.log`, 'w');
+const vite = spawn(`${app}/node_modules/.bin/vite`, ['--host', '127.0.0.1', '--port', '1420', '--strictPort'], {
+  cwd: app, stdio: ['ignore', viteLog, viteLog], env: process.env,
+});
+const launchElectron = () => spawn(`${app}/node_modules/.bin/electron`, [
   '.', '--disable-gpu', '--inspect=127.0.0.1:9740', '--remote-debugging-port=9741',
 ], {
   cwd: app,
@@ -31,12 +34,13 @@ const electron = spawn(`${app}/node_modules/.bin/electron`, [
   env: {
     ...process.env,
     WORKBENCH_DEV: '1',
-    WORKBENCH_HOST_BIN: '/runtime/target/debug/workbench-host',
-    XDG_CONFIG_HOME: '/tmp/w6-c1-config',
-    XDG_CACHE_HOME: '/tmp/w6-c1-cache',
-    XDG_DATA_HOME: '/tmp/w6-c1-data',
+    WORKBENCH_HOST_BIN: process.env.WORKBENCH_HOST_BIN ?? '/runtime/target/debug/workbench-host',
+    XDG_CONFIG_HOME: `${out}/xdg-config`,
+    XDG_CACHE_HOME: `${out}/xdg-cache`,
+    XDG_DATA_HOME: `${out}/xdg-data`,
   },
 });
+let electron;
 let main;
 let cdp;
 const ev = source => cdp.evaluate(source);
@@ -48,6 +52,8 @@ async function click(selector) {
   await sleep(180);
 }
 try {
+  await until('Vite dev server', async () => { try { return (await fetch('http://127.0.0.1:1420/')).ok; } catch { return false; } });
+  electron = launchElectron();
   const mt = await until('main target', async () => { try { return (await (await fetch('http://127.0.0.1:9740/json/list')).json())[0]; } catch { return null; } });
   main = await CDP.open(mt.webSocketDebuggerUrl);
   await main.call('Runtime.enable');
@@ -97,9 +103,10 @@ try {
   try { result.boundary = { calls: await main.evaluate('globalThis.__w6.calls'), body: await ev('document.body.innerText') }; } catch {}
 } finally {
   fs.writeFileSync(`${out}/result.json`, JSON.stringify(result, null, 2));
-  if (main) { try { await main.evaluate(`process.getBuiltinModule('module').createRequire(process.cwd()+'/electron/main.mjs')('electron').app.quit()`); } catch {} }
+  if (main) { try { await main.evaluate(`process.getBuiltinModule('module').createRequire(process.cwd()+'/electron/main.mjs')('electron').app.exit(0)`); } catch {} }
   cdp?.close(); main?.close();
-  if (electron.exitCode === null) electron.kill('SIGTERM');
+  if (electron?.exitCode === null) electron.kill('SIGTERM');
+  if (vite.exitCode === null) vite.kill('SIGTERM');
   console.log(JSON.stringify({ exit: result.exit, actual: result.actual, error: result.error, out }, null, 2));
 }
 process.exitCode = result.exit;

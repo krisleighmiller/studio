@@ -2,16 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { CDP, until } from '/source/Studio/Desktop_App/tests/ui-tracer.mjs';
+import { CDP, until } from './helpers/ui.mjs';
+import { appRoot as app, prepareOutput } from './helpers/runtime.mjs';
 
-const app = '/source/Studio/Desktop_App';
-const out = `${app}/evidence/w1-22/runtime-363`;
+const out = prepareOutput('request-visibility-error-persistent');
 const root = `${out}/disposable-project`;
-const command = "docker exec studio-dev-workbench-1 bash -lc 'cd /source/Studio/Desktop_App && xvfb-run -a node tests/request-visibility-error-persistent.mjs'";
+const command = [process.execPath, ...process.execArgv, ...process.argv.slice(1)].map(arg => JSON.stringify(arg)).join(' ');
 const refusal = 'Offline fixture refused this request. Check the model access and try again.';
 const expectedError = 'Submitted · Error — Generate script from notes';
-fs.rmSync(out, { recursive: true, force: true });
-for (const dir of ['/runtime/w1-22-config', '/runtime/w1-22-cache', '/runtime/w1-22-data']) fs.rmSync(dir, { recursive: true, force: true });
 fs.mkdirSync(root, { recursive: true });
 fs.writeFileSync(`${root}/sentinel.txt`, 'Disposable offline W1-22 project\n');
 
@@ -38,7 +36,7 @@ try {
   await until('Vite dev server', async () => { try { return (await fetch('http://127.0.0.1:1420/')).ok; } catch { return false; } });
   electron = spawn(`${app}/node_modules/.bin/electron`, ['.', '--no-sandbox', '--disable-gpu', '--inspect=127.0.0.1:9814', '--remote-debugging-port=9815'], {
     cwd: app, stdio: ['ignore', electronLog, electronLog],
-    env: { ...process.env, WORKBENCH_DEV: '1', WORKBENCH_HOST_BIN: '/runtime/target/debug/workbench-host', XDG_CONFIG_HOME: '/runtime/w1-22-config', XDG_CACHE_HOME: '/runtime/w1-22-cache', XDG_DATA_HOME: '/runtime/w1-22-data' },
+    env: { ...process.env, WORKBENCH_DEV: '1', WORKBENCH_HOST_BIN: process.env.WORKBENCH_HOST_BIN ?? '/runtime/target/debug/workbench-host', XDG_CONFIG_HOME: `${out}/xdg-config`, XDG_CACHE_HOME: `${out}/xdg-cache`, XDG_DATA_HOME: `${out}/xdg-data` },
   });
   const mt = await until('main target', async () => { try { return (await (await fetch('http://127.0.0.1:9814/json/list')).json())[0]; } catch { return null; } });
   main = await CDP.open(mt.webSocketDebuggerUrl); await main.call('Runtime.enable');
@@ -122,7 +120,7 @@ try {
   try { result.diagnostic={body:await ev('document.body.innerText'),calls:await main.evaluate('globalThis.__w122?.calls'),blocked:await main.evaluate('globalThis.__w122?.blocked'),settled:await main.evaluate('globalThis.__w122?.settled')}; } catch {}
 } finally {
   fs.writeFileSync(`${out}/result.json`,JSON.stringify(result,null,2));
-  if(main){try{await main.evaluate(`process.getBuiltinModule('module').createRequire(process.cwd()+'/electron/main.mjs')('electron').app.quit()`);}catch{}}
+  if(main){try{await main.evaluate(`process.getBuiltinModule('module').createRequire(process.cwd()+'/electron/main.mjs')('electron').app.exit(0)`);}catch{}}
   cdp?.close(); main?.close(); if(electron?.exitCode===null)electron.kill('SIGTERM'); if(vite.exitCode===null)vite.kill('SIGTERM');
   console.log(JSON.stringify({exit:result.exit,actual:result.actual,error:result.error,result:`${out}/result.json`,screenshot:`${out}/persistent-refusal-retry.png`},null,2));
 }

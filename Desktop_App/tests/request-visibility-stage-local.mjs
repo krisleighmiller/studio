@@ -2,14 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { CDP, until } from '/source/Studio/Desktop_App/tests/ui-tracer.mjs';
+import { CDP, until } from './helpers/ui.mjs';
+import { appRoot as app, prepareOutput } from './helpers/runtime.mjs';
 
-const app = '/source/Studio/Desktop_App';
-const out = `${app}/evidence/w1-06/runtime-347`;
+const out = prepareOutput('request-visibility-stage-local');
 const root = `${out}/disposable-project`;
-const command = "docker exec studio-dev-workbench-1 bash -lc 'cd /source/Studio/Desktop_App && xvfb-run -a node tests/request-visibility-stage-local.mjs'";
+const command = [process.execPath, ...process.execArgv, ...process.argv.slice(1)].map(arg => JSON.stringify(arg)).join(' ');
 const expectedStatus = 'Submitted · Working — Saving production profile';
-fs.rmSync(out, { recursive: true, force: true });
 fs.mkdirSync(`${root}/Scripts`, { recursive: true });
 fs.writeFileSync(`${root}/Scripts/story.md`, '# Disposable story\n\n## Scene 1 — Kitchen\nAlex: This is an offline W1-06 fixture.\n');
 
@@ -48,10 +47,10 @@ try {
     env: {
       ...process.env,
       WORKBENCH_DEV: '1',
-      WORKBENCH_HOST_BIN: '/runtime/target/debug/workbench-host',
-      XDG_CONFIG_HOME: '/runtime/w1-06-config',
-      XDG_CACHE_HOME: '/runtime/w1-06-cache',
-      XDG_DATA_HOME: '/runtime/w1-06-data',
+      WORKBENCH_HOST_BIN: process.env.WORKBENCH_HOST_BIN ?? '/runtime/target/debug/workbench-host',
+      XDG_CONFIG_HOME: `${out}/xdg-config`,
+      XDG_CACHE_HOME: `${out}/xdg-cache`,
+      XDG_DATA_HOME: `${out}/xdg-data`,
     },
   });
   const mt = await until('main target', async () => { try { return (await (await fetch('http://127.0.0.1:9790/json/list')).json())[0]; } catch { return null; } });
@@ -118,7 +117,7 @@ try {
   result.network = { blockedRemoteRequests: await main.evaluate('globalThis.__w106.blocked'), hostSettled: await main.evaluate('globalThis.__w106.settled') };
   assert.deepEqual(readback.activeSurface, ['Profile']);
   assert.equal(readback.status, expectedStatus);
-  assert.equal(readback.detail, 'Waiting for the host response.');
+  assert.equal(readback.detail, 'Work is continuing. Keep Studio open while the host responds.');
   assert.equal(readback.outcome, 'working');
   assert.equal(readback.role, 'status');
   assert.equal(readback.localToWorkspace, true);
@@ -137,7 +136,7 @@ try {
   try { result.diagnostic = { body: await ev('document.body.innerText'), nav: await ev(`[...document.querySelectorAll('.studio-surface-nav button')].map(e=>({text:e.textContent?.trim(),disabled:e.disabled,title:e.title,active:e.getAttribute('aria-current')}))`), calls: await main.evaluate('globalThis.__w106?.calls'), blocked: await main.evaluate('globalThis.__w106?.blocked'), settled: await main.evaluate('globalThis.__w106?.settled') }; } catch {}
 } finally {
   fs.writeFileSync(`${out}/result.json`, JSON.stringify(result, null, 2));
-  if (main) { try { await main.evaluate(`globalThis.__w106?.resolve?.({cancelled:true}); process.getBuiltinModule('module').createRequire(process.cwd()+'/electron/main.mjs')('electron').app.quit()`); } catch {} }
+  if (main) { try { await main.evaluate(`globalThis.__w106?.resolve?.({cancelled:true}); process.getBuiltinModule('module').createRequire(process.cwd()+'/electron/main.mjs')('electron').app.exit(0)`); } catch {} }
   cdp?.close(); main?.close();
   if (electron?.exitCode === null) electron.kill('SIGTERM');
   if (vite.exitCode === null) vite.kill('SIGTERM');

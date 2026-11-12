@@ -2,16 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { CDP, until } from '/source/Studio/Desktop_App/tests/ui-tracer.mjs';
+import { CDP, until } from './helpers/ui.mjs';
+import { appRoot as app, prepareOutput } from './helpers/runtime.mjs';
 
-const app = '/source/Studio/Desktop_App';
-const out = `${app}/evidence/w1-26/runtime-367`;
+const out = prepareOutput('request-visibility-project-isolation');
 const rootA = `${out}/project-a`;
 const rootB = `${out}/project-b`;
 const promptA = 'Disposable W1-26 Project A private prompt, no provider call.';
-const command = "docker exec studio-dev-workbench-1 bash -lc 'cd /source/Studio/Desktop_App && xvfb-run -a node tests/request-visibility-project-isolation.mjs'";
-fs.rmSync(out, { recursive: true, force: true });
-for (const dir of ['/runtime/w1-26-config', '/runtime/w1-26-cache', '/runtime/w1-26-data']) fs.rmSync(dir, { recursive: true, force: true });
+const command = [process.execPath, ...process.execArgv, ...process.argv.slice(1)].map(arg => JSON.stringify(arg)).join(' ');
 for (const [root, label] of [[rootA, 'A'], [rootB, 'B']]) {
   fs.mkdirSync(root, { recursive: true });
   fs.writeFileSync(`${root}/sentinel.txt`, `Disposable offline W1-26 project ${label}\n`);
@@ -56,10 +54,10 @@ try {
     env: {
       ...process.env,
       WORKBENCH_DEV: '1',
-      WORKBENCH_HOST_BIN: '/runtime/target/debug/workbench-host',
-      XDG_CONFIG_HOME: '/runtime/w1-26-config',
-      XDG_CACHE_HOME: '/runtime/w1-26-cache',
-      XDG_DATA_HOME: '/runtime/w1-26-data',
+      WORKBENCH_HOST_BIN: process.env.WORKBENCH_HOST_BIN ?? '/runtime/target/debug/workbench-host',
+      XDG_CONFIG_HOME: `${out}/xdg-config`,
+      XDG_CACHE_HOME: `${out}/xdg-cache`,
+      XDG_DATA_HOME: `${out}/xdg-data`,
     },
   });
   const mt = await until('main target', async () => { try { return (await (await fetch('http://127.0.0.1:9820/json/list')).json())[0]; } catch { return null; } });

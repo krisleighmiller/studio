@@ -1,19 +1,18 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
-import { CDP, until } from '/source/Studio/Desktop_App/tests/ui-tracer.mjs';
+import { CDP, until } from './helpers/ui.mjs';
+import { appRoot as app, prepareOutput } from './helpers/runtime.mjs';
 
-const app = '/source/Studio/Desktop_App';
-const out = `${app}/evidence/w4-05/runtime-313`;
+const out = prepareOutput('model-sheet-delete-electron-bridge');
 const command = 'workflow_delete_model_sheet_photo';
 const args = {
   projectRoot: `${out}/missing-disposable-project`,
   characterId: 'w4_bridge_character_owner',
   assetId: 'w4_bridge_photo_selected',
 };
-const invocation = `docker exec studio-dev-workbench-1 bash -lc 'cd /source/Studio/Desktop_App && xvfb-run -a node tests/model-sheet-delete-electron-bridge.mjs'`;
+const invocation = [process.execPath, ...process.execArgv, ...process.argv.slice(1)].map(arg => JSON.stringify(arg)).join(' ');
 
-fs.rmSync(out, { recursive: true, force: true });
 fs.mkdirSync(args.projectRoot, { recursive: true });
 const result = {
   check: 'model_sheet_delete_electron_bridge',
@@ -48,10 +47,10 @@ try {
     env: {
       ...process.env,
       WORKBENCH_DEV: '1',
-      WORKBENCH_HOST_BIN: '/runtime/target/debug/workbench-host',
-      XDG_CONFIG_HOME: '/tmp/w4-05-config',
-      XDG_CACHE_HOME: '/tmp/w4-05-cache',
-      XDG_DATA_HOME: '/tmp/w4-05-data',
+      WORKBENCH_HOST_BIN: process.env.WORKBENCH_HOST_BIN ?? '/runtime/target/debug/workbench-host',
+      XDG_CONFIG_HOME: `${out}/xdg-config`,
+      XDG_CACHE_HOME: `${out}/xdg-cache`,
+      XDG_DATA_HOME: `${out}/xdg-data`,
     },
   });
   const mainTarget = await until('Electron main target', async () => {
@@ -118,7 +117,7 @@ try {
 } finally {
   fs.writeFileSync(`${out}/result.json`, JSON.stringify(result, null, 2));
   if (main) {
-    try { await main.evaluate(`process.getBuiltinModule('module').createRequire(process.cwd() + '/electron/main.mjs')('electron').app.quit()`); } catch {}
+    try { await main.evaluate(`process.getBuiltinModule('module').createRequire(process.cwd() + '/electron/main.mjs')('electron').app.exit(0)`); } catch {}
   }
   page?.close();
   main?.close();

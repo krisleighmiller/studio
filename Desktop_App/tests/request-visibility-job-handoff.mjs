@@ -2,17 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { CDP, until } from '/source/Studio/Desktop_App/tests/ui-tracer.mjs';
+import { CDP, until } from './helpers/ui.mjs';
+import { appRoot as app, prepareOutput } from './helpers/runtime.mjs';
 
-const app = '/source/Studio/Desktop_App';
-const out = `${app}/evidence/w1-17/runtime-380`;
+const out = prepareOutput('request-visibility-job-handoff');
 const root = `${out}/disposable-project`;
-const command = "docker exec studio-dev-workbench-1 bash -lc 'cd /source/Studio/Desktop_App && xvfb-run -a node tests/request-visibility-job-handoff.mjs'";
+const command = [process.execPath, ...process.execArgv, ...process.argv.slice(1)].map(arg => JSON.stringify(arg)).join(' ');
 const expectedWorking = 'Submitted · Working — Preparing assembly…';
 const expectedQueued = 'Submitted · Queued job — Preparing assembly…';
 const expectedIndicator = '1 active job · Queued — Preparing assembly…';
 const statePath = `${root}/Preproduction/workflow_state.json`;
-fs.rmSync(out, { recursive: true, force: true });
 for (const dir of ['Preproduction', 'Scripts', 'Scene_Prompts/Scene1', 'Scenes/Scene1/Cut1']) fs.mkdirSync(`${root}/${dir}`, { recursive: true });
 fs.writeFileSync(`${root}/Scripts/script.md`, '# Disposable story\n\n## Scene 1 — W1 native handoff\nAlex: This is a bounded offline assembly fixture.\n');
 fs.writeFileSync(`${root}/Scene_Prompts/Scene1/Cut1.md`, 'source_scene: 1\ncut: 1\ntitle: Offline shot\nscene_type: b_roll\ncontinuity:\n  group: test\n  relation_to_previous: new_setup\nediting:\n  transition_in: cut\n  transition_out: cut\nspeech:\n  mode: none\nprompt: bounded offline fixture\n');
@@ -55,10 +54,10 @@ try {
     env: {
       ...process.env,
       WORKBENCH_DEV: '1',
-      WORKBENCH_HOST_BIN: '/runtime/target/debug/workbench-host',
-      XDG_CONFIG_HOME: '/runtime/w1-17-config',
-      XDG_CACHE_HOME: '/runtime/w1-17-cache',
-      XDG_DATA_HOME: '/runtime/w1-17-data',
+      WORKBENCH_HOST_BIN: process.env.WORKBENCH_HOST_BIN ?? '/runtime/target/debug/workbench-host',
+      XDG_CONFIG_HOME: `${out}/xdg-config`,
+      XDG_CACHE_HOME: `${out}/xdg-cache`,
+      XDG_DATA_HOME: `${out}/xdg-data`,
     },
   });
   const mt = await until('main target', async () => { try { return (await (await fetch('http://127.0.0.1:9810/json/list')).json())[0]; } catch { return null; } });

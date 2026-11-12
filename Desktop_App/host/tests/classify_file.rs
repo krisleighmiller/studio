@@ -1,4 +1,4 @@
-//! Phase 4 §8.1 (Get_Studio_To_Production.md): the review-export open path
+//! Review-export opening (docs/studio-reference.md): the open path
 //! classifies the finished file before the app can show or open it, and
 //! `classify_file` stays host-side. These tests pin that hop against the
 //! real classifier: exported media kinds resolve to viewer classes, text

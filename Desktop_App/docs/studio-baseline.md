@@ -1,5 +1,7 @@
 # Studio Desktop App — Baseline Assessment
 
+> **Historical assessment, not current guidance.** This describes the October 14 source and measurements, not today's behavior or open-work list. Use the [current product and code reference](studio-reference.md). References below to removed Dev Notes are historical provenance, not live instructions.
+
 **Date:** 2026-10-14
 **Branch:** main (clean working tree — `git status --short` empty)
 **Commit:** last independent main commit (solo project, trunk-based development)

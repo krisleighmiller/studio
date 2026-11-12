@@ -1,4 +1,4 @@
-//! Get_Studio_To_Production.md, Phase 4 Done-When chain — the connected scenario.
+//! Connected production scenario; see docs/studio-reference.md, Assemble and delivery.
 //!
 //! One scenario, driven command-by-command through the real dispatcher
 //! (`workbench_host::dispatch`), from a plan that is not yet approved to a

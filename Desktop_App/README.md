@@ -13,6 +13,12 @@ Opening a project lands in **Studio**. The rail is Home, Studio, Files, Assets, 
 - Generation runs through host-owned specialists with per-request approval and provider/cost consent. The prompt-only chat specialists (Script, Character Creation, Production Helper) are retired.
 - **Character Voice** (View → Character Voice): Record, ElevenLabs library, or Design-from-traits
 
+## Documentation
+
+- [Product and code reference](docs/studio-reference.md): current behavior, design intent, limits and source map.
+- [Workflow help](src/docs/workbench-guide.md): also available through F1 in Studio.
+- [Docker workbench](../dev-container/README.md): build, launch and provider/keyring setup.
+
 ## Dev (Docker workbench)
 
 Development uses the portable Docker workbench in `Studio/dev-container/`: one synchronized source tree mounted into containers on both the server and the laptop, with Rust builds targeting the host-local `studio-dev_runtime` volume.
@@ -26,5 +32,3 @@ cd Studio/dev-container
 ```
 
 See `dev-container/README.md` for the full workflow, offline UI smoke, and interactive-provider/keyring setup.
-
-Background: why Electron — `Studio/Dev_Notes/Electron_Fork_Decision.md`. Cutover notes — `Studio/Dev_Notes/Tauri_to_Electron_Migration.md`.

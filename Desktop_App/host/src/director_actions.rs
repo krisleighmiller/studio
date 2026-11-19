@@ -301,9 +301,25 @@ pub(crate) fn append_context_attachments(
 fn resolve_input_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, ActionError> {
     #[cfg(not(test))]
     {
-        let _ = project_root;
-        return crate::session::peek_authorize(raw, crate::project_path::PathIntent::Read)
-            .map_err(ActionError::Validate);
+        match crate::session::peek_authorize(raw, crate::project_path::PathIntent::Read) {
+            Ok(path) => return Ok(path),
+            Err(session_error) => {
+                // Library protocol: with no open project session, the
+                // operation's own root (e.g. the studio library) authorizes
+                // its confined inputs. Project flows always have a session,
+                // so this fallback only ever applies to library operations.
+                if let Some(root) = project_root.filter(|value| !value.trim().is_empty()) {
+                    return crate::project_path::resolve(
+                        raw,
+                        Some(root),
+                        crate::project_path::PathIntent::Read,
+                    )
+                    .map(|path| path.into_path_buf())
+                    .map_err(|_| ActionError::Validate(session_error));
+                }
+                return Err(ActionError::Validate(session_error));
+            }
+        }
     }
     #[cfg(test)]
     {

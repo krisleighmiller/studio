@@ -1965,6 +1965,10 @@ fn maybe_register_workflow_still(
             result.message.push_str("\n\n");
             result.message.push_str(&note);
         }
+        if let Some(note) = crate::workflow::generate_image::on_still_saved(project_root, save_path) {
+            result.message.push_str("\n\n");
+            result.message.push_str(&note);
+        }
     }
     Ok(result)
 }

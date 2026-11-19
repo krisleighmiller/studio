@@ -289,6 +289,11 @@ pub fn dispatch(
                                 &error,
                             );
                             let _ = workflow::character_wardrobe::on_failed(Some(&root), save_path, &error);
+                            let _ = workflow::generate_image::on_still_failed(
+                                Some(&root),
+                                save_path,
+                                &error,
+                            );
                         }
                     }
                     return Err(error);
@@ -306,6 +311,7 @@ pub fn dispatch(
                     workflow::look::on_wardrobe_plate_saved(Some(&root), &save_path),
                     workflow::look::on_still_saved(Some(&root), &save_path),
                     workflow::start_frames::on_still_saved(Some(&root), &save_path),
+                    workflow::generate_image::on_still_saved(Some(&root), &save_path),
                 ]
                 .into_iter()
                 .flatten()
@@ -488,6 +494,9 @@ pub fn dispatch(
         "workflow_delete_look" => workflow::cmd_delete_look(args),
         "workflow_delete_look_slot" => workflow::cmd_delete_look_slot(args),
         "workflow_generate_look" => workflow::cmd_generate_look(app, args),
+        "workflow_generate_image" => workflow::cmd_generate_image(app, args),
+        "workflow_delete_generated_image" => workflow::cmd_delete_generated_image(app, args),
+        "studio_library_state" => workflow::cmd_studio_library_state(app, args),
         "workflow_generate_wardrobe_plate" => workflow::cmd_generate_wardrobe_plate(app, args),
         "workflow_delete_wardrobe_plate" => workflow::cmd_delete_wardrobe_plate(args),
         "workflow_draft_start_frame_prompt" => workflow::cmd_draft_start_frame_prompt(app, args),

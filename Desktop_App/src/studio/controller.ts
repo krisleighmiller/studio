@@ -15,12 +15,15 @@ export function createStudioController(deps: {
   onError: (message: string) => void;
   beforeRun?: () => void;
   beforeInvoke?: () => Promise<void>;
+  /** Studio-backed commands (gate-free Generate) run without a project;
+   * the host resolves its studio library root when projectRoot is absent. */
+  allowNoProject?: boolean;
 }) {
   return {
     async run(command: StudioCommand): Promise<boolean> {
       deps.beforeRun?.();
       const root = deps.projectRoot();
-      if (!root) {
+      if (!root && !deps.allowNoProject) {
         deps.onError("Open a project first.");
         return false;
       }
@@ -28,7 +31,7 @@ export function createStudioController(deps: {
       try {
         await deps.beforeInvoke?.();
         const result = await invoke<WorkflowImportResult>(command.cmd, {
-          projectRoot: root,
+          ...(root ? { projectRoot: root } : {}),
           ...command.args,
         });
         deps.onBusy(null);

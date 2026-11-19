@@ -116,6 +116,20 @@ export type ProfileIntent =
 
 export type CharacterReferenceImage = { id: string; path: string; name?: string };
 
+/** Gate-free Generate surface. Only the image mode is live in this slice. */
+export type GenerateIntent =
+  | {
+      type: "generate";
+      prompt: string;
+      count: number;
+      aspectRatio: string;
+      imageCapability?: string;
+      referenceAssetIds: string[];
+      title?: string;
+    }
+  | { type: "delete"; assetId: string };
+
+
 export type CharacterReferenceIntent =
   | { type: "add-reference"; characterKey: string; assetIds: string[] }
   | { type: "remove-reference"; characterKey: string; assetId: string; assetIds: string[] };

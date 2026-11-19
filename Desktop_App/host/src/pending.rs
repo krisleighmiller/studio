@@ -214,10 +214,17 @@ pub(crate) fn publish_guarded(text: &str, expected: u64, workflow_key: Option<St
 /// Turn a host reply into user-visible text. A nonce-matched marker is parked
 /// and replaced with an approve token. Any other marker is removed.
 pub fn publish_user_text(text: &str) -> String {
+    publish_user_text_for_root(text, crate::session::root())
+}
+
+/// Same as `publish_user_text`, but parks the action under an explicit root.
+/// Studio-library operations have no open project session, so their approval
+/// must carry the library root for execution-time path resolution.
+pub fn publish_user_text_for_root(text: &str, root: Option<std::path::PathBuf>) -> String {
     let Some((action, context, input_fingerprints)) = host_marker_payload(text) else {
         return strip_markers(text);
     };
-    let id = park(action, crate::session::root(), context, input_fingerprints);
+    let id = park(action, root, context, input_fingerprints);
     let mut visible = strip_markers(text);
     if !visible.ends_with('\n') {
         visible.push('\n');

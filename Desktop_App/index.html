@@ -12,6 +12,24 @@
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
+    <div id="new-studio" class="new-studio hidden">
+      <nav id="new-rail" class="new-rail" aria-label="Studio">
+        <div class="new-logo">Studio</div>
+        <button type="button" class="new-rail-item active" data-ns="library" aria-current="page">Library</button>
+        <button type="button" class="new-rail-item" data-ns="generate">Generate</button>
+        <button type="button" class="new-rail-item" data-ns="projects">Projects</button>
+        <button type="button" class="new-rail-item" data-ns="scripts">Scripts</button>
+        <div class="new-rail-spacer"></div>
+        <button type="button" class="new-rail-item" data-ns="workflow">Workflow</button>
+      </nav>
+      <div class="new-main">
+        <header class="new-topbar">
+          <span id="new-project-name" class="new-project-name" title="">No project</span>
+          <button type="button" id="new-open-project" class="ghost-button">Open project</button>
+        </header>
+        <div id="new-body" class="new-body"></div>
+      </div>
+    </div>
     <div id="app" class="app surface-home">
       <div class="shell">
         <nav id="nav-rail" class="nav-rail" aria-label="Workspaces">

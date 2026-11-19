@@ -22,6 +22,8 @@ export type SurfaceHost = {
   selectedRequirementId: string | null;
   run: (label: string, cmd: string, args: Record<string, unknown>) => Promise<boolean>;
   requireChat: () => { apiId: string; modelId: string } | null;
+  /** Saved-Settings image capability routes for per-request model selection. */
+  imageRoutes?: () => { id: string; label: string }[];
   rerender: () => void;
   setError: (message: string) => void;
   rememberScene: (scene: SceneRecord, cut: CutRecord) => void;

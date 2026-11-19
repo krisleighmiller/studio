@@ -269,6 +269,8 @@ pub enum AssetRole {
     Foley,
     SourceAudio,
     ScratchAudio,
+    /// Gate-free Generate surface output under Preproduction/GeneratedImages/.
+    GeneratedImage,
     Mix,
     SelectedTake,
     AssemblyDraft,
@@ -454,6 +456,7 @@ impl AssetRole {
             Self::Foley => "foley",
             Self::SourceAudio => "source_audio",
             Self::ScratchAudio => "scratch_audio",
+            Self::GeneratedImage => "generated_image",
             Self::Mix => "mix",
             Self::SelectedTake => "selected_take",
             Self::AssemblyDraft => "assembly_draft",

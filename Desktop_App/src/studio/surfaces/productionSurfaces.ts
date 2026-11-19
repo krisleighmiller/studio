@@ -33,6 +33,8 @@ export { renderRenderStage } from "./renderStage";
 export { renderTakeReviewStage } from "./takeReviewStage";
 export { renderAssembleStage } from "./assembleStage";
 export { renderCharactersStage } from "./charactersStage";
+export { renderGenerateStage } from "./generateStage";
+export type { GenerateIntent } from "./surfaceIntents";
 export { renderProjectProfile } from "./profileStage";
 export { renderReadiness } from "./readinessStage";
 export { renderScriptDraftForm } from "./scriptDraftForm";

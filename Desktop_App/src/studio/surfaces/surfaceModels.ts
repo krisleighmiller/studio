@@ -1,4 +1,4 @@
-import type { CharacterRecord, SceneRecord, SceneReport } from "../../workflowTypes";
+import type { AssetRecord, CharacterRecord, JobRecord, ProjectState, SceneRecord, SceneReport } from "../../workflowTypes";
 
 export type SurfaceTone = "ready" | "missing" | "blocked" | "loading" | "error" | "empty";
 
@@ -408,4 +408,86 @@ export function buildScriptModel(input: { scene: SceneRecord }): SurfacePresenta
     busy: null,
     error: null,
   });
+}
+
+export type GenerateResultItem = {
+  assetId: string;
+  path: string | null;
+  label: string;
+};
+
+export type GenerateRunResult = {
+  runId: string;
+  label: string;
+  items: GenerateResultItem[];
+};
+
+export type GenerateModel = {
+  referenceChoices: { assetId: string; label: string }[];
+  imageRoutes: { id: string; label: string }[];
+  results: GenerateRunResult[];
+  totalResults: number;
+  busyReason: string | null;
+};
+
+/** Group settled `generated_image` assets by their originating Generate run
+ * (job raw_provider_id), in the order the runs settled. */
+export function groupGenerateResults(
+  assets: AssetRecord[],
+  jobs: JobRecord[],
+  resolvePath: (path: string | null | undefined) => string | null,
+): GenerateRunResult[] {
+  const runOf = new Map<string, string>();
+  for (const job of jobs) {
+    if (job.kind !== "generated_image" || !job.raw_provider_id) continue;
+    for (const assetId of job.output_asset_ids ?? []) runOf.set(assetId, job.raw_provider_id);
+    // Jobs whose output asset ids are not recorded still own their output
+    // path; fall back through source_job_id on the asset below.
+  }
+  const order: string[] = [];
+  const groups = new Map<string, GenerateRunResult>();
+  for (const asset of assets) {
+    if (asset.role !== "generated_image") continue;
+    let runId: string | null = null;
+    if (asset.source_job_id) {
+      runId = runOf.get(asset.id) ?? null;
+      if (!runId) {
+        runId = jobs.find((item) => item.id === asset.source_job_id)?.raw_provider_id ?? null;
+      }
+    }
+    const key = runId ?? "ungrouped";
+    if (!groups.has(key)) {
+      order.push(key);
+      groups.set(key, { runId: key, label: runId ? `Run ${runId.replace(/^run_/, "")}` : "Generated images", items: [] });
+    }
+    groups.get(key)!.items.push({
+      assetId: asset.id,
+      path: resolvePath(asset.path),
+      label: asset.path,
+    });
+  }
+  return order.map((key) => groups.get(key)!);
+}
+
+/** Composer model for the gate-free Generate surface. Derives the model
+ * dropdown from saved Settings image routes (never hardcoded models) and the
+ * reference picker from existing project image assets. */
+export function buildGenerateModel(input: {
+  state: ProjectState | null;
+  imageRoutes: { id: string; label: string }[];
+  resolvePath: (path: string | null | undefined) => string | null;
+}): GenerateModel {
+  const assets = input.state?.assets ?? [];
+  const jobs = input.state?.jobs ?? [];
+  const referenceChoices = assets
+    .filter((asset) => asset.status !== "rejected" && /\.(png|jpe?g|webp|gif)$/i.test(asset.path))
+    .map((asset) => ({ assetId: asset.id, label: `${asset.path} · ${asset.id}` }));
+  const results = groupGenerateResults(assets, jobs, input.resolvePath);
+  return {
+    referenceChoices,
+    imageRoutes: input.imageRoutes,
+    results,
+    totalResults: results.reduce((sum, group) => sum + group.items.length, 0),
+    busyReason: null,
+  };
 }

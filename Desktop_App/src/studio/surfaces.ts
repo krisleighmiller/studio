@@ -83,6 +83,7 @@ export function surfacesForArea(input: {
       const [reference] = items.splice(referenceIndex, 1);
       items.splice(Math.min(2, items.length), 0, reference);
     }
+    // Gate-free surfaces are not workflow stages; see the front door.
     items.push(navItem("profile", "Profile", "neutral", input.active, true, null));
     items.push(navItem("assets", "Assets", "neutral", input.active, true, null));
   }

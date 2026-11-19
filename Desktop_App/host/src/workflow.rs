@@ -11,6 +11,7 @@ pub mod captions;
 pub mod characters;
 pub mod character_wardrobe;
 pub mod cost;
+pub mod generate_image;
 pub mod identity;
 pub mod import;
 pub mod intent;
@@ -1555,6 +1556,88 @@ pub fn cmd_generate_wardrobe_plate(app: &HostCtx, args: &Value) -> Result<Value,
         look::prepare_wardrobe_plate_with_host(app, Path::new(&root), &mut state, scene_id, &character_id, &wardrobe_id)?;
     let imported = import::save_project(Path::new(&root), state)?;
     result_with_pending(imported, note, card)
+}
+
+pub fn cmd_generate_image(app: &HostCtx, args: &Value) -> Result<Value, String> {
+    let supplied_root = opt_str(args, "projectRoot")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let project_scoped = supplied_root.is_some();
+    let root = match supplied_root {
+        Some(provided) => provided,
+        None => {
+            let studio = generate_image::studio_root(app);
+            generate_image::ensure_studio_state(&studio)?;
+            studio.to_string_lossy().to_string()
+        }
+    };
+    let prompt = provided_str(args, "prompt").ok_or("Missing prompt")?;
+    let aspect_ratio = opt_str(args, "aspectRatio").unwrap_or_else(|| "9:16".to_string());
+    let count = match args.get("count") {
+        None | Some(Value::Null) => 1,
+        Some(value) => value
+            .as_u64()
+            .map(|n| n as u32)
+            .ok_or("count must be an integer")?,
+    };
+    let image_capability = match args.get("imageCapability") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.as_str()),
+        _ => return Err("imageCapability must be a nonempty Settings image capability".into()),
+    };
+    let reference_asset_ids: Vec<String> = match args.get("referenceAssetIds") {
+        Some(Value::Array(ids)) => ids
+            .iter()
+            .map(|id| {
+                id.as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| "referenceAssetIds must contain nonempty strings".to_string())
+            })
+            .collect::<Result<_, _>>()?,
+        Some(Value::Null) | None => Vec::new(),
+        _ => return Err("referenceAssetIds must be an array".into()),
+    };
+    let title = opt_str(args, "title");
+    let mut state = import::load_state(Path::new(&root))?;
+    let (card, note) = generate_image::prepare_with_host(
+        app,
+        Path::new(&root),
+        &mut state,
+        &prompt,
+        &aspect_ratio,
+        count,
+        image_capability,
+        &reference_asset_ids,
+        title.as_deref(),
+        project_scoped,
+    )?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_pending(imported, note, card)
+}
+
+pub fn cmd_delete_generated_image(app: &HostCtx, args: &Value) -> Result<Value, String> {
+    let root = match opt_str(args, "projectRoot") {
+        Some(provided) if !provided.trim().is_empty() => provided,
+        _ => {
+            let studio = generate_image::studio_root(app);
+            generate_image::ensure_studio_state(&studio)?;
+            studio.to_string_lossy().to_string()
+        }
+    };
+    let asset_id = arg_path(args, "assetId")?;
+    let mut state = import::load_state(Path::new(&root))?;
+    let path = generate_image::delete(Path::new(&root), &mut state, &asset_id)?;
+    let imported = import::save_project(Path::new(&root), state)?;
+    result_with_note(imported, format!("Deleted generated image `{path}`."))
+}
+
+/// Read the studio library state (assets independent of any project). The
+/// library is created empty on first use; it never requires a project.
+pub fn cmd_studio_library_state(app: &HostCtx, _args: &Value) -> Result<Value, String> {
+    let root = generate_image::studio_root(app);
+    let state = generate_image::ensure_studio_state(&root)?;
+    Ok(serde_json::json!({ "state": state, "root": root }))
 }
 
 pub fn cmd_delete_wardrobe_plate(args: &Value) -> Result<Value, String> {

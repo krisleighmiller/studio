@@ -310,6 +310,36 @@ pub(crate) fn format_approval_request_for_app(
             action.specialist.as_deref().unwrap_or("this action")
         ));
     }
+    Ok({
+        let raw = crate::director_actions::prepare_approval_request_with_context(
+            action, validated, &context, &provider, &model, &cost,
+        );
+        crate::pending::publish_user_text_for_root(
+            &raw,
+            Some(std::path::PathBuf::from(root)),
+        )
+    })
+}
+
+/// Session-free variant for studio-library operations: parks the action and
+/// formats the approval card with the real route details, without requiring
+/// an open project session (the studio library is not a project).
+pub(crate) fn format_approval_request_for_studio(
+    app: &HostCtx,
+    action: &crate::director_actions::DirectorAction,
+    validated: &crate::director_actions::ValidatedAction,
+    root: &str,
+) -> Result<String, String> {
+    let mut context = DirectorContext::default();
+    context.project_root = Some(root.to_string());
+    hydrate_context_from_app(app, &mut context)?;
+    let (provider, model, cost) = approval_route_details(action, &context, Some(root));
+    if provider == "Not resolved from host settings" {
+        return Err(format!(
+            "No compatible host provider/model route is configured for `{}`.",
+            action.specialist.as_deref().unwrap_or("this action")
+        ));
+    }
     Ok(
         crate::director_actions::format_approval_request_with_context(
             action, validated, &context, &provider, &model, &cost,
@@ -1421,8 +1451,12 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
     let workflow_continuation = pending.workflow_continuation;
     let workflow_key = pending.workflow_key.clone();
     let publication_generation = pending.publication_generation;
+    // Studio-library approvals park under the library root, which is not an
+    // open project session; execution is authorized for that root directly.
+    let studio_root = crate::workflow::generate_image::studio_root(&app);
+    let studio_execution = pending.project_root.as_deref() == Some(studio_root.as_path());
     let current_root = crate::session::root();
-    if pending.project_root != current_root {
+    if !studio_execution && pending.project_root != current_root {
         return Err(
             "The project changed after this approval was issued. Request a new plan.".into(),
         );

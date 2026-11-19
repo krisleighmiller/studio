@@ -57,7 +57,7 @@ import { mouthLabel, roleLabel, speechLabel } from "./studio/labels";
 import { paintUnknownRecipeStage } from "./studio/recipeStage";
 import { clearIntentDraft, hasEditedIntentDraft, renderSceneIntentView, type SceneIntentIntent } from "./studio/sceneIntentView";
 import { buildIntentModel } from "./studio/surfaces/surfaceModels";
-import { bindSurfaceHost, effectiveVisualSourceStrategy, noteCharacterSaved, renderAssembleStage, renderCharactersStage, renderProductionNotesStage, renderProjectProfile, renderReadiness, renderReferenceImagesStage, renderRenderStage, renderSketchStage, renderTakeReviewStage, resetSurfaceSession, setProfileOpen, stopRoughCut, visualSourceReady, type AssembleIntent, type CharacterIntent, type NotesIntent, type ProfileIntent, type ReferenceIntent, type SketchIntent, type TakeReviewIntent } from "./studio/surfaces/productionSurfaces";
+import { bindSurfaceHost, effectiveVisualSourceStrategy, noteCharacterSaved, renderAssembleStage, renderCharactersStage, renderProductionNotesStage, renderProjectProfile, renderReadiness, renderReferenceImagesStage, renderRenderStage, renderSketchStage, renderTakeReviewStage, resetSurfaceSession, setProfileOpen, stopRoughCut, visualSourceReady, type AssembleIntent, type CharacterIntent, type GenerateIntent, type NotesIntent, type ProfileIntent, type ReferenceIntent, type SketchIntent, type TakeReviewIntent } from "./studio/surfaces/productionSurfaces";
 import { block, missingPanel } from "./studio/surfaces/shared";
 import { stopPerformanceAudio } from "./studio/surfaces/session";
 import { renderScriptStage } from "./studio/surfaces/scriptStage";
@@ -842,14 +842,17 @@ async function runAction(
   const owner = hooks;
   const invalidateFiles = projectFileInvalidator();
   const root = owner?.projectRoot();
+  const studioBacked = cmd === "workflow_generate_image" || cmd === "workflow_delete_generated_image";
+  lastStudioError = null;
+  const runRoot = studioBacked ? null : root;
   const epoch = modelSheetEpoch;
   const current = () => hooks === owner && owner?.projectRoot() === root
     && modelSheetEpoch === epoch && isCurrent();
   const surface = selectedSurface;
   let savePrompt: { cmd: string; args: Record<string, unknown> } | null = null;
-  const spec = generationPromptSpec(cmd, args, state);
+  const spec = studioBacked ? null : generationPromptSpec(cmd, args, state);
   if (spec) {
-    if (!root || busy || generationPromptOpen() || !current()) return false;
+    if (!runRoot || busy || generationPromptOpen() || !current()) return false;
     const text = await editGenerationPrompt(spec);
     if (text === null || !current()) return false;
     if (cmd === "workflow_prepare_render" || cmd === "workflow_generate_start_frame") {
@@ -861,11 +864,12 @@ async function runAction(
       }
     } else args = { ...args, [spec.field]: text };
   }
-  const request = root ? beginRequest(root, surface, label, cmd, savePrompt ? {...args, prompt: savePrompt.args.prompt} : args) : null;
-  if (root && !request) return false;
+  const request = runRoot ? beginRequest(runRoot, surface, label, cmd, savePrompt ? {...args, prompt: savePrompt.args.prompt} : args) : null;
+  if (runRoot && !request) return false;
   const previousJobIds = new Set((state?.jobs ?? []).map(job => job.id));
   const controller = createStudioController({
-    projectRoot: () => root ?? null,
+    projectRoot: () => (studioBacked ? null : root ?? null),
+    allowNoProject: studioBacked,
     beforeRun: () => stopRoughCut(),
     beforeInvoke: async () => {
       if (!current()) throw new Error("Project session changed before preparation; prepare again.");
@@ -904,11 +908,17 @@ async function runAction(
         });
         return;
       }
-      applyHostResult(result);
-      if (fileChangingCommands.has(cmd)) invalidateFiles();
+      if (!studioBacked) {
+        applyHostResult(result);
+        if (fileChangingCommands.has(cmd)) invalidateFiles();
+      }
       if (result.pendingAction) void authorizeStudioOperation(result.pendingAction, request, current, invalidateFiles);
     },
     onError: (message) => {
+      if (studioBacked) {
+        lastStudioError = message;
+        return;
+      }
       if (request) finishRequest(request, "error", message);
       if (!current()) return;
       actionError = cmd === "workflow_prepare_render" && args.resumeSavedAudio === true
@@ -1054,19 +1064,39 @@ export function jobsSummary(): { total: number; active: number; failed: number }
   return { total: jobs.length, active, failed };
 }
 
-function syncSurfaceHost(): void {
+export function ensureSurfaceHost(): void {
+  syncSurfaceHost(null);
+}
+
+export function ensureSurfaceHostWithState(stateOverride: ProjectState | null): void {
+  syncSurfaceHost(stateOverride);
+}
+
+let lastStudioError: string | null = null;
+export function lastStudioActionError(): string | null {
+  return lastStudioError;
+}
+
+/** Read the studio library (assets independent of any project). */
+export async function fetchStudioLibraryState(): Promise<ProjectState | null> {
+  const result = await invoke<{ state?: ProjectState | null; root?: string }>("studio_library_state", {});
+  return result?.state ?? null;
+}
+
+function syncSurfaceHost(stateOverride: ProjectState | null = null): void {
   bindSurfaceHost({
     busy,
     busyControl,
     error: actionError,
     chatReady: Boolean(hooks?.chatModel()?.modelId),
-    state,
+    state: stateOverride ?? state,
     report,
     selectedCut,
     selectedSceneId,
     selectedRequirementId,
     run: runAction,
     requireChat,
+    imageRoutes: hooks?.imageRoutes ?? (() => []),
     rerender: () => renderWorkflowDesk(),
     setError: (message) => {
       actionError = message;
@@ -2051,6 +2081,29 @@ async function handleDeleteCharacterReference(characterId: string, assetId: stri
     }
   } finally {
     if (current()) { busy = null; renderWorkflowDesk(); }
+  }
+}
+
+/** Gate-free Generate surface: image generation with references and
+ * settings-routed model choice, plus per-asset deletion. No scene, slot,
+ * sketch or production-note prerequisite is required or invented. */
+export async function handleGenerateIntent(intent: GenerateIntent): Promise<void> {
+  if (intent.type === "generate") {
+    const ok = await runAction("Preparing image generation…", "workflow_generate_image", {
+      prompt: intent.prompt,
+      count: intent.count,
+      aspectRatio: intent.aspectRatio,
+      imageCapability: intent.imageCapability,
+      referenceAssetIds: intent.referenceAssetIds,
+      ...(intent.title ? { title: intent.title } : {}),
+    });
+    if (!ok) throw new Error(lastStudioActionError() ?? "Image generation did not run.");
+    return;
+  }
+  if (intent.type === "delete") {
+    const ok = await runAction("Deleting generated image…", "workflow_delete_generated_image", { assetId: intent.assetId });
+    if (!ok) throw new Error(lastStudioActionError() ?? "Deleting the generated image did not run.");
+    return;
   }
 }
 

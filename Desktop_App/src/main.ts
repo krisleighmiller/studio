@@ -60,7 +60,12 @@ import {
   omittedDirectorEntries,
   workflowSelection,
   workflowStatusLine,
+  handleGenerateIntent,
+  ensureSurfaceHostWithState,
+  fetchStudioLibraryState,
 } from "./workflowDesk";
+import { renderFrontDoorPanel, type FrontDoorPanelId } from "./studio/frontDoor";
+import type { GenerateIntent } from "./studio/surfaces/surfaceIntents";
 
 type DirEntry = {
   name: string;
@@ -160,6 +165,10 @@ const els = {
   shellWorkArea: document.querySelector<HTMLSelectElement>("#shell-work-area")!,
   homeTitle: document.querySelector<HTMLElement>("#home-title")!,
   homeDetail: document.querySelector<HTMLElement>("#home-detail")!,
+  newStudio: document.querySelector<HTMLElement>("#new-studio")!,
+  newBody: document.querySelector<HTMLElement>("#new-body")!,
+  newProjectName: document.querySelector<HTMLElement>("#new-project-name")!,
+  newRail: document.querySelector<HTMLElement>("#new-rail")!,
   assetsList: document.querySelector<HTMLElement>("#assets-list")!,
   navRail: document.querySelector<HTMLElement>("#nav-rail")!,
   jobsBtn: document.querySelector<HTMLButtonElement>("#jobs-btn")!,
@@ -508,15 +517,54 @@ function updateShellChrome(): void {
   if (area) els.shellWorkArea.value = area;
 }
 
-function renderHome(): void {
-  if (!projectRoot) {
-    els.homeTitle.textContent = "Production Studio";
-    els.homeDetail.textContent = "Open a project folder to work on scenes, cuts, and review exports.";
-    return;
-  }
-  els.homeTitle.textContent = basename(projectRoot);
-  const status = workflowStatusLine();
-  els.homeDetail.textContent = status ? `${projectRoot}\n${status}` : projectRoot;
+let interfaceMode: "studio" | "workflow" = "studio";
+let newPanelId: FrontDoorPanelId = "library";
+
+function renderNewStudioPanel(): void {
+  void fetchStudioLibraryState()
+    .catch(() => null)
+    .then((studioState) => {
+      ensureSurfaceHostWithState(studioState);
+      const errorLine = document.createElement("p");
+      errorLine.className = "frontdoor-error";
+      errorLine.hidden = true;
+      const onGenerate = (intent: GenerateIntent): void => {
+        errorLine.hidden = true;
+        handleGenerateIntent(intent)
+          .then(() => {
+            if (interfaceMode === "studio") renderNewStudioPanel();
+          })
+          .catch((error: unknown) => {
+            errorLine.textContent = error instanceof Error ? error.message : String(error);
+            errorLine.hidden = false;
+          });
+      };
+      els.newBody.replaceChildren(renderFrontDoorPanel(newPanelId, onGenerate), errorLine);
+      els.newProjectName.textContent = projectRoot ? basename(projectRoot) : "Studio library";
+      els.newProjectName.title = projectRoot ?? "";
+      const items = els.newRail.querySelectorAll<HTMLButtonElement>(".new-rail-item");
+      for (const item of items) {
+        const on = item.dataset.ns === newPanelId;
+        item.classList.toggle("active", on);
+        if (on) item.setAttribute("aria-current", "page");
+        else item.removeAttribute("aria-current");
+      }
+    });
+}
+
+function showNewStudio(): void {
+  interfaceMode = "studio";
+  document.body.classList.add("studio-mode");
+  els.newStudio.classList.remove("hidden");
+  renderNewStudioPanel();
+}
+
+function showWorkflowShell(): void {
+  interfaceMode = "workflow";
+  document.body.classList.remove("studio-mode");
+  els.newStudio.classList.add("hidden");
+  paintSurface();
+  revealSurfaceBody();
 }
 
 function showFileBackedSurface(): void {
@@ -544,10 +592,14 @@ function revealSurfaceBody(): void {
     if (shellSurface === "assets") void renderAssetBrowser();
     return;
   }
-  renderHome();
+  showNewStudio();
 }
 
 function showShell(next: ShellSurface): void {
+  if (next === "home") {
+    showNewStudio();
+    return;
+  }
   if (next === "settings" && shellSurface === "settings") {
     shellSurface = shellReturn === "settings" ? "home" : shellReturn;
     paintSurface();
@@ -557,7 +609,6 @@ function showShell(next: ShellSurface): void {
   if (next === shellSurface) {
     paintSurface();
     if (next === "assets") void renderAssetBrowser();
-    if (next === "home") renderHome();
     if (next === "studio") renderWorkflowDesk();
     return;
   }
@@ -856,6 +907,10 @@ async function loadProjectWorkflow(root: string): Promise<void> {
   if (workflowLoadedRoot !== root) {
     workflowLoadedRoot = root;
     await loadWorkflowDesk(root);
+  }
+  if (interfaceMode === "studio") {
+    renderNewStudioPanel();
+    return;
   }
   const selection = workflowSelection();
   if (selection.path) selectedPath = selection.path;
@@ -4429,6 +4484,22 @@ function bindUi(): void {
   document.querySelector("#home-open-project")?.addEventListener("click", () => {
     void openProject();
   });
+  document.querySelector("#new-open-project")?.addEventListener("click", () => {
+    void openProject();
+  });
+  els.newRail.querySelectorAll<HTMLButtonElement>(".new-rail-item").forEach((item) => {
+    item.addEventListener("click", () => {
+      const target = item.dataset.ns;
+      if (target === "workflow") {
+        showWorkflowShell();
+        return;
+      }
+      if (target === "library" || target === "generate" || target === "projects" || target === "scripts") {
+        newPanelId = target;
+        renderNewStudioPanel();
+      }
+    });
+  });
   document.querySelector("#home-studio")?.addEventListener("click", () => showShell("studio"));
   document.querySelector("#home-files")?.addEventListener("click", () => showShell("files"));
 
@@ -5094,7 +5165,7 @@ async function boot(): Promise<void> {
   bindUi();
   updateExplorerActionState();
   renderChat();
-  renderHome();
+  showNewStudio();
   paintSurface();
   renderEditor();
   await renderExplorer();

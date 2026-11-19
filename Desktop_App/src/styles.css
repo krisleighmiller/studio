@@ -3819,3 +3819,24 @@ body.studio-mode #app { display: none; }
   border-bottom: 1px solid var(--border); background: var(--bg-panel); }
 .new-project-name { font-weight: 700; font-size: 13px; color: var(--text); }
 .new-body { flex: 1; min-height: 0; overflow: auto; padding: 18px; }
+
+/* Full-image preview (library cards and generate results) */
+.studio-image-preview {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0;
+  background: var(--bg-muted);
+  max-width: min(90vw, 1200px);
+}
+.studio-image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 80vh;
+  object-fit: contain;
+}
+.studio-image-preview-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+}
+.frontdoor-card img, .workflow-generate-tile img { cursor: zoom-in; }

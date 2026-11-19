@@ -51,7 +51,8 @@ export function queueLookThumbs(root: HTMLElement): void {
   root.querySelectorAll<HTMLImageElement>("img[data-look-path]").forEach((img) => {
     const path = img.dataset.lookPath;
     if (!path) return;
-    void getSurfaceHost().mediaUrl(path).then((url) => {
+    const host = getSurfaceHost();
+    void host.mediaUrl(host.resolvePath(path) ?? path).then((url) => {
       img.src = url;
     }).catch(() => {
       img.alt = "Could not load still";
@@ -63,7 +64,8 @@ export function queueTakeVideos(root: HTMLElement): void {
   root.querySelectorAll<HTMLVideoElement>("video[data-take-path]").forEach((video) => {
     const path = video.dataset.takePath;
     if (!path) return;
-    void getSurfaceHost().mediaUrl(path).then((url) => {
+    const host = getSurfaceHost();
+    void host.mediaUrl(host.resolvePath(path) ?? path).then((url) => {
       video.src = url;
       video.load();
     }).catch(() => {

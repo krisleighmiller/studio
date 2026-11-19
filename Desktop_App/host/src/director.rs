@@ -340,11 +340,18 @@ pub(crate) fn format_approval_request_for_studio(
             action.specialist.as_deref().unwrap_or("this action")
         ));
     }
-    Ok(
-        crate::director_actions::format_approval_request_with_context(
-            action, validated, &context, &provider, &model, &cost,
-        ),
-    )
+    // Park under the explicit library root. `format_approval_request_with_context`
+    // parks via `publish_user_text`, which parks under the open project session;
+    // that is None for studio operations, and execution then refuses every
+    // output path ("open a project before using a file path"). The parked root
+    // must carry the library root through to `director_approve`.
+    let card = crate::director_actions::prepare_approval_request_with_context(
+        action, validated, &context, &provider, &model, &cost,
+    );
+    Ok(crate::pending::publish_user_text_for_root(
+        &card,
+        Some(std::path::PathBuf::from(root)),
+    ))
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -1573,6 +1580,13 @@ pub fn director_approve(app: HostCtx, id: String) -> Result<DirectorTurnResponse
     let result = match outcome {
         Ok(result) => result,
         Err(error) => {
+            // A pre-dispatch failure must settle the run's staged jobs so
+            // pending jobs never linger as zombies in the library state.
+            crate::workflow::generate_image::fail_run_jobs(
+                project_root_ref,
+                &crate::workflow::generate_image::action_batch_output_rels(&validated.action),
+                &error,
+            );
             let (reply, event) = approved_action_error_reply(&error);
             return finish_director_reply(
                 app,

@@ -59,6 +59,14 @@ function settingsDir() {
   return path.join(app.getPath("userData"), "config");
 }
 
+/** Kris's chosen studio library location: <Content_Creation>/Projects/Library.
+ *  The repo sits at <Content_Creation>/Studio/Desktop_App, so walk up from the
+ *  app root; in the dev container the mount resolves identically. */
+function studioLibraryDir() {
+  const contentRoot = path.resolve(__dirname, "..", "..", "..");
+  return path.join(contentRoot, "Projects", "Library");
+}
+
 function recentProjectsPath() {
   return path.join(app.getPath("userData"), "recent-projects.json");
 }
@@ -127,72 +135,6 @@ function pathFromMediaUrl(url) {
 
 function mimeForMediaPath(filePath) {
   return mediaMime(filePath);
-}
-
-/**
- * Serve local media with real HTTP Range support so <video>/<audio> can seek
- * and restart after ended. Plain net.fetch(file://) often leaves seekable empty.
- */
-function mediaFileResponse(filePath, request) {
-  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-    return new Response("Not found", { status: 404 });
-  }
-  const stats = fs.statSync(filePath);
-  const size = stats.size;
-  const mime = mimeForMediaPath(filePath);
-  const rangeHeader = request.headers.get("Range") || request.headers.get("range");
-
-  if (rangeHeader) {
-    const match = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
-    if (match) {
-      const suffix = match[1] === "" && match[2] !== "";
-      let start = suffix
-        ? Math.max(0, size - Number.parseInt(match[2], 10))
-        : match[1] === ""
-          ? 0
-          : Number.parseInt(match[1], 10);
-      let end = suffix || match[2] === "" ? size - 1 : Number.parseInt(match[2], 10);
-      if (!Number.isFinite(start)) start = 0;
-      if (!Number.isFinite(end) || end >= size) end = size - 1;
-      if (start < 0 || start >= size || start > end) {
-        return new Response(null, {
-          status: 416,
-          headers: {
-            "Content-Range": `bytes */${size}`,
-            "Accept-Ranges": "bytes",
-          },
-        });
-      }
-      const stream = fs.createReadStream(filePath, { start, end });
-      stream.on("error", (error) => {
-        console.error("media range stream error", error);
-      });
-      return new Response(Readable.toWeb(stream), {
-        status: 206,
-        headers: {
-          "Content-Type": mime,
-          "Content-Length": String(end - start + 1),
-          "Content-Range": `bytes ${start}-${end}/${size}`,
-          "Accept-Ranges": "bytes",
-          "Cache-Control": "no-cache",
-        },
-      });
-    }
-  }
-
-  const stream = fs.createReadStream(filePath);
-  stream.on("error", (error) => {
-    console.error("media stream error", error);
-  });
-  return new Response(Readable.toWeb(stream), {
-    status: 200,
-    headers: {
-      "Content-Type": mime,
-      "Content-Length": String(size),
-      "Accept-Ranges": "bytes",
-      "Cache-Control": "no-cache",
-    },
-  });
 }
 
 function createMenu(recentProjects = loadRecentProjects()) {
@@ -547,6 +489,7 @@ function realPathOrAbsolute(target) {
 function mediaAllowed(filePath) {
   return mediaPathAllowed(filePath, {
     sessionRoot,
+    studioLibraryRoot: studioLibraryDir(),
     grants: pathGrants,
     realPath(target) {
       try {
@@ -792,7 +735,14 @@ app.whenReady().then(() => {
   migrateSettings();
   restrictSettingsPermissions();
 
-  sidecar = new Sidecar({ settingsDir: settingsDir(), packaged: app.isPackaged });
+  sidecar = new Sidecar({
+    settingsDir: settingsDir(),
+    packaged: app.isPackaged,
+    // The studio library lives in the user's content tree, not dot-config:
+    // <Content_Creation>/Projects/Library. Resolved from the app root so the
+    // dev-container mount and a packaged build both locate the checkout.
+    studioLibraryDir: studioLibraryDir(),
+  });
   sidecar.start();
   sidecar.onEvent((event, payload) => {
     if (event === "director-progress") {

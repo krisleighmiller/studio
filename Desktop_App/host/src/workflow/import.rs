@@ -13,7 +13,7 @@ use crate::script::{aspect_from_text, extract_scenes, ParsedScene};
 use crate::workflow::report::{project_report, ProjectReport};
 use crate::workflow::state::{
     character_id, role_for_shot_id, AssetRecord, AssetRole, AssetStatus, CharacterRecord,
-    ProjectState, ScriptRecord, StageStatus, TakeRecord, TakeStatus, STATE_REL, WORKFLOW_VERSION,
+    ProjectState, ScriptRecord, StageStatus, TakeRecord, TakeStatus, WORKFLOW_VERSION,
 };
 use regex::Regex;
 use std::collections::HashSet;
@@ -208,7 +208,7 @@ fn load_plan_state(root: &Path) -> Option<PlanState> {
 }
 
 pub(crate) fn load_previous(root: &Path) -> Option<ProjectState> {
-    let path = resolve_project_path(root, STATE_REL, crate::project_path::PathIntent::Read).ok()?;
+    let path = resolve_project_path(root, crate::workflow::state::state_rel_for(root), crate::project_path::PathIntent::Read).ok()?;
     fs::read_to_string(path)
         .ok()
         .and_then(|t| ProjectState::from_json(&t).ok())
@@ -1792,7 +1792,7 @@ pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
     let _lock = lock_project(project_root)?;
     let path = resolve_project_path(
         project_root,
-        STATE_REL,
+        crate::workflow::state::state_rel_for(project_root),
         crate::project_path::PathIntent::Read,
     )?;
     if path.is_file() {
@@ -1849,7 +1849,7 @@ pub fn load_or_import(project_root: &Path) -> Result<ImportResult, String> {
 pub(crate) fn lock_project(project_root: &Path) -> Result<fs::File, String> {
     let path = resolve_project_path(
         project_root,
-        "Preproduction/.media-spend.lock",
+crate::workflow::state::lock_rel_for(project_root),
         crate::project_path::PathIntent::Write,
     )?;
     if let Some(parent) = path.parent() {
@@ -1874,7 +1874,7 @@ pub(crate) fn persist_state_locked(
 ) -> Result<PathBuf, String> {
     let path = resolve_project_path(
         project_root,
-        STATE_REL,
+        crate::workflow::state::state_rel_for(project_root),
         crate::project_path::PathIntent::Write,
     )?;
     if let Some(parent) = path.parent() {
@@ -2030,7 +2030,7 @@ pub fn save_project(project_root: &Path, mut state: ProjectState) -> Result<Impo
 /// Keep ordinary load/save synchronization unchanged for every other workflow.
 pub(super) fn load_for_assembly(project_root: &Path) -> Result<ProjectState, String> {
     let _lock = lock_project(project_root)?;
-    let path = resolve_project_path(project_root, STATE_REL, crate::project_path::PathIntent::Read)?;
+    let path = resolve_project_path(project_root, crate::workflow::state::state_rel_for(project_root), crate::project_path::PathIntent::Read)?;
     let text = fs::read_to_string(&path)
         .map_err(|e| format!("could not read saved assembly state {}: {e}", path.display()))?;
     let parsed: serde_json::Value = serde_json::from_str(&text)

@@ -158,7 +158,7 @@ fn generate(
     project_root: Option<&str>,
     app: &HostCtx,
 ) -> Result<String, String> {
-    let root = crate::session::command_root(project_root)?;
+    let root = crate::workflow::generate_image::studio_command_root(project_root, app)?;
     let model = arg_str(args, &["model"]).ok_or_else(|| "missing model".to_string())?;
     let api_id = arg_str(args, &["api_id", "apiId"]);
     let api = resolve_api_for_model(app, &model, api_id.as_deref())?;
@@ -533,7 +533,7 @@ pub fn recovery_status(
     job_id: &str,
     app: &HostCtx,
 ) -> Result<String, String> {
-    let root = crate::session::command_root(project_root)?;
+    let root = crate::workflow::generate_image::studio_command_root(project_root, app)?;
     recovery_status_with(&root, job_id, |provider, prediction_id| {
         let api = resolve_api_for_prediction(app, prediction_id)?;
         if api.kind != provider {

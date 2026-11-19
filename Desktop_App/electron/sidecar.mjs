@@ -57,10 +57,12 @@ export class Sidecar {
   #packaged = false;
   #bin = null;
   #binMtime = 0;
+  #studioLibraryDir = "";
 
-  constructor({ settingsDir, packaged = false }) {
+  constructor({ settingsDir, packaged = false, studioLibraryDir = "" }) {
     this.#settingsDir = settingsDir;
     this.#packaged = packaged;
+    this.#studioLibraryDir = studioLibraryDir;
   }
 
   start() {
@@ -79,6 +81,9 @@ export class Sidecar {
       env: {
         ...process.env,
         WORKBENCH_SETTINGS_DIR: this.#settingsDir,
+        ...(this.#studioLibraryDir
+          ? { WORKBENCH_STUDIO_LIBRARY_DIR: this.#studioLibraryDir }
+          : {}),
       },
     });
     this.#child = child;

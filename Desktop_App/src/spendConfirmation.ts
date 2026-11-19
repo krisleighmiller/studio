@@ -44,6 +44,9 @@ export function createSpendConfirmationHandler(deps: {
   projectEpoch?: () => number;
   ownerIsCurrent?: (ownerRequestId: string | undefined) => boolean;
   authorizeWorkflowMedia?: (request: { ownerRequestId?: string; operation: string; args: Record<string, unknown> }) => boolean | undefined;
+  /** Return true when a prior approval card already consented to this exact
+   *  paid operation (single-consent flow); skips the second dialog. */
+  autoConfirm?: (request: { projectRoot: string; operation: string; provider: string; model: string }) => boolean;
   status: (message: string) => void;
   onSubmitted?: (result: unknown, isCurrent: () => boolean, ownerRequestId?: string) => void | Promise<void>;
   onProgress?: (isCurrent: () => boolean) => void | Promise<void>;
@@ -86,7 +89,10 @@ export function createSpendConfirmationHandler(deps: {
       const scoped = request.workflowBound && isCurrent()
         ? deps.authorizeWorkflowMedia?.({ ownerRequestId: request.ownerRequestId, operation, args })
         : undefined;
-      const accepted = scoped === undefined ? await deps.ask(
+      // Single consent: the operation approval card already disclosed the
+      // provider, model and charges for this exact request; do not ask twice.
+      const preauthorized = deps.autoConfirm?.({ projectRoot, operation, provider, model }) === true;
+      const accepted = preauthorized ? true : scoped === undefined ? await deps.ask(
         `${provider} · ${operation} · ${model}\n\nAuthorize this single media generation?`,
         { title: "Confirm paid generation", kind: "warning" },
       ) : scoped;

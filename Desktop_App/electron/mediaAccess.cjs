@@ -79,6 +79,9 @@ function mediaAllowed(filePath, options = {}) {
   if (!resolved) return false;
   if (!MEDIA_EXTENSIONS.has(path.extname(resolved).toLowerCase())) return false;
   if (isSettingsPath(resolved)) return false;
+  // The studio library is always servable: library assets exist with no
+  // project session, so they cannot rely on sessionRoot or dialog grants.
+  if (options.studioLibraryRoot && isInside(options.studioLibraryRoot, resolved)) return true;
   if (options.sessionRoot && isInside(options.sessionRoot, resolved)) return true;
   for (const grant of options.grants || []) {
     if (isInside(grant, resolved)) return true;

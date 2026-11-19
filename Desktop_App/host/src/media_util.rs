@@ -79,11 +79,47 @@ impl MediaRole {
     }
 }
 
+// Library protocol: with no open project session, the operation's own root
+// (e.g. the studio library) authorizes its confined inputs and outputs.
+// Project flows always have a session, so the fallback only ever applies to
+// library operations. On refusal the session error stays authoritative.
+#[cfg(not(test))]
+fn resolve_with_library_fallback(
+    raw: &str,
+    project_root: Option<&str>,
+    intent: crate::project_path::PathIntent,
+    peek: bool,
+) -> Result<PathBuf, String> {
+    let session_result = if peek {
+        crate::session::peek_authorize(raw, intent)
+    } else {
+        crate::session::authorize(raw, intent)
+    };
+    match session_result {
+        Ok(path) => return Ok(path),
+        Err(session_error) => {
+            if let Some(root) = project_root
+                .map(str::trim)
+                .filter(|root| !root.is_empty())
+            {
+                return crate::project_path::resolve(raw, Some(root), intent)
+                    .map(|path| path.into_path_buf())
+                    .map_err(|_| session_error);
+            }
+            return Err(session_error);
+        }
+    }
+}
+
 pub fn resolve_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
     #[cfg(not(test))]
     {
-        let _ = project_root;
-        return crate::session::authorize(raw, crate::project_path::PathIntent::Read);
+        return resolve_with_library_fallback(
+            raw,
+            project_root,
+            crate::project_path::PathIntent::Read,
+            false,
+        );
     }
     #[cfg(test)]
     {
@@ -96,8 +132,12 @@ pub fn resolve_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, St
 pub fn peek_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
     #[cfg(not(test))]
     {
-        let _ = project_root;
-        return crate::session::peek_authorize(raw, crate::project_path::PathIntent::Read);
+        return resolve_with_library_fallback(
+            raw,
+            project_root,
+            crate::project_path::PathIntent::Read,
+            true,
+        );
     }
     #[cfg(test)]
     {
@@ -110,8 +150,12 @@ pub fn peek_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, Strin
 pub fn resolve_write_path(raw: &str, project_root: Option<&str>) -> Result<PathBuf, String> {
     #[cfg(not(test))]
     {
-        let _ = project_root;
-        return crate::session::authorize(raw, crate::project_path::PathIntent::Write);
+        return resolve_with_library_fallback(
+            raw,
+            project_root,
+            crate::project_path::PathIntent::Write,
+            false,
+        );
     }
     #[cfg(test)]
     {

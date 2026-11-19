@@ -142,6 +142,26 @@ pub fn current() -> Option<DirectorAction> {
         .map(|item| item.action.clone())
 }
 
+/// Snapshot a pending approval (action + its root) without consuming it.
+/// Used by cancellation to settle the run's staged jobs when the approval
+/// is denied, so orphaned pending jobs never linger.
+pub fn peek(id: &str) -> Option<PendingApproval> {
+    let mut guard = store().lock().expect("pending store");
+    let now = Instant::now();
+    guard
+        .items
+        .retain(|_, item| now.duration_since(item.at) < TTL);
+    guard.items.get(id).map(|item| PendingApproval {
+        action: item.action.clone(),
+        project_root: item.project_root.clone(),
+        context: item.context.clone(),
+        input_fingerprints: item.input_fingerprints.clone(),
+        publication_generation: 0,
+        workflow_key: item.workflow_key.clone(),
+        workflow_continuation: item.workflow_continuation,
+    })
+}
+
 pub fn cancel_all() {
     let mut guard = store().lock().expect("pending store");
     guard.items.clear();

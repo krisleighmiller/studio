@@ -15,7 +15,7 @@ export function approveExactOperation(text: string): Promise<boolean> {
     dialog.setAttribute('aria-labelledby', 'studio-operation-title');
     const title = document.createElement('h2'); title.id = 'studio-operation-title'; title.textContent = 'Authorize exact operation';
     const help = document.createElement('p');
-    help.textContent = 'Inspect these host-prepared inputs. This one-use approval cannot edit them. Deny, then prepare again to change the prompt. Paid media requires a separate confirmation; approving this card alone is not spending consent. The host refuses expired or previously consumed IDs.';
+    help.textContent = 'Inspect these host-prepared inputs. This one-use approval cannot edit them. Deny, then prepare again to change the prompt. When this card names a provider and model, approving authorizes that exact paid request; no separate charge confirmation will follow. The host refuses expired or previously consumed IDs.';
     const body = document.createElement('pre'); body.textContent = text.replace(/\[\[workbench_approve:[A-Za-z0-9]+\]\]/g, '');
     const deny = document.createElement('button'); deny.textContent = 'Deny operation';
     const approve = document.createElement('button'); approve.textContent = 'Approve exact operation';

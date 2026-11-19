@@ -63,6 +63,9 @@ import {
   handleGenerateIntent,
   ensureSurfaceHostWithState,
   fetchStudioLibraryState,
+  currentStudioLibraryRoot,
+  consumeSpendPreauthorization,
+  setStudioProgressNote,
 } from "./workflowDesk";
 import { renderFrontDoorPanel, type FrontDoorPanelId } from "./studio/frontDoor";
 import type { GenerateIntent } from "./studio/surfaces/surfaceIntents";
@@ -4970,7 +4973,12 @@ async function bindMenuAndProgress(): Promise<void> {
   const confirmMediaSpend = createSpendConfirmationHandler({
     invoke,
     ask,
-    projectRoot: () => projectRoot,
+    // Studio (no-project) operations carry the library root in the spend
+    // event; without a project the library root is the current scope.
+    projectRoot: () => projectRoot ?? currentStudioLibraryRoot(),
+    // Single consent: an accepted approval card that disclosed the paid route
+    // already authorized this exact operation; do not ask the user twice.
+    autoConfirm: ({ projectRoot: root, operation }) => consumeSpendPreauthorization(root, operation),
     projectEpoch: () => projectEpoch,
     ownerIsCurrent: (id) => { if (id && modelSheetMediaOwners.get(id)?.isCurrent()) return true; const owner = id ? deferredMediaOwners.get(id) : undefined; return Boolean(owner && chatTabs.includes(owner.tab) && owner.serial === directorPresentationSerial && owner.epoch === projectEpoch && owner.root === projectRoot && !projectTransitionInFlight && !directorStopRequested); },
     authorizeWorkflowMedia: ({ ownerRequestId, operation, args }) => ownerRequestId
@@ -4997,6 +5005,15 @@ async function bindMenuAndProgress(): Promise<void> {
     onMenu: (id) => handleMenuAction(id),
     onSpendConfirmationRequired: (payload) => { void confirmMediaSpend(payload); },
     onDirectorProgress: (message) => {
+      // Studio front door: surface the note in the Generate panel's progress
+      // strip; the legacy receipt correlation below is workflow-mode only.
+      if (interfaceMode === "studio") {
+        const note = typeof message === "object" && message !== null && "message" in message && typeof (message as { message?: unknown }).message === "string"
+          ? (message as { message: string }).message
+          : typeof message === "string" ? message : null;
+        if (note) setStudioProgressNote(note);
+        return;
+      }
       const operation = directorOperation;
       if (!operation || !ownsDirectorPresentation(operation) || !operation.progressOpen || directorStopRequested) return;
       // Uncorrelated legacy strings cannot be safely assigned to this request.

@@ -2,6 +2,8 @@ import { orderedReferencePicker } from "../orderedReferencePicker";
 import { buildGenerateModel } from "./surfaceModels";
 import { getSurfaceHost } from "./session";
 import { block, queueLookThumbs } from "./shared";
+import { currentStudioProgressNote } from "../../workflowDesk";
+import { openImagePreviewForAsset } from "./imagePreview";
 import type { GenerateIntent } from "./surfaceIntents";
 
 const ASPECT_CHOICES = [
@@ -208,6 +210,34 @@ function resultsCanvas(
   const heading = document.createElement("h3");
   heading.textContent = "Results";
   canvas.append(heading);
+  // In-flight runs: pending/running generated_image jobs from the last 10
+  // minutes plus the latest host progress note, so a submitted generation
+  // visibly shows work. Stale pending jobs (attempts that failed before
+  // dispatch and were never settled) must not masquerade as live work.
+  const tenMinutes = 10 * 60 * 1000;
+  const pending = (getSurfaceHost().state?.jobs ?? []).filter(
+    (job) =>
+      job.kind === "generated_image" &&
+      (job.status === "pending" || job.status === "running") &&
+      typeof job.created_at === "string" &&
+      Date.now() - Date.parse(job.created_at) < tenMinutes,
+  );
+  const note = currentStudioProgressNote();
+  if (pending.length || note) {
+    const strip = document.createElement("div");
+    strip.className = "workflow-generate-progress";
+    const line = document.createElement("p");
+    line.dataset.generateProgress = "";
+    line.textContent = note ?? `${pending.length} image${pending.length === 1 ? "" : "s"} generating…`;
+    strip.append(line);
+    for (const job of pending.slice(0, 4)) {
+      const chip = document.createElement("span");
+      chip.className = "workflow-generate-progress-chip";
+      chip.textContent = job.status === "running" ? "running" : "queued";
+      strip.append(chip);
+    }
+    canvas.append(strip);
+  }
   if (!model.results.length) {
     canvas.append(
       block(
@@ -233,6 +263,10 @@ function resultsCanvas(
       const image = document.createElement("img");
       image.alt = item.label;
       image.dataset.lookPath = item.path ?? "";
+      if (item.path) {
+        image.title = "Click to view the full image";
+        image.addEventListener("click", () => openImagePreviewForAsset(item.path ?? ""));
+      }
       if (!item.path) image.alt = "Could not load generated image";
       const caption = document.createElement("figcaption");
       caption.textContent = item.label;

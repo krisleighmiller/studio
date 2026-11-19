@@ -264,8 +264,12 @@ fn studio_generation_needs_no_project_session() {
             match executed {
                 Ok(_reply) => {}
                 Err(error) => {
+                    // "open a project" is matched case-insensitively: the host
+                    // has two phrasings ("Open a project first." and
+                    // "open a project before using a file path") and either
+                    // means execution wrongly demanded a project session.
                     assert!(
-                        !error.contains("Open a project first.")
+                        !error.to_lowercase().contains("open a project")
                             && !error.contains("project changed after this approval"),
                         "studio execution must not require a project session: {error}"
                     );
@@ -348,7 +352,7 @@ fn studio_reference_lanes_prepare_and_execute_without_a_project() {
         match executed {
             Ok(_reply) => {}
             Err(error) => assert!(
-                !error.contains("Open a project first.") && !error.contains("project changed after this approval"),
+                !error.to_lowercase().contains("open a project") && !error.contains("project changed after this approval"),
                 "studio {capability} execution must not require a project session: {error}"
             ),
         }

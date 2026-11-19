@@ -1,6 +1,7 @@
 import { renderGenerateStage } from "./surfaces/generateStage";
 import { getSurfaceHost } from "./surfaces/session";
 import { block, queueLookThumbs } from "./surfaces/shared";
+import { openImagePreviewForAsset } from "./surfaces/imagePreview";
 import type { GenerateIntent } from "./surfaces/surfaceIntents";
 
 /**
@@ -85,6 +86,9 @@ function libraryPanel(): HTMLElement {
     const image = document.createElement("img");
     image.alt = asset.path;
     image.dataset.lookPath = asset.path;
+    image.title = "Click to view the full image";
+    // Full-image preview: click the thumbnail to see the whole picture.
+    image.addEventListener("click", () => openImagePreviewForAsset(asset.path));
     const name = document.createElement("div");
     name.className = "frontdoor-card-name";
     name.textContent = asset.path.split("/").pop() ?? asset.path;

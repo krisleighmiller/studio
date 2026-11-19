@@ -20,15 +20,68 @@ use std::path::{Path, PathBuf};
 /// Project-relative output folder for gate-free generated images.
 pub const GENERATED_IMAGES_DIR: &str = "Preproduction/GeneratedImages";
 
+/// Library layout (Kris's decision, 2026-11-19): the studio library shows
+/// user content only — images in `Images/` — while all internal machinery
+/// (state file, project lock) lives in the hidden `.studio/` folder. The
+/// project-shaped `Preproduction/` layout never applies to the library.
+pub const LIBRARY_IMAGES_DIR: &str = "Images";
+pub const LIBRARY_STATE_REL: &str = ".studio/state.json";
+pub const LIBRARY_LOCK_REL: &str = ".studio/lock";
+
+/// True when this root is the configured studio library root.
+pub fn is_studio_root(root: &Path) -> bool {
+    std::env::var("WORKBENCH_STUDIO_LIBRARY_DIR")
+        .ok()
+        .map(|v| Path::new(v.trim()) == root)
+        .unwrap_or(false)
+}
+
+/// Output folder for generated images, per root: `Images/` for the library,
+/// the project-shaped folder for everything else.
+pub fn images_dir_for(root: &Path) -> &'static str {
+    if is_studio_root(root) {
+        LIBRARY_IMAGES_DIR
+    } else {
+        GENERATED_IMAGES_DIR
+    }
+}
+
 /// Studio-level library root used when no project is open. Assets live here
-/// forever, independent of any project. The sidecar settings dir is
-/// `<userData>/config` and userData's own name (the app name) is on the
-/// sensitive-path deny list, so the library sits beside userData:
-/// `<userData>/../studio`.
+/// forever, independent of any project. Kris's chosen location is
+/// <Content_Creation>/Projects/Library; Electron passes it via
+/// WORKBENCH_STUDIO_LIBRARY_DIR (validated against the sensitive-path deny
+/// list). The settings-derived fallback (<userData>/../studio) only covers
+/// test environments where the env var is unset.
 pub fn studio_root(ctx: &crate::ctx::HostCtx) -> PathBuf {
+    if let Ok(configured) = std::env::var("WORKBENCH_STUDIO_LIBRARY_DIR") {
+        let configured = configured.trim();
+        if !configured.is_empty() {
+            let root = PathBuf::from(configured);
+            if crate::project_path::reject_sensitive(&root).is_ok() && root.is_absolute() {
+                return root;
+            }
+        }
+    }
     let settings = ctx.settings_dir();
     let user_data = settings.parent().unwrap_or(&settings);
     user_data.parent().unwrap_or(user_data).join("studio")
+}
+
+/// Command root for a studio operation. Library operations have no project
+/// session, so a supplied root equal to the studio library root is authorized
+/// directly; every other path keeps `session::command_root` unchanged
+/// (project flows still require an open project that matches).
+pub fn studio_command_root(
+    supplied: Option<&str>,
+    app: &crate::ctx::HostCtx,
+) -> Result<PathBuf, String> {
+    if let Some(root) = supplied.map(str::trim).filter(|value| !value.is_empty()) {
+        let studio = studio_root(app);
+        if Path::new(root) == studio {
+            return Ok(studio);
+        }
+    }
+    crate::session::command_root(supplied)
 }
 
 /// Load (or initialize) the studio library state at the given root. The
@@ -38,21 +91,40 @@ pub fn ensure_studio_state(root: &Path) -> Result<ProjectState, String> {
     fs::create_dir_all(root.join("Preproduction"))
         .map_err(|error| format!("could not create studio library folder: {error}"))?;
     let state_path = crate::project_path::resolve(
-        crate::workflow::state::STATE_REL,
+        crate::workflow::state::state_rel_for(root),
         Some(&root.to_string_lossy()),
         crate::project_path::PathIntent::Read,
     )
     .map_err(|error| error.to_string())?
     .into_path_buf();
     if state_path.is_file() {
-        return import::load_state(root);
+        let mut loaded = import::load_state(root)?;
+        // Settle staged jobs whose run can never complete (denied, expired or
+        // undispatched requests) so the library never accumulates zombies.
+        if sweep_stale_pending(root, &mut loaded) {
+            import::save_project(root, loaded).map_err(|error| error.to_string())?;
+            return import::load_state(root);
+        }
+        return Ok(loaded);
     }
     let state = ProjectState::from_json(
         &serde_json::json!({ "version": 2, "scenes": [] }).to_string(),
     )
     .map_err(|error| error.to_string())?;
-    import::persist_state(root, &state).map_err(|error| error.to_string())?;
-    Ok(state)
+    // The host runs commands on concurrent workers, so first use can race:
+    // two commands can both see no state file and both try to create it. Take
+    // the project lock across check-and-create; a losing racer finds the file
+    // present and skips its write instead of failing the revision guard.
+    {
+        let lock = import::lock_project(root).map_err(|error| error.to_string())?;
+        if !state_path.is_file() {
+            import::persist_state_locked(root, &state).map_err(|error| error.to_string())?;
+        }
+        drop(lock);
+    }
+    // Reload so the returned state carries the on-disk revision; mutating and
+    // saving a caller-held create-branch state would fail the revision guard.
+    import::load_state(root)
 }
 
 /// Aspect ratios the Generate composer offers. The host validates against
@@ -208,12 +280,13 @@ fn prepare_inner(
     let run_id = format!("run_{run_seq}");
     let stem = slug(title.unwrap_or("image"));
     let stem = if stem.is_empty() { "image".to_string() } else { stem };
+    let images_dir = images_dir_for(root);
     let rels: Vec<String> = (1..=count)
-        .map(|index| format!("{GENERATED_IMAGES_DIR}/{stem}_{run_seq}_{index}.png"))
+        .map(|index| format!("{images_dir}/{stem}_{run_seq}_{index}.png"))
         .collect();
     let root_string = root.to_string_lossy();
     let dir = crate::project_path::resolve(
-        GENERATED_IMAGES_DIR,
+        images_dir_for(root),
         Some(root_string.as_ref()),
         crate::project_path::PathIntent::Write,
     )
@@ -278,8 +351,9 @@ fn prepare_inner(
         crate::specialists::resolve_still_image_model(&context, &first)?;
     }
     let mut card = format!(
-        "Generate images · {count} still{} · {aspect_ratio}\nHost will save under `{GENERATED_IMAGES_DIR}/`.\n",
-        if count == 1 { "" } else { "s" }
+        "Generate images · {count} still{} · {aspect_ratio}\nHost will save under `{}`.\n",
+        if count == 1 { "" } else { "s" },
+        images_dir_for(root)
     );
     if let Some(title) = title.filter(|t| !t.trim().is_empty()) {
         card.push_str(&format!("Title: {title}\n"));
@@ -319,11 +393,11 @@ fn prepare_inner(
     }
     let note = if approval_app.is_some() {
         format!(
-            "{count} images ready under `{GENERATED_IMAGES_DIR}/`. Use the one-time approval button; chat text cannot approve it."
+            "{count} images ready under `{images_dir}/`. Use the one-time approval button; chat text cannot approve it."
         )
     } else {
         format!(
-            "{count} images prepared under `{GENERATED_IMAGES_DIR}/`; no provider operation is authorized here."
+            "{count} images prepared under `{images_dir}/`; no provider operation is authorized here."
         )
     };
     Ok((card, note))
@@ -382,10 +456,11 @@ pub fn prepare_with_host(
 fn is_generated_image_rel(rel: &str) -> bool {
     let normalized = rel.replace('\\', "/");
     let parts: Vec<_> = normalized.split('/').collect();
-    parts.len() == 3
+    (parts.len() == 3
         && parts[0] == "Preproduction"
         && parts[1] == "GeneratedImages"
-        && is_image_path(Path::new(parts[2]))
+        && is_image_path(Path::new(parts[2])))
+        || (parts.len() == 2 && parts[0] == LIBRARY_IMAGES_DIR && is_image_path(Path::new(parts[1])))
 }
 
 fn actual_path(root: &Path, requested: &str) -> Option<PathBuf> {
@@ -570,6 +645,85 @@ pub fn on_still_failed(project_root: Option<&str>, save_path: &str, error: &str)
     } else {
         None
     }
+}
+
+/// Settle the staged jobs of a run that terminated BEFORE any provider call
+/// (denied approval card, cancellation, execution failure, spend refusal).
+/// Every termination path must settle its staged jobs — zombie pending jobs
+/// must never accumulate in the library state.
+pub fn fail_run_jobs(root: Option<&str>, output_rels: &[String], error: &str) {
+    let Some(root) = root.filter(|s| !s.trim().is_empty()) else { return };
+    let root_path = Path::new(root);
+    let Ok(mut state) = import::load_state(root_path) else { return };
+    let mut failed = false;
+    for job in state.jobs.iter_mut() {
+        if job.kind == "generated_image"
+            && job.status == JobStatus::Pending
+            && job
+                .output_path
+                .as_deref()
+                .is_some_and(|path| output_rels.iter().any(|rel| same_path_stem(path, rel)))
+        {
+            job.fail(None, error.to_string());
+            failed = true;
+        }
+    }
+    if failed {
+        let _ = import::save_project(root_path, state);
+    }
+}
+
+/// Batch output rels of a prepared action, for run settlement.
+pub fn action_batch_output_rels(action: &DirectorAction) -> Vec<String> {
+    action
+        .inputs
+        .get("batch")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("output_path")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fail stale staged jobs whose run can never settle: pending generated_image
+/// jobs older than 30 minutes whose output file does not exist. This is the
+/// safety net for termination paths that never reach the host (window closed,
+/// approval expired, spend refused); the known paths settle immediately.
+/// Returns true when the state changed.
+pub fn sweep_stale_pending(root: &Path, state: &mut ProjectState) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let cutoff = crate::workflow::state::format_unix_utc(now.saturating_sub(30 * 60));
+    let mut changed = false;
+    for job in state.jobs.iter_mut() {
+        let stale = job.kind == "generated_image"
+            && job.status == JobStatus::Pending
+            && job
+                .created_at
+                .as_deref()
+                .is_some_and(|at| at < cutoff.as_str())
+            && job
+                .output_path
+                .as_deref()
+                .is_some_and(|rel| !actual_path(root, rel).is_some_and(|p| p.is_file()));
+        if stale {
+            job.fail(
+                None,
+                "Generation never ran: the request was not dispatched or the app stopped before the provider call.".to_string(),
+            );
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Remove one generated image asset. The file moves to the project trash;

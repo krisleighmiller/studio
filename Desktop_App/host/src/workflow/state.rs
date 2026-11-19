@@ -14,6 +14,26 @@ use std::collections::BTreeMap;
 pub const WORKFLOW_VERSION: u32 = 2;
 pub const STATE_REL: &str = "Preproduction/workflow_state.json";
 
+/// Resolve the state-file location for this root. The studio library uses a
+/// hidden `.studio/state.json` (Kris's decision 2026-11-19: config files are
+/// never user-visible); projects keep the project-shaped layout.
+pub fn state_rel_for(root: &std::path::Path) -> &'static str {
+    if crate::workflow::generate_image::is_studio_root(root) {
+        crate::workflow::generate_image::LIBRARY_STATE_REL
+    } else {
+        STATE_REL
+    }
+}
+
+/// Resolve the project-lock location for this root (hidden for the library).
+pub fn lock_rel_for(root: &std::path::Path) -> &'static str {
+    if crate::workflow::generate_image::is_studio_root(root) {
+        crate::workflow::generate_image::LIBRARY_LOCK_REL
+    } else {
+        "Preproduction/.media-spend.lock"
+    }
+}
+
 /// Explicit creative review, not execution consent or sketch approval.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenderedSequenceReview {

@@ -982,7 +982,10 @@ async function authorizeStudioOperation(text: string, request: RequestReceipt | 
     const accepted = await approveExactOperation(pendingText);
     if (!current()) return;
     if (!accepted) { await stop(); return; }
-    feedback("pending", "Operation approved once; working or waiting for separate paid-media confirmation. Use Stop to cancel further work.");
+    feedback("pending", "Operation approved once; executing. Use Stop to cancel further work.");
+    // Single consent: the approval card above disclosed the provider route
+    // and charges for this operation; its acceptance covers the paid call.
+    recordSpendPreauthorization(currentStudioLibraryRoot(), "atlas_generate_image");
     // Exact-operation approval can keep the host call open while a native job
     // changes state. Observe that authoritative record without requiring Jobs
     // to be opened or a separate paid-media confirmation to start polling.
@@ -1080,7 +1083,40 @@ export function lastStudioActionError(): string | null {
 /** Read the studio library (assets independent of any project). */
 export async function fetchStudioLibraryState(): Promise<ProjectState | null> {
   const result = await invoke<{ state?: ProjectState | null; root?: string }>("studio_library_state", {});
+  if (result?.root && typeof result.root === "string") studioLibraryRoot = result.root;
   return result?.state ?? null;
+}
+
+/** Studio library root as reported by the host; null before the first read. */
+let studioLibraryRoot: string | null = null;
+export function currentStudioLibraryRoot(): string | null {
+  return studioLibraryRoot;
+}
+
+/** Single-consent record: an accepted approval card already disclosed the
+ *  paid route for this operation; the spend dialog must not ask again. */
+let spendPreauthorization: { root: string; operation: string; at: number } | null = null;
+export function recordSpendPreauthorization(root: string | null, operation: string): void {
+  spendPreauthorization = root ? { root, operation, at: Date.now() } : null;
+}
+export function consumeSpendPreauthorization(root: string, operation: string): boolean {
+  if (!spendPreauthorization) return false;
+  if (Date.now() - spendPreauthorization.at > 5 * 60 * 1000) { spendPreauthorization = null; return false; }
+  if (spendPreauthorization.root !== root || spendPreauthorization.operation !== operation) return false;
+  spendPreauthorization = null;
+  return true;
+}
+
+/** Latest host progress note for the front door (studio) surfaces. */
+let studioProgressNote: string | null = null;
+export function setStudioProgressNote(note: string): void {
+  studioProgressNote = note;
+  document.querySelectorAll("[data-generate-progress]").forEach((element) => {
+    if (element.textContent !== note) element.textContent = note;
+  });
+}
+export function currentStudioProgressNote(): string | null {
+  return studioProgressNote;
 }
 
 function syncSurfaceHost(stateOverride: ProjectState | null = null): void {
@@ -1405,7 +1441,7 @@ function emitSelection(): void {
 function resolveProjectPath(raw: string | null | undefined): string | null {
   if (!raw) return null;
   if (raw.startsWith("/") || /^[A-Za-z]:[\\/]/.test(raw)) return raw;
-  const root = hooks?.projectRoot();
+  const root = hooks?.projectRoot() ?? currentStudioLibraryRoot();
   if (!root) return raw;
   return `${root.replace(/\/+$/, "")}/${raw.replace(/^\/+/, "")}`;
 }

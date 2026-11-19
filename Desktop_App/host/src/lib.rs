@@ -233,7 +233,14 @@ pub fn dispatch(
         }
         "confirm_spend" => Err("Project accounting has been retired.".into()),
         "confirm_unbounded_spend" => {
-            let root = crate::session::command_root(opt_string(args, "projectRoot").as_deref())?;
+            // Studio/library spend confirmations arrive with the library root
+            // and no open project session; the studio-aware resolver
+            // authorizes exactly that root, everything else defers to the
+            // session exactly as before.
+            let root = crate::workflow::generate_image::studio_command_root(
+                opt_string(args, "projectRoot").as_deref(),
+                app,
+            )?;
             let provider = arg_string(args, "provider")?;
             let category = arg_string(args, "category")?;
             let operation = arg_string(args, "operation")?;
@@ -533,7 +540,20 @@ pub fn dispatch(
         "director_cancel" => {
             if let Some(id) = args.get("id") {
                 let id = id.as_str().filter(|id| !id.is_empty()).ok_or("Cancellation needs an exact operation ID")?;
+                // Capture the parked action before cancellation so its staged
+                // jobs can be settled: a denied/cancelled run must fail its
+                // pending generated_image jobs, not leave them as zombies.
+                let parked = pending::peek(id);
                 let cancelled = pending::cancel_operation(id);
+                if cancelled {
+                    if let Some(parked) = parked {
+                        crate::workflow::generate_image::fail_run_jobs(
+                            parked.project_root.as_ref().and_then(|root| root.to_str()),
+                            &crate::workflow::generate_image::action_batch_output_rels(&parked.action),
+                            "Operation was denied or cancelled; no provider request was sent.",
+                        );
+                    }
+                }
                 return Ok(json!({ "cancelled": cancelled }));
             }
             app.cancel_director();
